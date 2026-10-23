@@ -569,7 +569,7 @@ fun AIChatPanel(
     val sessionLastInputTokens = currentSession?.lastInputTokens ?: 0
     val contextUsages by viewModel.contextUsages.collectAsStateWithLifecycle()
     val messagesReady = messagesState.loaded && messagesState.sessionId == currentSessionId
-    val runningTool by viewModel.runningTool.collectAsStateWithLifecycle()
+    val activeRunningToolName by viewModel.activeRunningToolName.collectAsStateWithLifecycle(initialValue = null)
     val isCompacting by viewModel.isCompacting.collectAsStateWithLifecycle()
     val retryState by viewModel.retryState.collectAsStateWithLifecycle()
     val keySwitchState by viewModel.keySwitchState.collectAsStateWithLifecycle()
@@ -578,15 +578,11 @@ fun AIChatPanel(
     val reasoningTiming by viewModel.reasoningTiming.collectAsStateWithLifecycle()
     val preparingTool by viewModel.preparingTool.collectAsStateWithLifecycle()
     // 等待模型或工具执行时的状态文案：
-    // 1. 若当前有正在执行的工具（runningTool）或模型正在准备的工具（preparingTool，工具名先到参数还在流式），
+    // 1. 若当前有正在执行的工具（activeRunningToolName）或模型正在准备的工具（preparingTool，工具名先到参数还在流式），
     //    直接说清在做什么（「正在读取文件」、「正在编辑文件」等，见 toolRunningLabelRes）；
     // 2. 否则（如等待模型首字吐出、纯思考间隙）兜底显示「正在思考」。
-    // derivedStateOf 隔离：runningTool 是流式输出每 chunk 更新的 List，若在组合期直读，
-    // 工具每吐一行都会让整个 AIChatPanel（含 ChatHeader/LazyColumn 参数区）全量重组；
-    // 包一层后只有「当前工具名」真正变化（通常一次工具调用只变一两次）才触发重组。
-    val activeToolName by remember {
-        derivedStateOf { runningTool.lastOrNull()?.toolName?.takeIf { it.isNotBlank() } ?: preparingTool }
-    }
+    // activeRunningToolName 已按工具名 distinct；实时输出只在对应工具卡片内订阅。
+    val activeToolName = activeRunningToolName ?: preparingTool
     val thinkingLabel = activeToolName?.let { stringResource(toolRunningLabelRes(it)) }
         ?: stringResource(R.string.chat_status_thinking)
     val pendingPermission by viewModel.pendingToolPermission.collectAsStateWithLifecycle()
@@ -686,8 +682,6 @@ fun AIChatPanel(
     // 思考卡片的展开态，同款快照。
     val reasoningExpansionOverrides = viewModel.reasoningExpansionOverrides
     val reasoningOverrideSnapshot by remember { derivedStateOf { reasoningExpansionOverrides.toMap() } }
-    // 正在执行的工具 id 集合：只让集合内容参与 remember key，避免实时输出逐字刷新导致整表重建。
-    val runningToolIds by remember { derivedStateOf { runningTool.mapTo(HashSet()) { it.messageId } } }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val keyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
@@ -1297,9 +1291,13 @@ fun AIChatPanel(
                 )
             }
             group != null -> {
+                val groupToolIds = remember(group) { group.mapTo(HashSet()) { it.id } }
+                val groupRunning by remember(groupToolIds) {
+                    viewModel.hasRunningTool(groupToolIds)
+                }.collectAsStateWithLifecycle(initialValue = false)
                 ToolCallGroupHeader(
                     count = group.size,
-                    running = group.any { it.id in runningToolIds || it.isToolRunning(null) },
+                    running = groupRunning || group.any { it.isToolRunning(null) },
                     expanded = item.groupExpanded,
                     onToggle = {
                         viewModel.setToolExpanded(item.key, !item.groupExpanded)
@@ -1313,12 +1311,10 @@ fun AIChatPanel(
                 ) {
                     Column {
                         group.forEach { member ->
-                            // derivedStateOf 按 id 隔离：工具实时输出每个 chunk 都换新 List，
-                            // 直读会让全部可见 item 组合失效重跑；包一层后重算只影响
-                            // 本条 text 真变了的那一个 item（正在流式输出的工具行）。
+                            // 每条工具行只订阅自己的输出，其他工具的进度不会让它重组。
                             val live by remember(member.id) {
-                                derivedStateOf { runningTool.firstOrNull { it.messageId == member.id }?.text }
-                            }
+                                viewModel.runningToolOutput(member.id)
+                            }.collectAsStateWithLifecycle(initialValue = null)
                             AgentMessageItem(
                                 message = member,
                                 showActions = member.id in actionableMessageIds,
@@ -1339,11 +1335,10 @@ fun AIChatPanel(
             }
             else -> {
                 val message = item.message
-                // 同上：按 id 隔离实时输出订阅，避免 runningTool 每次 chunk 更新
-                // 触发全部可见消息 item 重组（流式时的重组风暴源）。
+                // 同上：实时工具输出订阅下沉到本 item。
                 val live by remember(message.id) {
-                    derivedStateOf { runningTool.firstOrNull { it.messageId == message.id }?.text }
-                }
+                    viewModel.runningToolOutput(message.id)
+                }.collectAsStateWithLifecycle(initialValue = null)
                 AgentMessageItem(
                     message = message,
                     showActions = message.id in actionableMessageIds,

@@ -877,12 +877,16 @@ class AIAgentViewModel @Inject constructor(
 
 
     private val _runningTools = MutableStateFlow<Map<String, Map<String, RunningToolOutput>>>(emptyMap())
-    val runningTool: StateFlow<List<RunningToolOutput>> = _currentSessionId
-        .flatMapLatest { id ->
-            if (id == null) flowOf(emptyList())
-            else _runningTools.map { it[id]?.values?.toList() ?: emptyList() }
-        }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    private val runningToolSelector = RunningToolFlowSelector(_currentSessionId, _runningTools)
+
+    /** 顶栏只订阅工具名称；同一工具的高频输出不会令整个聊天页重组。 */
+    val activeRunningToolName = runningToolSelector.activeToolName
+
+    /** 工具卡片按 messageId 订阅自己的实时输出。 */
+    fun runningToolOutput(messageId: String) = runningToolSelector.outputFor(messageId)
+
+    /** 工具分组只订阅组内是否仍有运行项。 */
+    fun hasRunningTool(messageIds: Set<String>) = runningToolSelector.anyRunning(messageIds)
 
     /** 添加/更新一个运行中工具（按 msgId 定位，支持多个工具并行）。 */
     private fun setRunningTool(sessionId: String, msgId: String, tool: RunningToolOutput) {
@@ -908,7 +912,7 @@ class AIAgentViewModel @Inject constructor(
      *
      * 长参数工具（写整份文件、长命令）的参数流式可能持续好几秒，期间没有正文也没有思考增量，
      * UI 只能显示笼统的「正在思考」。上游在工具名一出现就上报（[AgentEvent.ToolCallPreparing]），
-     * UI 据此把状态换成具体场景（「正在编辑文件」）。工具真正开始执行后由 [runningTool] 接管。
+     * UI 据此把状态换成具体场景（「正在编辑文件」）。工具真正开始执行后由 [activeRunningToolName] 接管。
      */
     val preparingTool: StateFlow<String?> = _currentSessionId
         .flatMapLatest { id ->
