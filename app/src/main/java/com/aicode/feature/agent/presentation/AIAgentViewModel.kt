@@ -106,6 +106,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.drop
@@ -851,21 +852,25 @@ class AIAgentViewModel @Inject constructor(
     ) { id, limitMap -> id to (limitMap[id] ?: defaultLimit) }
         .flatMapLatest { (id, limit) ->
             if (id == null) flowOf(ChatMessagesState(null, emptyList(), loaded = false))
-            else agentMessageDao.getMessagesBySessionPaged(id, limit).map { list ->
-                ChatMessagesState(
-                    sessionId = id,
-                    messages = list.asSequence()
-                        .filterNot {
+            else {
+                val messageMapper = CachedUiMessageMapper()
+                agentMessageDao.getMessagesBySessionPaged(id, limit)
+                    .distinctUntilChanged()
+                    .map { list ->
+                        val visibleEntities = list.filterNot {
                             it.role == MessageRole.ASSISTANT.name &&
                                 !it.content.hasVisibleContent() &&
                                 it.reasoning.isNullOrEmpty()
                         }
-                        .map { entity -> entity.toUIMessage() }
-                        .toList(),
-                    loaded = true,
-                    hasMore = list.size >= limit,
-                    isLoadingMore = false
-                )
+                        ChatMessagesState(
+                            sessionId = id,
+                            messages = messageMapper.map(id, visibleEntities),
+                            loaded = true,
+                            hasMore = list.size >= limit,
+                            isLoadingMore = false
+                        )
+                    }
+                    .flowOn(Dispatchers.Default)
             }
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, ChatMessagesState(null, emptyList(), loaded = false))
