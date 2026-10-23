@@ -48,7 +48,8 @@ data class CompactionResult(
 internal const val SUMMARY_HEADER = "【上下文接手摘要 · 历史档案】以下为更早对话的压缩记录，仅作背景参照。" +
     "这是已完结的记录，不是你正在输出的文字，请勿延续其语气、请勿续写其中内容。\n\n"
 
-internal const val SUMMARY_FOOTER = "\n\n【摘要结束】以上为历史记录末尾。请直接回应用户的最新消息。"
+internal const val SUMMARY_FOOTER = "\n\n【摘要结束】以上为更早对话的历史记录末尾，仅作背景参照，并非当前任务。" +
+    "请以用户的最新消息为当前任务，直接回应它。"
 
 /** 工具输出折叠的结果：[tokens] 是折叠后的估算，[underThreshold] 表示是否已压回阈值内。 */
 data class FoldOutcome(
@@ -165,7 +166,12 @@ class ContextCompactor @Inject constructor(
             splitIndex = CompactionText.adjustSplitIndex(working, splitIndex)
             check(splitIndex > 0) { "No compressible history before the retained tool unit" }
             val head = working.take(splitIndex)
-            val tail = working.drop(splitIndex)
+            // 压缩前先记住最新用户消息的 id，压缩后用它核对「当前任务」是否真的被保留下来。
+            val latestUserId = working.lastOrNull { it is AgentMessage.UserMessage && it.content != CONTEXT_COMPACTION_MARKER }?.id
+            // 最新一条用户消息必须原文进入保留区：它是「当前任务」的载体，一旦被并入摘要，
+            // 模型就从很久以前的某句话开始思考，表现为「忘了我刚发的内容」。
+            // 保留区超预算时由 clampRetainedTail 截断（保留头尾并标注），而不是把它丢进摘要。
+            val tail = CompactionText.clampRetainedTail(working.drop(splitIndex), ModelContextPolicy.preserveRecentTokens(inputBudget))
             val material = removeCompactionPairs(head)
             check(material.isNotEmpty()) { "No new history to summarize" }
 
@@ -223,6 +229,10 @@ class ContextCompactor @Inject constructor(
                 AgentMessage.AssistantMessage(id = summaryId, content = summaryText)
             ) + tail
             val compactedTokens = CompactionText.estimateRequest(systemPrompt, tools, compacted)
+            val latestUserRetained = compacted.any { it is AgentMessage.UserMessage && it.id == latestUserId }
+            FileLogger.i(TAG, "压缩诊断：$workingTokens → $compactedTokens tokens；保留 ${tail.size} 条消息：" +
+                tail.joinToString(", ") { it.describeForLog() } +
+                "；最新用户消息${if (latestUserRetained) "已保留" else "未保留（id=$latestUserId）"}")
             check(compactedTokens < workingTokens && compactedTokens <= inputBudget) {
                 "Summary and retained history do not fit the main model input budget or do not reduce it"
             }
@@ -492,6 +502,13 @@ class ContextCompactor @Inject constructor(
         }
         return result
     }
+
+    /** 诊断日志用的单行摘要：角色 + id + 工具调用数，避免把消息内容写进日志。 */
+    private fun AgentMessage.describeForLog(): String = when (this) {
+        is AgentMessage.UserMessage -> "user($id)"
+        is AgentMessage.AssistantMessage -> "assistant($id, tools=${toolCalls.size})"
+        is AgentMessage.ToolResultMessage -> "tool($id, $toolName)"
+    }
 }
 
 internal object CompactionText {
@@ -547,8 +564,12 @@ internal object CompactionText {
             total += next
             split = index
         }
+        // 最新一条用户消息无条件进入保留区。旧实现在这里加了「drop(latestUser) 必须装得下
+        // recentBudget」的条件：用户刚发的内容特别长时条件不成立，split 停在它之后，
+        // 最新消息被并入摘要——模型从此「忘了用户刚发了什么」。体积超预算的截断交给
+        // clampRetainedTail（保留头尾并标注），绝不整条丢进摘要。
         val latestUser = messages.indexOfLast { it is AgentMessage.UserMessage && it.content != CONTEXT_COMPACTION_MARKER }
-        if (latestUser > 0 && estimateRequest("", emptyList(), messages.drop(latestUser)) <= recentBudget) split = minOf(split, latestUser)
+        if (latestUser > 0) split = minOf(split, latestUser)
         return split
     }
 
@@ -563,6 +584,56 @@ internal object CompactionText {
             result.add(unit.toString())
         }
         return result
+    }
+
+    /** 截断后至少为最新用户消息保留的头尾字符总数（两侧合计），再短也不能把它压成空壳。 */
+    private const val MIN_TRUNCATED_TAIL_CHARS = 400
+
+    /**
+     * 把保留区压回 [recentBudget]：只截断最新一条用户消息（头尾保留、中间标注省略的字符数），
+     * 其余消息一条不动。
+     *
+     * 为什么必须截而不是把用户消息并进摘要：最新用户消息是「当前任务」的载体，并入摘要是
+     * 「压缩后 AI 忘了我刚发的内容」的直接根因；为什么必须截而不是让整轮压缩失败：失败会让
+     * 上下文一直停在阈值之上反复重试，且回退路径只返回未压缩原文，问题永远得不到缓解。
+     * 截断只作用于喂模型的在内存副本，落库与 UI 读的仍是完整原文。
+     */
+    fun clampRetainedTail(tail: List<AgentMessage>, recentBudget: Int): List<AgentMessage> {
+        if (tail.isEmpty()) return tail
+        val index = tail.indexOfLast { it is AgentMessage.UserMessage && it.content != CONTEXT_COMPACTION_MARKER }
+        if (index < 0) return tail
+        val user = tail[index] as AgentMessage.UserMessage
+        val others = tail.filterIndexed { position, _ -> position != index }
+        val otherTokens = estimateRequest("", emptyList(), others)
+        val allowance = (recentBudget - otherTokens).coerceAtLeast(MIN_TRUNCATED_TAIL_CHARS)
+        val truncated = truncateUserMessage(user, allowance)
+        if (truncated === user) return tail
+        return tail.toMutableList().also { it[index] = truncated }
+    }
+
+    /** 二分出最大的保留字符数，使截断后的消息估算不超过 [budgetTokens]；保不住也至少留 [MIN_TRUNCATED_TAIL_CHARS]。 */
+    private fun truncateUserMessage(user: AgentMessage.UserMessage, budgetTokens: Int): AgentMessage.UserMessage {
+        if (estimateMessage(user) <= budgetTokens) return user
+        var low = MIN_TRUNCATED_TAIL_CHARS
+        var high = user.content.length
+        while (low < high) {
+            val mid = (low + high + 1) / 2
+            if (estimateMessage(user.copy(content = foldUserContent(user.content, mid))) <= budgetTokens) low = mid else high = mid - 1
+        }
+        return user.copy(content = foldUserContent(user.content, low))
+    }
+
+    /** 保留头尾各一部分，中间标注省略的字符数，让模型知道这里被裁过、原文仍在对话记录里。 */
+    private fun foldUserContent(content: String, keepChars: Int): String {
+        if (keepChars >= content.length) return content
+        val head = keepChars * 2 / 3
+        val tail = keepChars - head
+        val omitted = (content.length - head - tail).coerceAtLeast(0)
+        return buildString {
+            append(content.take(head))
+            append("\n[…此处省略 $omitted 字符，完整原文已保存在对话记录中…]\n")
+            append(content.takeLast(tail))
+        }
     }
 
     class Cursor(private val units: List<String>) {

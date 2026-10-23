@@ -345,6 +345,86 @@ class ContextCompactorTest {
     }
 
     @Test
+    fun latestUserMessageSurvivesCompactionEvenWhenHuge() = runTest {
+        prepare()
+        // 复现「压缩后 AI 忘了我刚发的内容」：最新用户消息特别长，后面还跟着一轮工具调用。
+        // 旧逻辑按 recentBudget 从尾部累加，长消息撑爆预算后 split 落在它之后，
+        // 最新消息被并入摘要，模型从很久以前的某句话开始思考。
+        val original = listOf(
+            AgentMessage.UserMessage(id = "old", content = "早期需求：重构登录模块"),
+            AgentMessage.AssistantMessage(id = "a1", content = "好的，我先看看代码"),
+            AgentMessage.UserMessage(id = "huge", content = "请按以下 spec 实现：" + "需求点".repeat(3_000)),
+            AgentMessage.AssistantMessage(id = "call", content = "", toolCalls = listOf(ToolCall("c1", "shell", emptyMap()))),
+            AgentMessage.ToolResultMessage(id = "c1", toolName = "shell", result = "ok"),
+            AgentMessage.AssistantMessage(id = "reply", content = "已完成")
+        )
+        val result = compactor.compactIfNeeded(original, provider, force = true)
+        assertTrue(result.compacted)
+        val tail = result.messages.drop(2) // marker + summary
+        val latest = tail.filterIsInstance<AgentMessage.UserMessage>().lastOrNull()
+        assertNotNull("最新用户消息必须原文进入保留区", latest)
+        assertEquals("huge", latest!!.id)
+        // 头尾保留、中间标注省略，而不是整条丢掉或整条塞进摘要。
+        assertTrue(latest.content.startsWith("请按以下 spec 实现："))
+        assertTrue(latest.content.contains("此处省略"))
+        assertTrue(latest.content.endsWith("需求点"))
+        // 工具调用链完整跟随其后，配对没有被打断（工具结果的 id 带 tool_ 前缀）。
+        assertEquals(listOf("call", "tool_c1", "reply"), tail.drop(1).map { it.id })
+    }
+
+    @Test
+    fun latestUserMessageKeptVerbatimWhenItFits() = runTest {
+        prepare()
+        val original = history()
+        val result = compactor.compactIfNeeded(original, provider, force = true)
+        assertTrue(result.compacted)
+        // 装得下预算时一字不改，且位于重建后上下文的末尾。
+        assertSame(original.last(), result.messages.last())
+    }
+
+    @Test
+    fun oversizedLatestUserMessageIsTruncatedNotDroppedOrFailed() = runTest {
+        prepare()
+        val original = history() + AgentMessage.UserMessage(id = "huge-tail", content = "汉".repeat(30_000))
+        val result = compactor.compactIfNeeded(original, provider, force = true)
+        // 旧实现这里直接判定「保留区超预算」整轮失败，用户刚发的内容永远进不了上下文。
+        assertTrue(result.compacted)
+        val latest = result.messages.drop(2).filterIsInstance<AgentMessage.UserMessage>().last()
+        assertEquals("huge-tail", latest.id)
+        assertTrue(latest.content.length < 30_000)
+        assertTrue(latest.content.startsWith("汉"))
+        assertTrue(latest.content.endsWith("汉"))
+        assertTrue(latest.content.contains("此处省略"))
+    }
+
+    @Test
+    fun clampRetainedTailOnlyTouchesTheLatestUserMessage() {
+        val original = listOf(
+            AgentMessage.UserMessage(id = "goal", content = "旧目标"),
+            AgentMessage.AssistantMessage(id = "call", content = "", toolCalls = listOf(ToolCall("c1", "shell", emptyMap()))),
+            AgentMessage.ToolResultMessage(id = "c1", toolName = "shell", result = "R".repeat(50_000)),
+            AgentMessage.UserMessage(id = "huge", content = "汉".repeat(20_000))
+        )
+        val clamped = CompactionText.clampRetainedTail(original, 2_000)
+        assertEquals(original.map { it.id }, clamped.map { it.id })
+        val huge = clamped.last() as AgentMessage.UserMessage
+        assertTrue(huge.content.length < 20_000)
+        assertTrue(huge.content.contains("此处省略"))
+        // 其余消息一条不动。
+        assertEquals("旧目标", (clamped[0] as AgentMessage.UserMessage).content)
+        assertEquals("R".repeat(50_000), (clamped[2] as AgentMessage.ToolResultMessage).result)
+    }
+
+    @Test
+    fun clampRetainedTailIsNoopWhenTailFits() {
+        val original = listOf(
+            AgentMessage.UserMessage(id = "goal", content = "短目标"),
+            AgentMessage.AssistantMessage(id = "reply", content = "done")
+        )
+        assertSame(original, CompactionText.clampRetainedTail(original, 100_000))
+    }
+
+    @Test
     fun transactionFailureReturnsOriginal() = runTest {
         prepare()
         coEvery { dao.getMessagesBySessionOnce("session") } returns listOf(
@@ -375,7 +455,13 @@ class ContextCompactorTest {
     @Test
     fun oversizedTailFailsWithoutReplacingHistory() = runTest {
         prepare()
-        val original = history() + AgentMessage.UserMessage(id = "huge-tail", content = "汉".repeat(30_000))
+        // 保留区里没有任何用户消息可截断（唯一一条在 index 0）、且末尾是一条超大 assistant
+        // 消息时，摘要+保留区装不进输入预算：诚实失败并原样返回，不丢历史、不造假压缩。
+        val original = listOf(
+            AgentMessage.UserMessage(id = "goal", content = "总结一下"),
+            AgentMessage.AssistantMessage(id = "a1", content = "好的"),
+            AgentMessage.AssistantMessage(id = "huge", content = "汉".repeat(30_000))
+        )
         val result = compactor.compactIfNeeded(original, provider, force = true)
         assertFalse(result.compacted)
         assertSame(original, result.messages)
