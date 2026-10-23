@@ -128,7 +128,9 @@ class SendFileTool @Inject constructor(
                 )
             }
 
-            FileLogger.i(TAG, "sendFile 成功: ${paths.size} 个文件 ${paths.joinToString(", ") { fileAccess.toDisplayPath(it) }}")
+            // toDisplayPath 现为 suspend：先在挂起作用域里算好显示名，再进非挂起的 joinToString。
+            val displayPaths = paths.map { fileAccess.toDisplayPath(it) }
+            FileLogger.i(TAG, "sendFile 成功: ${paths.size} 个文件 ${displayPaths.joinToString(", ")}")
             ToolResult.Success(
                 JsonObject(
                     mapOf(
