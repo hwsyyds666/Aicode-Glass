@@ -91,6 +91,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
@@ -338,6 +339,21 @@ internal fun ToolMessageBody(
                 } else if (edit != null) {
                     // 差异卡：头部给路径与「复制」，页脚给增删统计（DSH 那块白底描边卡）
                     Spacer(Modifier.height(Spacing.xs))
+                    // 降级提示必须显式：差异过大（不显示逐行对比）/ 快照被跳过（无法回滚）都不能静默
+                    val diffSkippedHint = if (edit.hunks.any { it.diffSkipped }) {
+                        stringResource(R.string.tool_diff_skipped_hint)
+                    } else {
+                        null
+                    }
+                    val warnings = listOfNotNull(diffSkippedHint, edit.warning)
+                    if (warnings.isNotEmpty()) {
+                        Text(
+                            text = warnings.joinToString("\n"),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(bottom = Spacing.xs)
+                        )
+                    }
                     ChatCodeCard(
                         title = edit.path.ifBlank { null },
                         copyText = edit.hunks.joinToString("\n") { it.diff },
@@ -827,14 +843,21 @@ internal fun DiffExpandToggle(expanded: Boolean, hiddenCount: Int, onToggle: () 
 }
 
 /** editFile 单处编辑的差异片段。 */
-internal data class EditHunk(val startLine: Int, val diff: String)
+internal data class EditHunk(
+    val startLine: Int,
+    val diff: String,
+    /** true = 该处编辑过大已跳过 LCS，diff 为「整段视为新增」的降级呈现。 */
+    val diffSkipped: Boolean = false
+)
 
 /** editFile 结果中解析出的结构化差异 */
 internal data class EditDiff(
     val path: String,
     val added: Int,
     val removed: Int,
-    val hunks: List<EditHunk>
+    val hunks: List<EditHunk>,
+    /** 快照被体积/空间限制跳过时工具结果里的 warning（未创建快照，无法回滚）。 */
+    val warning: String? = null
 )
 
 /**
@@ -862,13 +885,23 @@ private fun parseEditDiffObject(obj: JsonObject): EditDiff? {
     val hunks = obj["hunks"]?.jsonArray?.mapNotNull { el ->
         val ho = el.jsonObject
         val d = ho["diff"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-        EditHunk(startLine = ho["start_line"]?.jsonPrimitive?.intOrNull ?: 1, diff = d)
+        EditHunk(
+            startLine = ho["start_line"]?.jsonPrimitive?.intOrNull ?: 1,
+            diff = d,
+            diffSkipped = ho["diff_skipped"]?.jsonPrimitive?.booleanOrNull ?: false
+        )
     } ?: run {
         val d = obj["diff"]?.jsonPrimitive?.contentOrNull ?: return null
         listOf(EditHunk(startLine = obj["start_line"]?.jsonPrimitive?.intOrNull ?: 1, diff = d))
     }
     if (hunks.isEmpty()) return null
-    return EditDiff(path = path, added = added, removed = removed, hunks = hunks)
+    return EditDiff(
+        path = path,
+        added = added,
+        removed = removed,
+        hunks = hunks,
+        warning = obj["warning"]?.jsonPrimitive?.contentOrNull
+    )
 }
 
 /**

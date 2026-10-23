@@ -1759,4 +1759,5 @@
     <string name="perf_module_git">Git</string>
     <string name="perf_module_settings">Settings</string>
     <string name="perf_module_other">Other</string>
+    <string name="tool_diff_skipped_hint">File is large; line-by-line diff not shown</string>
 </resources>

@@ -10,6 +10,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileInputStream
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
@@ -63,16 +64,19 @@ class CheckpointManager @Inject constructor(
     /**
      * 在工具（editFile/writeFile）将要修改或新建文件前调用。
      * 若该文件在当前 Checkpoint 周期内未快照过，则保存其原始状态。
+     *
+     * 返回 [SnapshotOutcome]：被体积/空间限制跳过时 [SnapshotOutcome.skipReason] 非空，
+     * 调用方应把「未创建快照，无法回滚」提示给模型与界面，不静默跳过。
      */
     suspend fun beforeFileModified(
         sessionId: String,
         filePath: String
-    ) = withContext(Dispatchers.IO) {
-        val checkpointId = activeCheckpointIds[sessionId] ?: return@withContext
+    ): SnapshotOutcome = withContext(Dispatchers.IO) {
+        val checkpointId = activeCheckpointIds[sessionId] ?: return@withContext SnapshotOutcome(saved = false)
 
         // 查重：同一个 checkpointId 内对同一文件只保留最原始的一次快照
         if (checkpointDao.countSnapshot(checkpointId, filePath) > 0) {
-            return@withContext
+            return@withContext SnapshotOutcome(saved = false)
         }
 
         val snapshotDir = File(baseCheckpointDir, "$sessionId/$checkpointId")
@@ -86,8 +90,25 @@ class CheckpointManager @Inject constructor(
         val snapshotFile = File(snapshotDir, snapshotFileName)
 
         if (changeType == "MODIFY") {
-            val originalContent = fileAccess.readFile(filePath)
-            snapshotFile.writeText(originalContent)
+            val size = fileAccess.fileSize(filePath)
+            // 单文件快照体积上限：超过就跳过快照并明确告知（大文件编辑本就容易被工具层拒绝）。
+            SnapshotPolicy.skipReason(size)?.let { reason ->
+                FileLogger.w(TAG, "跳过快照: $reason path=$filePath")
+                return@withContext SnapshotOutcome(saved = false, skipReason = reason)
+            }
+            // 存储空间预检：快照分区剩余空间不足时同样跳过并提示，
+            // 避免写一半 ENOSPC 留下半截快照（回滚时会静默还原失败）。
+            val usable = snapshotDir.usableSpace
+            if (usable < size + SNAPSHOT_SPACE_MARGIN_BYTES) {
+                val reason = "存储空间不足（剩余 ${usable / 1024 / 1024}MB），未创建快照，无法回滚"
+                FileLogger.w(TAG, "跳过快照: $reason path=$filePath")
+                return@withContext SnapshotOutcome(saved = false, skipReason = reason)
+            }
+            // 流式复制：本地模式 copyToLocal 直接给宿主文件、远程模式下载到临时文件，
+            // 再 copyTo 磁盘到磁盘——整份内容不进堆（旧实现 readFile + writeText
+            // 约占 2 倍文件大小的堆内存，几十 MB 的数据文件就能把移动端顶爆）。
+            val local = fileAccess.copyToLocal(filePath)
+            local.copyTo(snapshotFile, overwrite = true)
         } else {
             snapshotFile.writeText("") // 标示创建空记录
         }
@@ -101,6 +122,7 @@ class CheckpointManager @Inject constructor(
         )
         checkpointDao.insertFileSnapshot(snapshotEntity)
         FileLogger.i(TAG, "快照: session=$sessionId cp=$checkpointId type=$changeType path=$filePath")
+        SnapshotOutcome(saved = true)
     }
 
     /**
@@ -129,8 +151,11 @@ class CheckpointManager @Inject constructor(
 
                 if (snapshot.changeType == "MODIFY") {
                     if (snapshotFile.exists()) {
-                        val content = snapshotFile.readText()
-                        fileAccess.writeFile(snapshot.filePath, content, overwrite = true)
+                        // 流式写回：不把整份快照读进堆（旧实现 readText 后 writeFile
+                        // 约占 2 倍大小的堆内存）。writeStream 写中途失败会清掉半截文件。
+                        FileInputStream(snapshotFile).use { input ->
+                            fileAccess.writeStream(snapshot.filePath, input, overwrite = true)
+                        }
                         restoredFileCount++
                         FileLogger.i(TAG, "还原覆盖: cp=${cp.id} path=${snapshot.filePath}")
                     }
@@ -163,5 +188,32 @@ class CheckpointManager @Inject constructor(
 
     private companion object {
         const val TAG = "CheckpointManager"
+
+        /** 快照空间预检的安全余量：分区元数据与文件系统开销，避免「够大但写不下」。 */
+        const val SNAPSHOT_SPACE_MARGIN_BYTES = 16L * 1024 * 1024
     }
 }
+
+/**
+ * 检查点快照的体积策略：工具侧提示与 [CheckpointManager] 实际跳过着同一套阈值，避免两边标准不一。
+ */
+internal object SnapshotPolicy {
+    /** 单文件快照上限（默认 50MB）：超过即跳过快照，由调用方提示「未创建快照，无法回滚」。 */
+    const val MAX_SNAPSHOT_FILE_BYTES = 50L * 1024 * 1024
+
+    /** 超过上限时返回原因文案；未超过返回 null。 */
+    fun skipReason(size: Long): String? =
+        if (size > MAX_SNAPSHOT_FILE_BYTES) {
+            "文件过大（${size / 1024 / 1024}MB > ${MAX_SNAPSHOT_FILE_BYTES / 1024 / 1024}MB），未创建快照，无法回滚"
+        } else {
+            null
+        }
+}
+
+/** [CheckpointManager.beforeFileModified] 的结果。 */
+data class SnapshotOutcome(
+    /** 是否已落盘快照（无需快照的无活动检查点/已快照过场景为 false）。 */
+    val saved: Boolean,
+    /** 非空表示因体积/空间限制被跳过，调用方应把该原因提示给模型与界面，不静默跳过。 */
+    val skipReason: String? = null
+)

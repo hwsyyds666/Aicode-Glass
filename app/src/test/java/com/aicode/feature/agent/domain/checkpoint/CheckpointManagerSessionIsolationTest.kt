@@ -10,6 +10,8 @@ import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -117,6 +119,50 @@ class CheckpointManagerSessionIsolationTest {
         assertTrue(dao.getFileSnapshotsForCheckpoint(cpA.id).isEmpty())
     }
 
+    // ---- 17·P0-2：流式快照与体积上限 ----
+
+    @Test
+    fun snapshotUsesStreamingPath_notFullReadFile() = runTest {
+        val path = File(workspace, "big.txt").apply { writeText("x".repeat(4096)) }.absolutePath
+
+        manager.createCheckpoint("sessionA", "msgA", "A 的请求")
+        val outcome = manager.beforeFileModified("sessionA", path)
+
+        assertTrue(outcome.saved)
+        // 流式复制：不允许出现全量 readFile（那是旧实现 OOM 的根源）
+        assertEquals(0, fileAccess.readFileCalls)
+        assertTrue(fileAccess.copyToLocalCalls > 0)
+    }
+
+    @Test
+    fun oversizedFileSkipsSnapshotWithReason() = runTest {
+        val path = File(workspace, "huge.bin").apply { writeText("small") }.absolutePath
+        fileAccess.sizeOverrides = mapOf(path to 51L * 1024 * 1024)
+
+        manager.createCheckpoint("sessionA", "msgA", "A 的请求")
+        val outcome = manager.beforeFileModified("sessionA", path)
+
+        assertFalse(outcome.saved)
+        assertNotNull(outcome.skipReason)
+        assertTrue(outcome.skipReason!!.contains("未创建快照"))
+        // 跳过时不落快照记录，还原时也不会去动这个文件
+        assertTrue(dao.getFileSnapshotsForCheckpoint(
+            dao.getCheckpointsForSession("sessionA").last().id
+        ).isEmpty())
+    }
+
+    @Test
+    fun snapshotWithinLimitStillSaves() = runTest {
+        val path = File(workspace, "ok.txt").apply { writeText("content") }.absolutePath
+        fileAccess.sizeOverrides = mapOf(path to 10L * 1024 * 1024) // 10MB < 50MB 上限
+
+        manager.createCheckpoint("sessionA", "msgA", "A 的请求")
+        val outcome = manager.beforeFileModified("sessionA", path)
+
+        assertTrue(outcome.saved)
+        assertNull(outcome.skipReason)
+    }
+
     private class FakeContext(private val dir: File) : ContextWrapper(null) {
         override fun getFilesDir(): File = dir
     }
@@ -166,38 +212,57 @@ class CheckpointManagerSessionIsolationTest {
     }
 
     private class LocalFileAccess : FileAccessProvider {
-        override fun readFile(path: String): String = File(path).readText()
-        override fun writeFile(path: String, content: String, overwrite: Boolean, encoding: Charset) {
+        /** readFile 调用计数：流式快照路径下必须保持 0（P0-2 回归点）。 */
+        var readFileCalls = 0
+            private set
+        /** copyToLocal 调用计数：流式快照走的是它。 */
+        var copyToLocalCalls = 0
+            private set
+        /** 测试注入的假体积（模拟「实际很小但元数据很大」的超限文件）。 */
+        var sizeOverrides: Map<String, Long> = emptyMap()
+
+        override suspend fun readFile(path: String): String {
+            readFileCalls++
+            return File(path).readText()
+        }
+        override suspend fun writeFile(path: String, content: String, overwrite: Boolean, encoding: Charset) {
             File(path).parentFile?.mkdirs()
             File(path).writeText(content, encoding)
         }
 
-        override fun exists(path: String): Boolean = File(path).exists()
-        override fun delete(path: String) {
+        override suspend fun exists(path: String): Boolean = File(path).exists()
+        override suspend fun delete(path: String) {
             File(path).delete()
         }
 
-        override fun readLines(path: String): Sequence<String> = throw UnsupportedOperationException()
-        override fun isDirectory(path: String): Boolean = throw UnsupportedOperationException()
-        override fun isFile(path: String): Boolean = throw UnsupportedOperationException()
-        override fun fileSize(path: String): Long = throw UnsupportedOperationException()
-        override fun lastModified(path: String): Long = throw UnsupportedOperationException()
-        override fun permissions(path: String): String = throw UnsupportedOperationException()
-        override fun listFiles(path: String): List<FileEntry> = throw UnsupportedOperationException()
-        override fun readBytes(path: String): ByteArray = throw UnsupportedOperationException()
-        override fun writeBytes(path: String, bytes: ByteArray, overwrite: Boolean) {
+        override fun readLines(path: String): kotlinx.coroutines.flow.Flow<String> = throw UnsupportedOperationException()
+        override suspend fun isDirectory(path: String): Boolean = throw UnsupportedOperationException()
+        override suspend fun isFile(path: String): Boolean = throw UnsupportedOperationException()
+        override suspend fun fileSize(path: String): Long = sizeOverrides[path] ?: File(path).length()
+        override suspend fun lastModified(path: String): Long = throw UnsupportedOperationException()
+        override suspend fun permissions(path: String): String = throw UnsupportedOperationException()
+        override suspend fun listFiles(path: String): List<FileEntry> = throw UnsupportedOperationException()
+        override suspend fun readBytes(path: String): ByteArray = File(path).readBytes()
+        override suspend fun writeBytes(path: String, bytes: ByteArray, overwrite: Boolean) {
             File(path).parentFile?.mkdirs()
             File(path).writeBytes(bytes)
         }
-        override fun writeStream(path: String, input: InputStream, overwrite: Boolean): Long = throw UnsupportedOperationException()
-        override fun listFilesRecursive(path: String, maxDepth: Int): List<String> = emptyList()
-        override fun copyToLocal(path: String): File = throw UnsupportedOperationException()
-        override fun deleteRecursively(path: String) = throw UnsupportedOperationException()
-        override fun rename(path: String, newPath: String) = throw UnsupportedOperationException()
-        override fun copy(path: String, newPath: String, overwrite: Boolean) = throw UnsupportedOperationException()
-        override fun move(path: String, newPath: String, overwrite: Boolean) = throw UnsupportedOperationException()
-        override fun mkdirs(path: String) = throw UnsupportedOperationException()
-        override fun parentPath(path: String): String? = throw UnsupportedOperationException()
-        override fun toDisplayPath(path: String): String = path
+        override suspend fun writeStream(path: String, input: InputStream, overwrite: Boolean): Long {
+            File(path).parentFile?.mkdirs()
+            File(path).outputStream().use { out -> input.copyTo(out) }
+            return File(path).length()
+        }
+        override suspend fun listFilesRecursive(path: String, maxDepth: Int): List<String> = emptyList()
+        override suspend fun copyToLocal(path: String): File {
+            copyToLocalCalls++
+            return File(path)
+        }
+        override suspend fun deleteRecursively(path: String) = throw UnsupportedOperationException()
+        override suspend fun rename(path: String, newPath: String) = throw UnsupportedOperationException()
+        override suspend fun copy(path: String, newPath: String, overwrite: Boolean) = throw UnsupportedOperationException()
+        override suspend fun move(path: String, newPath: String, overwrite: Boolean) = throw UnsupportedOperationException()
+        override suspend fun mkdirs(path: String) = throw UnsupportedOperationException()
+        override suspend fun parentPath(path: String): String? = throw UnsupportedOperationException()
+        override suspend fun toDisplayPath(path: String): String = path
     }
 }

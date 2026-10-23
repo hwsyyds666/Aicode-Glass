@@ -84,7 +84,14 @@ class EditFileTool @Inject constructor(
     private data class Edit(val oldString: String, val newString: String, val replaceAll: Boolean)
 
     /** 单个编辑应用后的差异，用于 UI 渲染与喂回模型。 */
-    private data class Hunk(val startLine: Int, val added: Int, val removed: Int, val diff: String)
+    private data class Hunk(
+        val startLine: Int,
+        val added: Int,
+        val removed: Int,
+        val diff: String,
+        /** true 表示该处编辑任一侧行数超过 [MAX_EDIT_DIFF_LINES]，已跳过 LCS 逐行对比。 */
+        val diffSkipped: Boolean = false
+    )
 
     override fun buildPermissionRequest(
         callId: String,
@@ -127,6 +134,19 @@ class EditFileTool @Inject constructor(
                 return ToolResult.Error("文件不存在：$path", "FILE_NOT_FOUND")
             }
 
+            // P0-2：读前先查体积。超大文件全量读入内存是移动端 OOM 的常见来源，
+            // 读前拒绝并给出可操作的替代方案，而不是读爆堆之后报一个莫名的 OOM。
+            val fileSize = runCatching { fileAccess.fileSize(path) }.getOrDefault(0L)
+            if (fileSize > MAX_EDIT_FILE_BYTES) {
+                FileLogger.w(TAG, "edit_file 文件过大拒绝: path=$path size=$fileSize")
+                return ToolResult.Error(
+                    "文件过大（${fileSize / 1024 / 1024}MB > ${MAX_EDIT_FILE_BYTES / 1024 / 1024}MB），" +
+                        "editFile 不读取超大文件。请改用 read_file 的 start_line/end_line 分段读取定位目标行，" +
+                        "再用小编辑替换；或用 sed/脚本完成批量修改。",
+                    "FILE_TOO_LARGE"
+                )
+            }
+
             // 先在内存里顺序应用所有编辑；任一失败立刻返回、绝不写盘（全有或全无）。
             var content = fileAccess.readFile(path)
             val hunks = ArrayList<Hunk>(edits.size)
@@ -154,10 +174,21 @@ class EditFileTool @Inject constructor(
                 val matchIndex = content.indexOf(e.oldString)
                 val startLine = if (matchIndex >= 0) content.substring(0, matchIndex).count { it == '\n' } + 1 else 1
 
-                val diff = LineDiff.toUnified(e.oldString, e.newString)
+                // P0-2：单处编辑的 diff 计算对齐 FileTools 的 MAX_DIFF_LINES 保护——
+                // 任一侧行数过大时跳过 O(n·m) 的 LCS（移动端 DP 表易 OOM），
+                // 退化为「整段视为新增」并打上 diffSkipped，界面提示不显示逐行对比。
+                val oldLines = e.oldString.count { it == '\n' } + 1
+                val newLines = e.newString.count { it == '\n' } + 1
+                val diffSkipped = maxOf(oldLines, newLines) > MAX_EDIT_DIFF_LINES
+                val diff = if (diffSkipped) {
+                    FileLogger.w(TAG, "edit_file 差异过大跳过 LCS: edit=${i + 1} old=$oldLines new=$newLines")
+                    e.newString.lines().joinToString("\n") { "+$it" }
+                } else {
+                    LineDiff.toUnified(e.oldString, e.newString)
+                }
                 val added = diff.lines().count { it.startsWith("+") }
                 val removed = diff.lines().count { it.startsWith("-") }
-                hunks.add(Hunk(startLine = startLine, added = added, removed = removed, diff = diff))
+                hunks.add(Hunk(startLine = startLine, added = added, removed = removed, diff = diff, diffSkipped = diffSkipped))
 
                 content = if (e.replaceAll) content.replace(e.oldString, e.newString)
                 else content.replaceFirst(e.oldString, e.newString)
@@ -173,7 +204,8 @@ class EditFileTool @Inject constructor(
                     "start_line" to JsonPrimitive(h.startLine),
                     "added" to JsonPrimitive(h.added),
                     "removed" to JsonPrimitive(h.removed),
-                    "diff" to JsonPrimitive(h.diff)
+                    "diff" to JsonPrimitive(h.diff),
+                    "diff_skipped" to JsonPrimitive(h.diffSkipped)
                 ))
             })
 
@@ -209,5 +241,17 @@ class EditFileTool @Inject constructor(
             val all = obj["replace_all"]?.jsonPrimitive?.booleanOrNull ?: false
             Edit(old, new, all)
         }.takeIf { it.isNotEmpty() }
+    }
+
+    private companion object {
+        /**
+         * editFile 的单文件体积上限（默认 2MB）：超过直接拒绝并引导模型改用
+         * 分段读取 / sed / 脚本。read_file 侧已有 MAX_BYTES 保护，editFile 此前没有，
+         * 一个几十 MB 的数据文件就能把整次请求的堆顶爆。
+         */
+        const val MAX_EDIT_FILE_BYTES = 2L * 1024 * 1024
+
+        /** 单处编辑任一侧行数超过此值即跳过 LCS 逐行对比，与 FileTools.MAX_DIFF_LINES 同一量级。 */
+        const val MAX_EDIT_DIFF_LINES = 2000
     }
 }

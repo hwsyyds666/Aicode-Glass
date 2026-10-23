@@ -74,11 +74,13 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import java.util.Locale
@@ -830,11 +832,18 @@ class StatefulAgentWorkflow @Inject constructor(
                         // 并行执行本批已批准的工具。先统一记录 checkpoint（editFile/writeFile 修改前快照），
                         // 再并行执行；mode 切换检查在结果收集后于主协程串行处理（planApproval 单例）。
                         val toolCalls = effect.toolCalls
+                        // 快照被体积/空间限制跳过时，原因按 callId 收集，稍后注入该工具的结果里，
+                        // 让模型与界面都看到「未创建快照，无法回滚」，绝不静默跳过。
+                        val snapshotSkipReasons = mutableMapOf<String, String>()
                         toolCalls.forEach { toolCall ->
                             if (toolCall.name == "editFile" || toolCall.name == "writeFile") {
                                 (toolCall.arguments["path"] as? JsonPrimitive)?.contentOrNull?.let { path ->
                                     currentContext.sessionId?.let { sid ->
-                                        checkpointManager.beforeFileModified(sid, path)
+                                        val outcome = checkpointManager.beforeFileModified(sid, path)
+                                        outcome.skipReason?.let { reason ->
+                                            FileLogger.w(TAG, "快照跳过(将注入工具结果): callId=${toolCall.id} path=$path reason=$reason")
+                                            snapshotSkipReasons[toolCall.id] = reason
+                                        }
                                     }
                                 }
                             }
@@ -863,6 +872,9 @@ class StatefulAgentWorkflow @Inject constructor(
                             val runResult = runResults.getOrNull(index)
                                 ?: ToolRunResult(ToolResult.Error("工具未执行", "TOOL_NOT_EXECUTED").toTransportString(), true)
                             var rawResult = runResult.raw
+                            snapshotSkipReasons[toolCall.id]?.let { reason ->
+                                rawResult = withSnapshotSkipWarning(rawResult, reason)
+                            }
                             var isError = runResult.isError
                             val (newCtx, updated) = checkAndUpdateMode(toolCall, isError, currentContext)
                             if (updated) {
@@ -1416,3 +1428,17 @@ class StatefulAgentWorkflow @Inject constructor(
         }
     }
 }
+
+/**
+ * 把「快照被跳过、无法回滚」的警告注入工具结果（仅 status=success）。
+ *
+ * error 结果的消息本身对模型可见，不需要注入；解析失败时原样返回——
+ * 警告是附加信息，绝不能因为注入失败而弄坏工具结果本身。
+ */
+private fun withSnapshotSkipWarning(raw: String, reason: String): String = runCatching {
+    val obj = Json.parseToJsonElement(raw).jsonObject
+    if (obj["status"]?.jsonPrimitive?.contentOrNull != "success") return@runCatching raw
+    val data = (obj["data"] as? JsonObject) ?: JsonObject(emptyMap())
+    val mergedData = JsonObject(data.toMap() + ("warning" to JsonPrimitive(reason)))
+    JsonObject(obj.toMap() + ("data" to mergedData)).toString()
+}.getOrDefault(raw)
