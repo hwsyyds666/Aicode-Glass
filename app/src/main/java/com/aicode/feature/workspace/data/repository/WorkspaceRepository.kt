@@ -8,7 +8,10 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.aicode.core.datastore.preferencesCorruptionHandler
 import com.aicode.R
+import com.aicode.core.util.BoundedLineReader
 import com.aicode.core.util.FileLogger
+import com.aicode.core.util.LINE_TRUNCATED_NOTE
+import com.aicode.feature.agent.domain.container.BoundedOutput
 import com.aicode.feature.agent.domain.container.ConnectionState
 import com.aicode.feature.agent.domain.container.RemoteSshConnection
 import com.aicode.feature.agent.domain.session.SessionUseCase
@@ -21,11 +24,13 @@ import com.aicode.feature.workspace.domain.model.Workspace
 import com.aicode.feature.workspace.domain.model.WorkspaceType
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -269,7 +274,15 @@ class WorkspaceRepository @Inject constructor(
         val wsRoot = pathHomeResolver.expandHome(cfg.remoteWorkspacePath.trimEnd('/'))
         return runCatching {
             // ls -d */ 列出子目录，取基名
-            val output = execRemote("ls -d ${wsRoot}/*/ 2>/dev/null | xargs -n1 basename 2>/dev/null")
+            val result = execRemote("ls -d ${wsRoot}/*/ 2>/dev/null | xargs -n1 basename 2>/dev/null")
+            // 远端 stderr 以前被整体丢弃，排错时无从下手；异常退出或 stderr 非空时落日志
+            if (result.exitCode != 0 || result.stderr.isNotBlank()) {
+                FileLogger.w(
+                    TAG,
+                    "远程工作区列表命令异常: exit=${result.exitCode} stderr=${result.stderr.take(500)}"
+                )
+            }
+            val output = result.stdout
             if (output.isBlank()) emptyList()
             else output.lines().filter { it.isNotBlank() }
                 .sortedBy { it.lowercase() }
@@ -280,31 +293,59 @@ class WorkspaceRepository @Inject constructor(
         }
     }
 
-    /** 同步执行远程命令并返回 stdout（供工作区列表/新建/删除用）。 */
-    private suspend fun execRemote(command: String): String =
+    /**
+     * 同步执行远程命令的结果。[stdout]/[stderr] 均经 [BoundedOutput] 限幅（超出截断并标注），
+     * [exitCode] 为远端退出码（读取异常时为 null）。
+     */
+    private data class RemoteExecResult(
+        val stdout: String,
+        val stderr: String,
+        val exitCode: Int?
+    )
+
+    /** 同步执行远程命令并返回 stdout（限幅截断）+ stderr + 退出码（供工作区列表用）。 */
+    private suspend fun execRemote(command: String): RemoteExecResult = execRemoteCaptured(command)
+
+    /** 同步执行远程命令并返回退出码（stdout/stderr 均排空丢弃，防管道写满死锁）。 */
+    private suspend fun execRemoteExit(command: String): Int =
+        try {
+            execRemoteCaptured(command).exitCode ?: -1
+        } catch (e: Exception) {
+            -1
+        }
+
+    /**
+     * 同步执行远程命令并捕获 stdout/stderr 与退出码。
+     *
+     * stdout 与 stderr 必须**并发**排空：SSH exec channel 两侧管道缓冲有限（约 64KB），远端命令
+     * 把 stderr 写满后进程阻塞，本地若还顺序读 stdout 等 EOF，双方互等即死锁（旧实现只读 stdout、
+     * 全量 readText 无上限，正是如此）。
+     * 两侧输出均经 [BoundedOutput] 限幅，超长截断并标注，避免无界读入内存。
+     */
+    private suspend fun execRemoteCaptured(command: String): RemoteExecResult =
         withContext(Dispatchers.IO) {
             val session = remoteSshConnection.startExecSession(command)
             try {
-                val output = java.io.BufferedReader(java.io.InputStreamReader(session.inputStream)).readText()
-                runCatching { session.close() }
-                output
+                coroutineScope {
+                    val stdout = BoundedOutput()
+                    val stderr = BoundedOutput()
+                    val stdoutJob = launch { drainBoundedLines(session.inputStream, stdout) }
+                    val stderrJob = launch { drainBoundedLines(session.errorStream, stderr) }
+                    stdoutJob.join()
+                    stderrJob.join()
+                    // sshj 的 exitStatus 在流 EOF 后未必就绪，close 后才保证有值
+                    runCatching { session.close() }
+                    if (stdout.truncated || stderr.truncated) {
+                        FileLogger.w(
+                            TAG,
+                            "远程命令输出超限已截断: stdout=${stdout.totalChars} stderr=${stderr.totalChars} 字符"
+                        )
+                    }
+                    RemoteExecResult(stdout.build(), stderr.build(), session.exitStatus)
+                }
             } catch (e: Exception) {
                 runCatching { session.close() }
                 throw e
-            }
-        }
-
-    /** 同步执行远程命令并返回退出码。 */
-    private suspend fun execRemoteExit(command: String): Int =
-        withContext(Dispatchers.IO) {
-            val session = remoteSshConnection.startExecSession(command)
-            try {
-                java.io.BufferedReader(java.io.InputStreamReader(session.inputStream)).readText()
-                runCatching { session.close() }
-                session.exitStatus ?: -1
-            } catch (e: Exception) {
-                runCatching { session.close() }
-                -1
             }
         }
 
@@ -512,4 +553,27 @@ class WorkspaceRepository @Inject constructor(
             .replace(Regex("[^A-Za-z0-9 ._\\u4e00-\\u9fa5-]"), "")
             .trim()
             .take(64)
+}
+
+/**
+ * 把 [stream] 逐行读入 [output]：单行封顶 [com.aicode.core.util.MAX_STREAM_LINE_CHARS]
+ * （超长行按项目既有 [LINE_TRUNCATED_NOTE] 风格标注），整体再经 [BoundedOutput] 限幅。
+ *
+ * 供 [WorkspaceRepository.execRemoteCaptured] 对 stdout/stderr **并发**排空——任一侧单独
+ * 读完都可能因对端管道写满而死锁，必须两侧同时读。抽成顶层 internal 函数以便脱离
+ * Android Context（仓库类依赖 DataStore/SSH，无法在单测中构造）直接验证读取语义。
+ */
+internal fun drainBoundedLines(stream: java.io.InputStream, output: BoundedOutput) {
+    BoundedLineReader(java.io.InputStreamReader(stream)).use { reader ->
+        var wroteAny = false
+        var lastHadTerminator = false
+        while (true) {
+            val line = reader.readLine() ?: break
+            if (wroteAny) output.append("\n") // 行间分隔：末行无换行符时不补，保持与原 readText() 一致的字节
+            wroteAny = true
+            lastHadTerminator = line.hadTerminator
+            output.append(if (line.truncated) "${line.text}\n$LINE_TRUNCATED_NOTE" else line.text)
+        }
+        if (lastHadTerminator) output.append("\n") // 原文以换行结尾时补回，避免消费方多出一个空行
+    }
 }
