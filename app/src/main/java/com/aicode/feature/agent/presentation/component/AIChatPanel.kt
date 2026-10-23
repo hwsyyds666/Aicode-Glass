@@ -3,6 +3,7 @@ package com.aicode.feature.agent.presentation.component
 import android.content.ClipData
 import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -642,6 +643,12 @@ fun AIChatPanel(
     LaunchedEffect(inputText) {
         if (inputText == "/") viewModel.refreshSlashCommands()
     }
+    // 斜杠命令菜单的主动收起标记：Esc / 系统返回键 / 点击消息列表（弹窗外部）关闭后置位；
+    // 输入不再是 "/" 开头（含删回光杆 "/"）时复位，保证下次输入能重新弹出。
+    var slashMenuDismissed by remember { mutableStateOf(false) }
+    LaunchedEffect(inputText) {
+        if (!inputText.startsWith("/") || inputText == "/") slashMenuDismissed = false
+    }
     var pendingAttachments by remember { mutableStateOf<List<PendingUploadAttachment>>(emptyList()) }
     var uploadingCount by remember { mutableStateOf(0) }
     var messageForMenu by remember { mutableStateOf<AgentUIMessage?>(null) }
@@ -686,6 +693,10 @@ fun AIChatPanel(
     val keyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
 
     val isBusy = agentState is AgentUIState.Loading || agentState is AgentUIState.Streaming
+    // 斜杠菜单当前是否可见（与 ChatInputBar 的展示条件同源）：供系统返回键拦截判定。
+    val slashMenuVisible = shouldShowSlashMenu(inputText, isBusy, slashMenuDismissed, slashCommands)
+    // 系统返回键：菜单打开时优先收起菜单（消费返回事件），不直接退出会话。
+    BackHandler(enabled = slashMenuVisible) { slashMenuDismissed = true }
     // 拆块 + 工具分组：超长助手消息展开成多条有界 item（单条滚动轴、外观连续），
     // 连续的工具调用折成一个「N 次工具调用」分组；chatItems 的顺序即 LazyColumn item 顺序。
     // 提到这里（而不是 LazyColumn 分支内）是因为 isFarFromBottom 的「布局是否对应当前消息」判定
@@ -1423,6 +1434,9 @@ fun AIChatPanel(
                                 awaitEachGesture {
                                     awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                                     pointerDown = true
+                                    // 点击消息列表（斜杠菜单弹窗外部）：收起菜单，
+                                    // 输入框区域内触摸到不了这里，不会误关。
+                                    slashMenuDismissed = true
                                     try {
                                         do {
                                             val event = awaitPointerEvent(PointerEventPass.Final)
@@ -1735,6 +1749,8 @@ fun AIChatPanel(
                 },
                 onTakePhoto = ::takePhoto,
                 slashCommands = slashCommands,
+                slashMenuDismissed = slashMenuDismissed,
+                onSlashMenuDismiss = { slashMenuDismissed = true },
                 queuedRequests = queuedRequests,
                 onRemoveQueued = { viewModel.removeQueuedRequest(it) },
                 onMoveQueued = { from, to -> viewModel.moveQueuedRequest(from, to) },

@@ -44,6 +44,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -59,7 +60,14 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
@@ -89,7 +97,6 @@ import com.aicode.core.ui.rememberImeBottomInset
 import com.aicode.feature.onboarding.domain.OnboardingStep
 import com.aicode.feature.onboarding.presentation.onboardingTarget
 import com.aicode.feature.agent.domain.command.SlashCommand
-import com.aicode.feature.agent.domain.command.SlashCommandKind
 import com.aicode.feature.agent.domain.model.AgentMode
 import com.aicode.feature.agent.domain.model.ReasoningEffort
 import com.aicode.feature.agent.domain.model.TodoItem
@@ -164,6 +171,12 @@ internal fun ChatInputBar(
     onUploadImage: () -> Unit,
     onTakePhoto: () -> Unit,
     slashCommands: List<SlashCommand> = emptyList(),
+    /**
+     * 斜杠菜单是否已被用户主动收起（Esc / 系统返回键 / 点击消息列表）。
+     * 输入不再是 `/` 开头（含删回光杆 `/`）时由调用方复位，保证下次输入能重新弹出。
+     */
+    slashMenuDismissed: Boolean = false,
+    onSlashMenuDismiss: () -> Unit = {},
     queuedRequests: List<QueuedRequest> = emptyList(),
     onRemoveQueued: (String) -> Unit = {},
     onMoveQueued: (Int, Int) -> Unit = { _, _ -> },
@@ -201,12 +214,78 @@ internal fun ChatInputBar(
             inputFieldValue = TextFieldValue(value, TextRange(value.length))
         }
     }
-    val showSlashMenu = !isBusy && slashCommands.isNotEmpty() &&
-        value.startsWith("/") && !value.contains("\n")
-    val filteredCommands = if (showSlashMenu) {
-        if (value == "/") slashCommands
-        else slashCommands.filter { "/${it.name}".startsWith(value) }
-    } else emptyList()
+    // —— 斜杠命令 / 技能菜单 ——
+    // 触发条件见 shouldShowSlashMenu：仅 "/" 位于输入开头（输入路径、网址、中间的 "/"
+    // 不触发；输入法组合输入期间只按当前文本过滤，不改文本、不丢字）。
+    // 键盘导航状态：外接键盘 ↑↓ 移动、Enter/Tab 选中、Esc 收起（见 slashKeyModifier）。
+    val slashMenuState = remember { SlashCommandMenuState() }
+    // 最近使用（内存态：项目暂无持久化，重启后清空）；选中时置顶，各组内排最前。
+    var recentSlashNames by remember { mutableStateOf<List<String>>(emptyList()) }
+    val showSlashMenu = shouldShowSlashMenu(value, isBusy, slashMenuDismissed, slashCommands)
+    // 查询词："/" 之后、首个空格之前的片段；同时匹配名称与描述、不区分大小写，
+    // 名称前缀匹配排在包含匹配之前；组内最近用过的排最前，其余按名称排序。
+    val slashQuery = value.drop(1).substringBefore(' ').trim()
+    val slashGroups = remember(slashCommands, slashQuery, recentSlashNames, showSlashMenu) {
+        if (showSlashMenu) {
+            groupSlashCommands(filterSlashCommands(slashCommands, slashQuery), recentSlashNames)
+        } else {
+            emptyList()
+        }
+    }
+    val slashVisibleCommands = slashGroups.flatMap { it.items }
+    // 选中：把 "/名称"（acceptsArgs 时补一个空格）填入输入框并收起菜单，
+    // 保持「填入而非直接发送」的现有行为。
+    fun selectSlashCommand(command: SlashCommand) {
+        recentSlashNames = recentSlashNames.withRecentSlashCommand(command.name)
+        onSlashMenuDismiss()
+        onValueChange(if (command.acceptsArgs) "/${command.name} " else "/${command.name}")
+    }
+    // 外接键盘导航：挂在菜单与输入框的共同容器上，onPreviewKeyEvent 在 TextField
+    // 拿到键事件之前拦截——软键盘（输入法）不产生键事件，不受影响；只有物理键盘触发。
+    val slashKeyModifier = if (showSlashMenu) {
+        Modifier.onPreviewKeyEvent { event ->
+            if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+            when (event.key) {
+                Key.DirectionUp -> {
+                    slashMenuState.moveUp(slashVisibleCommands.size)
+                    true
+                }
+                Key.DirectionDown -> {
+                    slashMenuState.moveDown(slashVisibleCommands.size)
+                    true
+                }
+                Key.Enter, Key.NumPadEnter, Key.Tab -> {
+                    val command = slashVisibleCommands.getOrNull(slashMenuState.selectedIndex)
+                    if (command != null) {
+                        selectSlashCommand(command)
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Key.Escape -> {
+                    onSlashMenuDismiss()
+                    true
+                }
+                else -> false
+            }
+        }
+    } else {
+        Modifier
+    }
+    // 菜单高度上限：输入框（玻璃栏）上沿到窗口顶部可用空间的 50%，与约 8 行取小。
+    // 输入框上沿用 onGloballyPositioned 实测窗口坐标：软键盘弹出（imeInset 顶高底栏）、
+    // 横竖屏切换、折叠屏 / 分屏尺寸变化都会重新布局，自动按当前可视区域重算，不写死高度。
+    var inputTopInWindowPx by remember { mutableIntStateOf(0) }
+    val slashMenuMaxHeight = with(LocalDensity.current) {
+        val rowCapPx = SLASH_MENU_ROW_HEIGHT.toPx() * SLASH_MENU_MAX_ROWS
+        val capPx = if (inputTopInWindowPx > 0) {
+            minOf(inputTopInWindowPx * 0.5f, rowCapPx)
+        } else {
+            rowCapPx // 首帧未实测时先用「约 8 行」兜底
+        }
+        capPx.toDp()
+    }
 
     // 文本是否已经超出输入框高度（超出后框内滚动，展开按钮才有意义）。
     // 按换行符数硬编码阈值在长行自动折行时会判断错，这里按 TextField 的实际宽度实测文本高度。
@@ -268,66 +347,21 @@ internal fun ChatInputBar(
                 modifier = Modifier
                     .fillMaxWidth()
                     .graphicsLayer { alpha = contentAlpha }
+                    .then(slashKeyModifier)
                     .padding(horizontal = Spacing.lg)
                     .padding(bottom = Spacing.md)
                     .padding(bottom = imeInset)
             ) {
-            if (filteredCommands.isNotEmpty()) {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = Spacing.sm),
-                    shape = RoundedCornerShape(Radius.lg),
-                    color = MaterialTheme.colorScheme.surface,
-                    border = androidx.compose.foundation.BorderStroke(
-                        1.dp, MaterialTheme.colorScheme.outlineVariant
-                    )
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = Spacing.sm, vertical = Spacing.xs)
-                    ) {
-                        filteredCommands.forEach { command ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(Radius.sm))
-                                    .clickable {
-                                        onValueChange(
-                                            if (command.acceptsArgs) "/${command.name} " else "/${command.name}"
-                                        )
-                                    }
-                                    .padding(horizontal = Spacing.md, vertical = Spacing.sm),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    "/${command.name}",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                                Spacer(Modifier.width(Spacing.sm))
-                                Text(
-                                    command.description,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.weight(1f),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                if (command.kind == SlashCommandKind.SKILL) {
-                                    Spacer(Modifier.width(Spacing.sm))
-                                    Text(
-                                        stringResource(R.string.settings_skills),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
+            if (showSlashMenu) {
+                // 斜杠命令 / 技能菜单：LazyColumn 内部滚动，高度上限由 slashMenuMaxHeight
+                // 按当前可视区域动态计算（输入框上沿 50% 与约 8 行取小），不再撑满屏幕。
+                SlashCommandMenu(
+                    groups = slashGroups,
+                    state = slashMenuState,
+                    maxHeight = slashMenuMaxHeight,
+                    onSelect = ::selectSlashCommand,
+                    modifier = Modifier.padding(bottom = Spacing.sm)
+                )
             }
 
             if (queuedRequests.isNotEmpty()) {
@@ -366,7 +400,11 @@ internal fun ChatInputBar(
             // 不再有多张彼此独立的卡片，模式 / 模型 / 附件 / 发送与文本域同属一块玻璃。
             com.aicode.core.ui.GlassSurface(
                 backdrop = glassBackdrop,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    // 实测输入框（玻璃栏）上沿在窗口中的位置：驱动斜杠菜单高度上限，
+                    // 键盘弹出 / 旋转 / 分屏时自动重算
+                    .onGloballyPositioned { inputTopInWindowPx = it.positionInWindow().y.toInt() },
                 cornerRadius = Radius.lg,
                 blurRadius = 12.dp,
                 tintAlpha = 0.14f,

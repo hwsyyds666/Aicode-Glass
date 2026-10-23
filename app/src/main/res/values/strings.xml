@@ -1758,5 +1758,8 @@
     <string name="perf_module_git">Git</string>
     <string name="perf_module_settings">设置</string>
     <string name="perf_module_other">其他</string>
+    <string name="chat_slash_menu_commands_group">命令（共 %1$d 个）</string>
+    <string name="chat_slash_menu_skills_group">技能（共 %1$d 个）</string>
+    <string name="chat_slash_menu_empty">没有匹配的命令或技能</string>
     <string name="tool_diff_skipped_hint">文件较大，不显示逐行对比</string>
 </resources>
