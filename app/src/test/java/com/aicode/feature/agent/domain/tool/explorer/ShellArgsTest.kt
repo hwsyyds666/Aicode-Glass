@@ -184,4 +184,74 @@ class ShellArgsTest {
         val command = buildSearchCommand(parseShellWords("-n \"it's\" src/")!!)!!
         assertTrue(command.contains("'it'\"'\"'s'"))
     }
+
+    // ---------- buildFallbackSearchCommand（rg 缺失时的 grep 兜底） ----------
+
+    @Test
+    fun buildFallbackSearchCommand_mapsCompatibleArgs() {
+        // -i/-F 透传，-n（rg 默认参数）跳过，~ 展开；输出格式与 rg 一致（文件:行号:内容）
+        val command = buildFallbackSearchCommand(
+            parseShellWords("-i -F -n \"fun main\" ~/workspace/app")!!,
+            home = "/root"
+        )!!
+        assertEquals(
+            "grep -rnI -E --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.gradle -i -F -e 'fun main' '/root/workspace/app'",
+            command
+        )
+    }
+
+    @Test
+    fun buildFallbackSearchCommand_noPath_defaultsToDot() {
+        // grep -r 不带路径会读 stdin，必须显式补 "."（命令 cwd 已是工作区）
+        val command = buildFallbackSearchCommand(parseShellWords("TODO")!!)!!
+        assertTrue(command.startsWith("grep -rnI -E"))
+        assertTrue(command.endsWith("-e 'TODO' ."))
+    }
+
+    @Test
+    fun buildFallbackSearchCommand_globMapsToInclude_negativeGlobRejected() {
+        val command = buildFallbackSearchCommand(parseShellWords("-g '*.kt' foo src/")!!)!!
+        assertTrue(command.contains("--include='*.kt'"))
+        assertTrue(command.endsWith("-e 'foo' 'src/'"))
+        // 否定 glob（!）语义与 grep --include 不同，拒绝兜底
+        assertNull(buildFallbackSearchCommand(parseShellWords("-g '!*.min.js' foo src/")!!))
+    }
+
+    @Test
+    fun buildFallbackSearchCommand_multipleRegexpFlags_allPositionalArePaths() {
+        val command = buildFallbackSearchCommand(parseShellWords("-e foo -e bar src/")!!)!!
+        assertTrue(command.contains("-e 'foo' -e 'bar'"))
+        assertTrue(command.endsWith("'src/'"))
+    }
+
+    @Test
+    fun buildFallbackSearchCommand_contextLines_mappedWithNumericValue() {
+        val command = buildFallbackSearchCommand(parseShellWords("-A 3 foo src/")!!)!!
+        assertTrue(command.contains("-A 3"))
+        assertNull(buildFallbackSearchCommand(parseShellWords("-A x foo src/")!!))
+    }
+
+    @Test
+    fun buildFallbackSearchCommand_dashDash_allowsLeadingDashPattern() {
+        val command = buildFallbackSearchCommand(parseShellWords("-- -foo src/")!!)!!
+        assertTrue(command.contains("-e '-foo' 'src/'"))
+    }
+
+    @Test
+    fun buildFallbackSearchCommand_rejectsRgOnlyArgs() {
+        assertNull(buildFallbackSearchCommand(parseShellWords("--json foo src/")!!))
+        assertNull(buildFallbackSearchCommand(parseShellWords("-l foo src/")!!))
+        assertNull(buildFallbackSearchCommand(parseShellWords("--files")!!))
+        assertNull(buildFallbackSearchCommand(parseShellWords("--type ts foo src/")!!))
+        assertNull(buildFallbackSearchCommand(parseShellWords("-N foo src/")!!))
+        // 没有模式（仅开关）同样拒绝
+        assertNull(buildFallbackSearchCommand(parseShellWords("--hidden")!!))
+    }
+
+    @Test
+    fun buildFallbackSearchCommand_keepsHeadPipe_rejectsOtherPipes() {
+        assertTrue(buildFallbackSearchCommand(parseShellWords("foo src/ | head -30")!!)!!.endsWith(" | head -30"))
+        assertNull(buildFallbackSearchCommand(parseShellWords("foo src/ | grep bar")!!))
+        assertNull(buildFallbackSearchCommand(parseShellWords("foo src/ | head -30; rm -rf /")!!))
+    }
 }

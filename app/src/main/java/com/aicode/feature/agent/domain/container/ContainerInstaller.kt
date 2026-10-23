@@ -384,6 +384,14 @@ class ContainerInstaller @Inject constructor(
     private fun customInstalledMarker(profile: ContainerProfile): File =
         File(rootfsDirFor(profile), ".installed_custom")
 
+    /**
+     * 按 [profile] 返回 rootfs 安装标记文件（内置 .installed，自定义 .installed_custom）。
+     * 供 [RipgrepProvisioner] 的检测缓存按「容器世代」失效：rootfs 重装/重置会重写标记
+     * （mtime 变化），缓存 key 随之变化；而 apk add 装 rg 不动标记，缓存不会误失效。
+     */
+    fun installedMarkerFor(profile: ContainerProfile): File =
+        if (profile.isBuiltin) installedMarker else customInstalledMarker(profile)
+
     /** 按 [profile] 判断是否已安装就绪：内置走现有版本校验，自定义本地看目录与标记，远程 SSH 恒就绪。 */
     fun isInstalledFor(profile: ContainerProfile): Boolean =
         when {

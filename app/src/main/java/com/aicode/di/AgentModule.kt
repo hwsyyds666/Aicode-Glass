@@ -17,10 +17,13 @@ import com.aicode.feature.agent.data.remote.anthropic.AnthropicApi
 import com.aicode.feature.agent.data.remote.gemini.GeminiApi
 import com.aicode.feature.agent.data.remote.openai.OpenAIApi
 import com.aicode.feature.agent.domain.container.CommandEngine
+import com.aicode.feature.agent.domain.container.ContainerInstaller
 import com.aicode.feature.agent.domain.container.DelegatingCommandEngine
+import com.aicode.feature.agent.domain.container.DefaultRgEnvironment
 import com.aicode.feature.agent.domain.container.LinuxContainerEngine
 import com.aicode.feature.agent.domain.container.RemoteSshConnection
 import com.aicode.feature.agent.domain.container.RemoteSshEngine
+import com.aicode.feature.agent.domain.container.RgEnvironment
 import com.aicode.feature.agent.domain.container.SharedPrefsSshHostKeyStore
 import com.aicode.feature.agent.domain.container.SharedPrefsSshLoginKeyStore
 import com.aicode.feature.agent.domain.container.SshHostKeyStore
@@ -320,6 +323,26 @@ object AgentModule {
     @Provides
     @Singleton
     fun provideCommandEngine(delegate: DelegatingCommandEngine): CommandEngine = delegate
+
+    /**
+     * rg 保障的执行环境实现：按当前模式回答「目标环境 / 缓存 key / 就绪判定 / 命令执行」。
+     * 本地缓存 key 含 rootfs 安装标记 mtime（容器重建即失效），远程取 SSH 连接身份。
+     */
+    @Provides
+    @Singleton
+    fun provideRgEnvironment(
+        modeHolder: ExecutionModeHolder,
+        localEngine: LinuxContainerEngine,
+        connection: RemoteSshConnection,
+        containerInstaller: ContainerInstaller,
+        delegatingEngine: DelegatingCommandEngine
+    ): RgEnvironment = DefaultRgEnvironment(
+        modeHolder = modeHolder,
+        localEngine = localEngine,
+        connection = connection,
+        containerInstaller = containerInstaller,
+        delegatingEngine = delegatingEngine
+    )
 
     @Provides
     @Singleton

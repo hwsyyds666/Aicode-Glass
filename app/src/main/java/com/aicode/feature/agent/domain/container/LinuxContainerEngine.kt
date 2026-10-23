@@ -30,6 +30,7 @@ import kotlinx.coroutines.withContext
 import java.io.InputStreamReader
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
+import javax.inject.Provider
 import javax.inject.Singleton
 
 /**
@@ -77,7 +78,10 @@ class LinuxContainerEngine @Inject constructor(
     private val containerInstaller: ContainerInstaller,
     private val containerOsDetector: ContainerOsDetector,
     private val containerSettingsRepository: com.aicode.feature.settings.data.repository.ContainerSettingsRepository,
-    private val pathHomeResolver: com.aicode.feature.workspace.domain.PathHomeResolver
+    private val pathHomeResolver: com.aicode.feature.workspace.domain.PathHomeResolver,
+    // Provider 延迟解析：rg 保障 → RgEnvironment → DelegatingCommandEngine → 本引擎，构成构造环，
+    // 用 Provider 把解析推迟到首次调用（ensureInstalled 已完成构造）以打破循环。
+    private val ripgrepProvisioner: Provider<RipgrepProvisioner>
 ) : CommandEngine {
     /** 容器初始化的实时进度，供所有入口（终端页/AI/后台终端/MCP）共享同一份状态。 */
     private val _initProgress = MutableStateFlow<ContainerInitState>(ContainerInitState.Idle)
@@ -119,6 +123,19 @@ class LinuxContainerEngine @Inject constructor(
         return profiles.firstOrNull { it.id == id }
             ?: profiles.firstOrNull()
             ?: ContainerProfile.BUILTIN_ALPINE
+    }
+
+    /** 当前选中的 profile（rg 保障等外部组件据此按容器身份计算缓存 key）。 */
+    fun activeProfile(): ContainerProfile = currentProfile
+
+    /**
+     * rg 保障（幂等，best-effort）：把 rg 安装纳入容器初始化流程——进入终端即检测并按需补装，
+     * 覆盖全新容器与「当初跳过初始化菜单 / 手动删掉 rg」的存量缺失；已装则跳过（provisioner
+     * 按容器世代缓存）。失败仅告警不阻塞初始化——search 工具另有「自动安装 → grep 兜底」自愈链路。
+     */
+    private suspend fun ensureRipgrep() {
+        runCatching { ripgrepProvisioner.get().ensureAvailable() }
+            .onFailure { FileLogger.w(TAG, "rg 保障失败（不阻塞容器初始化）", it) }
     }
 
     /**
@@ -514,9 +531,11 @@ class LinuxContainerEngine @Inject constructor(
 
     /**
      * 幂等地确保容器可用：解压 rootfs/proot（首次耗时）。所有容器（内置/自定义）一致——
-     * 基础工具安装不在此阶段自动执行，由进入终端时的初始化菜单（assets/aicode/provision.sh）
-     * 引导用户选择，装包失败也不阻塞进入 shell。
-     * 仅由终端页（[TerminalSessionManager]）作为唯一初始化入口调用；命令执行入口不再自动触发。
+     * 运行时等基础工具安装不在此阶段自动执行，由进入终端时的初始化菜单（assets/aicode/provision.sh）
+     * 引导用户选择，装包失败也不阻塞进入 shell。**例外是 rg（ripgrep）**：search 工具强依赖它，
+     * 就绪后经 [ensureRipgrep] 幂等补装（已装跳过，失败不阻塞）。
+     * 仅由终端页（[com.aicode.feature.terminal.domain.TerminalSessionManager]）作为唯一初始化入口调用；
+     * 命令执行入口不再自动触发。
      *
      * 耗时初始化（解压）在引擎级 [initScope] 中执行，不随调用方（终端页 viewModelScope）
      * 取消而中断——退出终端页后初始化仍在后台继续，下次进入可复用同一 job 或等待其完成。
@@ -539,6 +558,7 @@ class LinuxContainerEngine @Inject constructor(
             _initProgress.value = ContainerInitState.Ready
             refreshContainerHome()
             detectAndCacheOsIfNeeded(profile)
+            ensureRipgrep()
             FileLogger.i(TAG, "ensureInstalled 完成（快路径，耗时 ${System.currentTimeMillis() - startedAt}ms）")
             logContainerDiagnostics("ensureInstalled 快路径")
             return
@@ -565,6 +585,7 @@ class LinuxContainerEngine @Inject constructor(
             _initProgress.value = ContainerInitState.Ready
             refreshContainerHome()
             detectAndCacheOsIfNeeded(profile)
+            ensureRipgrep()
             FileLogger.i(TAG, "ensureInstalled 完成（耗时 ${System.currentTimeMillis() - startedAt}ms）")
             logContainerDiagnostics("ensureInstalled 完成后")
         } else {

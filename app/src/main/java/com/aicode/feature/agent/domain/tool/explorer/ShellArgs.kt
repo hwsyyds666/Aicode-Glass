@@ -144,6 +144,92 @@ fun expandTilde(arg: String, home: String = "/root"): String =
         else -> arg
     }
 
+/**
+ * 组装 rg 缺失时的 **grep 兜底**搜索命令：把与 grep 原生兼容的参数透传，输出格式
+ * （`文件:行号:内容`）与 [buildSearchCommand] 的 rg 输出一致；遇到 rg 专有参数
+ * （--json/-l/-c/-o/-N/--type/--files/-u 等）返回 null，由调用方提示用户先装 rg。
+ *
+ * 已知妥协（兜底路径与 rg 的差异，调用方应在结果的 backend 字段标注 grep）：
+ *  - grep 不读 .gitignore（rg 默认读），以 `--exclude-dir` 排除 .git 与常见构建目录近似；
+ *  - `-g` 仅映射正向 glob 到 `--include`，否定 glob（`!`）语义不同，拒绝兜底；
+ *  - `--hidden` 为 no-op（grep -r 默认即含隐藏文件）；
+ *  - 正则按 POSIX ERE（-E）解释，与 rg 的 Rust 正则不完全一致（如 `\d` 不可用）。
+ */
+fun buildFallbackSearchCommand(tokens: List<String>, home: String = "/root"): String? {
+    val (searchTokens, pipeSegments) = splitPipes(tokens) ?: return null
+    val grepArgs = mutableListOf(
+        "grep", "-rnI", "-E",
+        "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=.gradle"
+    )
+    val positional = mutableListOf<String>()
+    var hasRegexpFlag = false
+    var afterDashDash = false
+    var i = 0
+    while (i < searchTokens.size) {
+        val t = searchTokens[i]
+        if (afterDashDash) {
+            positional += t
+            i++
+            continue
+        }
+        when {
+            t == "--" -> afterDashDash = true
+            // 与 grep 原生兼容的开关：原样透传
+            t == "-i" || t == "--ignore-case" || t == "-F" || t == "--fixed-strings" ||
+                t == "-w" || t == "--word-regexp" -> grepArgs += t
+            // 上下文行数：rg 与 grep 语义一致，透传（值必须纯数字）
+            t == "-A" || t == "-B" || t == "-C" -> {
+                if (i + 1 >= searchTokens.size) return null
+                val n = searchTokens[i + 1]
+                if (n.isEmpty() || !n.all(Char::isDigit)) return null
+                grepArgs += listOf(t, n)
+                i++
+            }
+            // -e/--regexp 带模式值：grep 同样支持多 -e 或语义
+            t == "-e" || t == "--regexp" -> {
+                if (i + 1 >= searchTokens.size) return null
+                hasRegexpFlag = true
+                grepArgs += listOf("-e", shellQuote(searchTokens[i + 1]))
+                i++
+            }
+            // -g/--glob → --include（仅正向 glob）
+            t == "-g" || t == "--glob" -> {
+                if (i + 1 >= searchTokens.size) return null
+                val glob = searchTokens[i + 1]
+                if (glob.startsWith("!")) return null
+                grepArgs += "--include=${shellQuote(glob)}"
+                i++
+            }
+            // rg 默认输出参数与 grep -rn 重复或无需映射：跳过（--color 连带跳过其值 never）
+            t == "--hidden" || t == "-n" || t == "--line-number" || t == "--no-heading" ||
+                t == "--with-filename" -> Unit
+            t == "--color" -> i++
+            // 其它 rg 专有参数：无法安全映射，拒绝兜底
+            t.startsWith("-") -> return null
+            else -> positional += t
+        }
+        i++
+    }
+    // 模式来源：有 -e 时全部位置参数都是路径；否则第一个位置参数是模式
+    if (!hasRegexpFlag && positional.isEmpty()) return null
+    val pattern = if (hasRegexpFlag) null else positional.first()
+    val paths = (if (hasRegexpFlag) positional else positional.drop(1))
+        .map { expandTilde(it, home) }
+    val sb = StringBuilder(grepArgs.joinToString(" "))
+    if (pattern != null) sb.append(" -e ").append(shellQuote(pattern))
+    if (paths.isEmpty()) {
+        // grep -r 不带路径会读 stdin，必须显式给目录（命令 cwd 已是工作区）
+        sb.append(" .")
+    } else {
+        paths.forEach { sb.append(" ").append(shellQuote(it)) }
+    }
+    for (seg in pipeSegments) {
+        if (headLinesOf(seg) == null) return null
+        sb.append(" | ").append(seg.joinToString(" "))
+    }
+    return sb.toString()
+}
+
 /** 单引号包裹，shell 命令安全。 */
 fun shellQuote(value: String): String {
     return "'" + value.replace("'", "'\"'\"'") + "'"

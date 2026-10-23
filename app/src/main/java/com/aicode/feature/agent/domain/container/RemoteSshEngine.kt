@@ -27,6 +27,7 @@ import kotlinx.coroutines.withContext
 import java.io.InputStreamReader
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
+import javax.inject.Provider
 
 private const val TAG = "RemoteSshEngine"
 
@@ -37,13 +38,16 @@ private const val TAG = "RemoteSshEngine"
  * 走另一条独立的 SFTP transport（见 [RemoteSshConnection.sftp]），两者隔离互不影响。
  *
  * 与 [LinuxContainerEngine] 的语义对应：
- * - [ensureInstalled]：建立/维持 SSH 连接（对应本地解压 rootfs）；
+ * - [ensureInstalled]：建立/维持 SSH 连接（对应本地解压 rootfs），连接成功后幂等补装 rg；
  * - [isContainerInstalled]：SSH 连接是否存活（对应本地 rootfs 是否就绪）；
- * - [isProvisioned]：恒 true（远程工具由用户自行保证，对应本地 apk 装包完成）；
+ * - [isProvisioned]：恒 true（除 rg 外远程工具由用户自行保证，对应本地 apk 装包完成）；
  * - [defaultShell]：/bin/bash（远程服务器通常有 bash）。
  */
 class RemoteSshEngine @Inject constructor(
-    private val connection: RemoteSshConnection
+    private val connection: RemoteSshConnection,
+    // Provider 延迟解析：rg 保障 → RgEnvironment → DelegatingCommandEngine → 本引擎，构成构造环，
+    // 用 Provider 把解析推迟到首次调用（连接已建立）以打破循环。
+    private val ripgrepProvisioner: Provider<RipgrepProvisioner>
 ) : CommandEngine {
 
     private val _initProgress = MutableStateFlow<ContainerInitState>(ContainerInitState.Idle)
@@ -233,6 +237,10 @@ class RemoteSshEngine @Inject constructor(
         try {
             connection.connect()
             _initProgress.value = ContainerInitState.Ready
+            // rg 保障（幂等，best-effort）：远程服务器不保证装有 rg，连接建立后检测并按需经
+            // 服务器自身包管理器补装；失败仅告警不阻塞连接——search 工具另有兜底链路。
+            runCatching { ripgrepProvisioner.get().ensureAvailable() }
+                .onFailure { FileLogger.w(TAG, "rg 保障失败（不阻塞 SSH 连接）", it) }
         } catch (e: Exception) {
             FileLogger.e(TAG, "SSH 连接失败", e)
             val friendly = friendlySshError(e)
