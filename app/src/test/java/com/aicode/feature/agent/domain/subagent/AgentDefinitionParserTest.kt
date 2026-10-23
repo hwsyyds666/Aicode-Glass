@@ -3,6 +3,7 @@ package com.aicode.feature.agent.domain.subagent
 import com.aicode.feature.agent.domain.model.AgentMode
 import com.aicode.testutil.TestFileAccessProvider
 import java.io.File
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -24,7 +25,9 @@ class AgentDefinitionParserTest {
      * 这里先归一化成容器路径。
      */
     private fun parseFile(file: File): AgentDefinition? =
-        AgentDefinitionParser.parse(provider, file.absolutePath.replace(File.separatorChar, '/'))
+        runBlocking {
+            AgentDefinitionParser.parse(provider, file.absolutePath.replace(File.separatorChar, '/'))
+        }
 
     private fun write(name: String, content: String): File =
         File(tempFolder.root, name).apply { writeText(content) }
@@ -138,14 +141,14 @@ class AgentDefinitionParserTest {
         File(tempFolder.root, "nested").mkdirs()
         File(File(tempFolder.root, "nested"), "c.md").writeText("---\nname: c\n---\n正文")
 
-        val defs = AgentDefinitionDirectoryScanner.scan(provider, tempFolder.root.absolutePath)
+        val defs = runBlocking { AgentDefinitionDirectoryScanner.scan(provider, tempFolder.root.absolutePath) }
 
         assertEquals(listOf("a", "b"), defs.map { it.name })
     }
 
     @Test
     fun scan_missingRootReturnsEmpty() {
-        assertTrue(AgentDefinitionDirectoryScanner.scan(provider, File(tempFolder.root, "not-exists").absolutePath).isEmpty())
+        assertTrue(runBlocking { AgentDefinitionDirectoryScanner.scan(provider, File(tempFolder.root, "not-exists").absolutePath) }.isEmpty())
     }
 
     /**

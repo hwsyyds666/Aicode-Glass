@@ -2,6 +2,8 @@ package com.aicode.core.util
 
 import java.io.Closeable
 import java.io.Reader
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 
 /**
  * 单行输出上限（字符）。`BufferedReader.readLine()` 遇到超长单行（命令把二进制/大文件 dump 到
@@ -14,7 +16,12 @@ internal const val MAX_STREAM_LINE_CHARS = 64 * 1024
 internal const val LINE_TRUNCATED_NOTE = "[该行输出过长，已截断]"
 
 /** 一行输出；[truncated] 为 true 表示该行超过 [MAX_STREAM_LINE_CHARS] 被截断。 */
-internal class StreamLine(val text: String, val truncated: Boolean)
+internal class StreamLine(
+    val text: String,
+    val truncated: Boolean,
+    /** 该行是否以换行符结束（末行无换行时为 false）：供读取侧按原字节重组文本。 */
+    val hadTerminator: Boolean = false
+)
 
 /**
  * 逐行读取 [reader]，分行语义与 [java.io.BufferedReader.readLine] 一致（`\n` / `\r` / `\r\n`），
@@ -37,7 +44,7 @@ internal class BoundedLineReader(
         var sawContent = false
         while (true) {
             if (pos >= len) {
-                if (len == -1) return if (sawContent) StreamLine(sb.toString(), truncated) else null
+                if (len == -1) return if (sawContent) StreamLine(sb.toString(), truncated, hadTerminator = false) else null
                 len = reader.read(buf)
                 pos = 0
                 continue
@@ -48,10 +55,10 @@ internal class BoundedLineReader(
                 if (c == '\n') continue
             }
             when (c) {
-                '\n' -> return StreamLine(sb.toString(), truncated)
+                '\n' -> return StreamLine(sb.toString(), truncated, hadTerminator = true)
                 '\r' -> {
                     skipLf = true
-                    return StreamLine(sb.toString(), truncated)
+                    return StreamLine(sb.toString(), truncated, hadTerminator = true)
                 }
                 else -> {
                     sawContent = true
@@ -72,6 +79,19 @@ internal fun boundedLines(open: () -> Reader): Sequence<String> = sequence {
         while (true) {
             val line = reader.readLine() ?: break
             yield(line.text)
+        }
+    }
+}
+
+/**
+ * [boundedLines] 的 Flow 版：语义完全一致（惰性、单行封顶、可取消），供挂起侧的文件访问接口使用。
+ * 相比 Sequence 版，收集过程是挂起的：持有锁的协程可以在读取期间被取消，不会占住线程。
+ */
+internal fun boundedLineFlow(open: () -> Reader): Flow<String> = flow {
+    BoundedLineReader(open()).use { reader ->
+        while (true) {
+            val line = reader.readLine() ?: break
+            emit(line.text)
         }
     }
 }

@@ -126,7 +126,7 @@ class ViewImageTool @Inject constructor(
         }
     }
 
-    private fun loadImagesDirectlyToContext(
+    private suspend fun loadImagesDirectlyToContext(
         images: List<String>,
         prompt: String,
         detail: String
@@ -346,7 +346,7 @@ class ViewImageTool @Inject constructor(
         return provider
     }
 
-    private fun encodeImage(path: String, detail: String): EncodeOutcome {
+    private suspend fun encodeImage(path: String, detail: String): EncodeOutcome {
         return try {
             val file = fileAccess.copyToLocal(path)
             FileLogger.d(TAG, "viewImage path=$path -> ${file.absolutePath}, detail=$detail")
@@ -384,7 +384,7 @@ class ViewImageTool @Inject constructor(
         }
     }
 
-    private fun originalImage(path: String, bounds: ImageBounds, mime: String, size: Long): EncodedImage =
+    private suspend fun originalImage(path: String, bounds: ImageBounds, mime: String, size: Long): EncodedImage =
         EncodedImage(
             mimeType = mime,
             base64Data = Base64.encodeToString(fileAccess.readBytes(path), Base64.NO_WRAP),

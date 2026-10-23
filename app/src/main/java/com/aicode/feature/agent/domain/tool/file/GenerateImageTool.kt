@@ -487,7 +487,7 @@ class GenerateImageTool @Inject constructor(
     }
 
     /** 单张图落盘：base64 → 按真实格式写文件 → 组装 AgentImage 与 files 附件。 */
-    private fun persistImage(
+    private suspend fun persistImage(
         base64: String,
         effectiveBasePath: String,
         overwrite: Boolean,
@@ -505,7 +505,7 @@ class GenerateImageTool @Inject constructor(
         return bytes.size.toLong()
     }
 
-    private fun persistImageBytes(
+    private suspend fun persistImageBytes(
         bytes: ByteArray,
         base64: String,
         effectiveBasePath: String,

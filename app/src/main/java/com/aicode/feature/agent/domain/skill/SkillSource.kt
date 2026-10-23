@@ -5,8 +5,8 @@ package com.aicode.feature.agent.domain.skill
  */
 interface SkillSource {
     /** 扫描并返回该数据源下当前所有合法的 Skill。 */
-    fun listSkills(): List<Skill>
+    suspend fun listSkills(): List<Skill>
 
     /** 读取指定 skill 的完整指令正文；不存在或解析失败时返回 null。 */
-    fun loadInstructions(name: String): String?
+    suspend fun loadInstructions(name: String): String?
 }

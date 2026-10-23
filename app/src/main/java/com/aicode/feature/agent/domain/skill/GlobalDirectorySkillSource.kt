@@ -16,8 +16,8 @@ class GlobalDirectorySkillSource @Inject constructor(
 
     val skillsRoot: String = "~/.aicode/skills"
 
-    override fun listSkills(): List<Skill> = SkillDirectoryScanner.scan(fileAccess, skillsRoot)
+    override suspend fun listSkills(): List<Skill> = SkillDirectoryScanner.scan(fileAccess, skillsRoot)
 
-    override fun loadInstructions(name: String): String? =
+    override suspend fun loadInstructions(name: String): String? =
         SkillDirectoryScanner.locateAndRead(fileAccess, skillsRoot, name)
 }

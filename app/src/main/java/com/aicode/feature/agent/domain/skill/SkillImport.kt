@@ -63,8 +63,10 @@ internal object SkillImporter {
     /**
      * 从 Markdown 文本导入单个技能：解析 frontmatter 取名称/描述/工具，再归一化为 SKILL.md 落盘。
      * [fallbackName] 用于正文缺 name 时兜底（如源文件名）。
+     *
+     * 挂起函数：写盘经 [FileAccessProvider]（远程模式走 SFTP），调用方须在协程里调用。
      */
-    fun importMarkdown(
+    suspend fun importMarkdown(
         provider: FileAccessProvider,
         skillsRoot: String,
         existingNames: Set<String>,
@@ -87,8 +89,12 @@ internal object SkillImporter {
         }
     }
 
-    /** 从 zip 输入流导入技能（一个包内可含多个技能目录）。 */
-    fun importArchive(
+    /**
+     * 从 zip 输入流导入技能（一个包内可含多个技能目录）。
+     *
+     * 挂起函数：写盘经 [FileAccessProvider]（远程模式走 SFTP），调用方须在协程里调用。
+     */
+    suspend fun importArchive(
         provider: FileAccessProvider,
         skillsRoot: String,
         existingNames: Set<String>,

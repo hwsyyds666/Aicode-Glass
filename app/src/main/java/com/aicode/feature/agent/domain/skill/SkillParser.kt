@@ -19,8 +19,10 @@ object SkillParser {
     /**
      * 解析一个 skill 目录；无 SKILL.md / CLAUDE.md 或无 name 时视为非法，返回 null。
      * 目录经 [provider] 以容器路径读取，本地/远程统一。
+     *
+     * 挂起函数：底层经 [FileAccessProvider]（远程模式走 SFTP），调用方须在协程里调用。
      */
-    fun parse(provider: FileAccessProvider, dirPath: String): Skill? {
+    suspend fun parse(provider: FileAccessProvider, dirPath: String): Skill? {
         val dir = dirPath.trimEnd('/')
         // 优先 SKILL.md，其次 CLAUDE.md（兼容只用 CLAUDE.md 的技能）；名称匹配忽略大小写
         val fileName = runCatching {

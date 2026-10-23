@@ -246,7 +246,7 @@ private fun sanitizeUploadFileName(name: String): String {
     return cleaned.ifBlank { "upload" }.take(160)
 }
 
-private fun uniqueUploadName(fileAccess: FileAccessProvider, dir: String, fileName: String): String {
+private suspend fun uniqueUploadName(fileAccess: FileAccessProvider, dir: String, fileName: String): String {
     if (!fileAccess.exists("$dir/$fileName")) return fileName
 
     val dotIndex = fileName.lastIndexOf('.')

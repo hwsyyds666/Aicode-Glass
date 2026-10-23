@@ -3,7 +3,7 @@ package com.aicode.feature.workspace.domain
 import android.content.Context
 import android.util.Base64
 import com.aicode.core.util.FileLogger
-import com.aicode.core.util.boundedLines
+import com.aicode.core.util.boundedLineFlow
 import com.aicode.feature.agent.domain.container.ContainerInstaller
 import com.aicode.feature.agent.domain.device.DeviceRootEngine
 import com.aicode.feature.workspace.data.repository.WorkspaceRepository
@@ -17,6 +17,9 @@ import java.nio.charset.Charset
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.NoSuchFileException
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -188,16 +191,19 @@ class DeviceRootFileAccess @Inject constructor(
 
     // ---------- 读 ----------
 
-    override fun readFile(path: String): String = String(readBytes(path), Charsets.UTF_8)
+    override suspend fun readFile(path: String): String = String(readBytes(path), Charsets.UTF_8)
 
     /**
      * 逐行读取。与本地/远程实现不同：真机通道每次迭代重新经 `su` 读全文件（非流式），
      * 受 [MAX_READ_BYTES] 上限约束；序列仍可重复迭代，单行截断由 [boundedLines] 保证。
      */
-    override fun readLines(path: String): Sequence<String> =
-        boundedLines { StringReader(readFile(path)) }
+    override fun readLines(path: String): Flow<String> = flow {
+        // 真机通道每次收集都经 su 读全文件（非流式），与旧实现一致；boundedLineFlow 保证单行截断。
+        val text = readFile(path)
+        emitAll(boundedLineFlow { StringReader(text) })
+    }
 
-    override fun readBytes(path: String): ByteArray {
+    override suspend fun readBytes(path: String): ByteArray {
         val real = resolve(path)
         val r = sh(
             "sz=\$(stat -c %s ${q(real)} 2>/dev/null) || exit 2; " +
@@ -217,7 +223,7 @@ class DeviceRootFileAccess @Inject constructor(
      * 技能文件时会退化成上百次往返——那才是技能扫描把主线程拖到 ANR 的根因，而不是文件本身大。
      * 分批只为避开单次输出上限 [MAX_OUTPUT_BYTES]（base64 会把体积放大约 1/3）。
      */
-    override fun readFiles(paths: List<String>): Map<String, String> {
+    override suspend fun readFiles(paths: List<String>): Map<String, String> {
         if (paths.isEmpty()) return emptyMap()
         val out = LinkedHashMap<String, String>(paths.size)
         paths.chunked(BATCH_READ_CHUNK).forEach { chunk -> out.putAll(readFilesChunk(chunk)) }
@@ -246,7 +252,7 @@ class DeviceRootFileAccess @Inject constructor(
      * 上百个 SKILL.md 只需要文件头即可匹配，不必把全部正文拉过 shell 管道。单批按累计头部预算切分
      * （[HEAD_READ_BUDGET_BYTES]），小文件一批搞定，仍然是一次 su 往返。
      */
-    override fun readFileHeads(paths: List<String>, maxBytes: Int): Map<String, String> {
+    override suspend fun readFileHeads(paths: List<String>, maxBytes: Int): Map<String, String> {
         if (paths.isEmpty() || maxBytes <= 0) return emptyMap()
         val out = LinkedHashMap<String, String>(paths.size)
         val chunk = mutableListOf<String>()
@@ -304,25 +310,25 @@ class DeviceRootFileAccess @Inject constructor(
         return out
     }
 
-    override fun exists(path: String): Boolean = testFlag(resolve(path), "-e")
+    override suspend fun exists(path: String): Boolean = testFlag(resolve(path), "-e")
 
-    override fun isDirectory(path: String): Boolean = testFlag(resolve(path), "-d")
+    override suspend fun isDirectory(path: String): Boolean = testFlag(resolve(path), "-d")
 
-    override fun isFile(path: String): Boolean = testFlag(resolve(path), "-f")
+    override suspend fun isFile(path: String): Boolean = testFlag(resolve(path), "-f")
 
-    override fun fileSize(path: String): Long =
+    override suspend fun fileSize(path: String): Long =
         sh("stat -c %s ${q(resolve(path))} 2>/dev/null").output.trim().toLongOrNull() ?: 0L
 
-    override fun lastModified(path: String): Long =
+    override suspend fun lastModified(path: String): Long =
         (sh("stat -c %Y ${q(resolve(path))} 2>/dev/null").output.trim().toLongOrNull() ?: 0L) * 1000
 
-    override fun permissions(path: String): String {
+    override suspend fun permissions(path: String): String {
         val a = sh("stat -c %A ${q(resolve(path))} 2>/dev/null").output.trim()
         // %A 形如 "-rw-r--r--"：取 owner 三位；取不到时 root 视角默认可读写执行
         return if (a.length >= 4) a.substring(1, 4) else "rwx"
     }
 
-    override fun listFiles(path: String): List<FileEntry> {
+    override suspend fun listFiles(path: String): List<FileEntry> {
         val real = resolve(path)
         // 快路径：一条 find -printf 拿回全部属性（单次 su fork，见 DeviceRootListing）。
         val r = sh(DeviceRootListing.findScript(real), timeoutMs = LIST_TIMEOUT_MS)
@@ -334,7 +340,7 @@ class DeviceRootFileAccess @Inject constructor(
         return DeviceRootListing.parseLegacyOutput(legacy.output, real)
     }
 
-    override fun listFilesRecursive(path: String, maxDepth: Int): List<String> {
+    override suspend fun listFilesRecursive(path: String, maxDepth: Int): List<String> {
         val real = resolve(path)
         val r = sh(
             "[ -d ${q(real)} ] || exit 0; " +
@@ -368,13 +374,13 @@ class DeviceRootFileAccess @Inject constructor(
         FileLogger.i(TAG, "写入(真机): '$path' -> $real (${bytes.size} 字节)")
     }
 
-    override fun writeFile(path: String, content: String, overwrite: Boolean, encoding: Charset) =
+    override suspend fun writeFile(path: String, content: String, overwrite: Boolean, encoding: Charset) =
         writeBytesInternal(path, content.toByteArray(encoding), overwrite)
 
-    override fun writeBytes(path: String, bytes: ByteArray, overwrite: Boolean) =
+    override suspend fun writeBytes(path: String, bytes: ByteArray, overwrite: Boolean) =
         writeBytesInternal(path, bytes, overwrite)
 
-    override fun writeStream(path: String, input: InputStream, overwrite: Boolean): Long {
+    override suspend fun writeStream(path: String, input: InputStream, overwrite: Boolean): Long {
         // 与 readBytes 同理需整体过内存（base64 经 stdin）；cap 与写上限一致。
         val acc = ByteArrayOutputStream()
         val buf = ByteArray(8192)
@@ -394,12 +400,12 @@ class DeviceRootFileAccess @Inject constructor(
 
     // ---------- 目录/文件操作 ----------
 
-    override fun mkdirs(path: String) {
+    override suspend fun mkdirs(path: String) {
         // 对齐 Local（mkdirs 返回值忽略）：失败静默
         sh("mkdir -p ${q(resolve(path))} 2>/dev/null; exit 0")
     }
 
-    override fun delete(path: String) {
+    override suspend fun delete(path: String) {
         // 对齐 Local（file.delete() 返回值忽略）：不存在/失败静默
         val real = resolve(path)
         sh(
@@ -409,13 +415,13 @@ class DeviceRootFileAccess @Inject constructor(
         )
     }
 
-    override fun deleteRecursively(path: String) {
+    override suspend fun deleteRecursively(path: String) {
         val real = resolve(path)
         val r = sh("[ -e ${q(real)} ] || [ -L ${q(real)} ] || exit 0; rm -rf ${q(real)}")
         if (r.exitCode != 0) throw IOException("delete failed: $real (${r.output.take(200)})")
     }
 
-    override fun rename(path: String, newPath: String) {
+    override suspend fun rename(path: String, newPath: String) {
         val src = resolve(path)
         val dst = resolve(newPath)
         val script = "[ -e ${q(src)} ] || [ -L ${q(src)} ] || exit 2; " +
@@ -425,7 +431,7 @@ class DeviceRootFileAccess @Inject constructor(
         sh(script).throwForError(path)
     }
 
-    override fun copy(path: String, newPath: String, overwrite: Boolean) {
+    override suspend fun copy(path: String, newPath: String, overwrite: Boolean) {
         val src = resolve(path)
         val dst = resolve(newPath)
         if (dst == src || dst.startsWith("$src/")) {
@@ -442,7 +448,7 @@ class DeviceRootFileAccess @Inject constructor(
         sh(script).throwForError(path)
     }
 
-    override fun move(path: String, newPath: String, overwrite: Boolean) {
+    override suspend fun move(path: String, newPath: String, overwrite: Boolean) {
         val src = resolve(path)
         val dst = resolve(newPath)
         if (dst == src || dst.startsWith("$src/")) {
@@ -462,7 +468,7 @@ class DeviceRootFileAccess @Inject constructor(
 
     // ---------- 本地互转 ----------
 
-    override fun copyToLocal(path: String): File {
+    override suspend fun copyToLocal(path: String): File {
         val real = resolve(path)
         // 工作区 / sdcard 等 app 可直接读的路径免复制快路径（同 Local 语义）；
         // 仅 root 可读的路径经 su 读字节后落到缓存目录。
@@ -476,7 +482,7 @@ class DeviceRootFileAccess @Inject constructor(
         return tmp
     }
 
-    override fun parentPath(path: String): String? {
+    override suspend fun parentPath(path: String): String? {
         val real = resolve(path).trimEnd('/')
         val idx = real.lastIndexOf('/')
         if (idx < 0) return null
@@ -485,7 +491,7 @@ class DeviceRootFileAccess @Inject constructor(
         return toDisplayPath(parent)
     }
 
-    override fun toDisplayPath(path: String): String {
+    override suspend fun toDisplayPath(path: String): String {
         val ws = workspaceRepository.currentPath().trim().trimEnd('/')
         val aicodeReal = containerInstaller.aicodeDir.absolutePath
         val p = path.trim().trimEnd('/').ifEmpty { "/" }

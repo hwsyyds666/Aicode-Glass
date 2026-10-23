@@ -21,38 +21,38 @@ class AgentDefinitionRepository @Inject constructor(
     private val fileAccess: FileAccessProvider
 ) {
     /** 全部定义（含来源作用域），未过滤禁用，按名称排序。 */
-    fun listAll(): List<AgentDefinitionEntry> =
+    suspend fun listAll(): List<AgentDefinitionEntry> =
         mergeAll(globalSource.listDefinitions(), projectSource.listDefinitions())
 
     /** 已启用的定义（注入主代理的可派发清单用）。 */
-    fun listEnabled(): List<AgentDefinitionEntry> {
+    suspend fun listEnabled(): List<AgentDefinitionEntry> {
         val disabled = configRepository.disabledNames()
         return listAll().filterNot { it.definition.name.lowercase() in disabled }
     }
 
     /** 按名称查找可派发的定义（忽略大小写）；不存在或已被禁用时返回 null。 */
-    fun find(name: String): AgentDefinition? =
+    suspend fun find(name: String): AgentDefinition? =
         listEnabled().firstOrNull { it.definition.name.equals(name, ignoreCase = true) }?.definition
 
     /**
      * 按名称查找定义，包含已禁用的。已经派出去的子会话要用它还原自己的提示词与工具集——
      * 禁用只该拦住新的派发，不该让在跑的子代理中途换一套配置。
      */
-    fun findIncludingDisabled(name: String): AgentDefinition? =
+    suspend fun findIncludingDisabled(name: String): AgentDefinition? =
         listAll().firstOrNull { it.definition.name.equals(name, ignoreCase = true) }?.definition
 
     /** 该子代理是否在任一作用域中被禁用。 */
-    fun isDisabled(name: String): Boolean = name.lowercase() in configRepository.disabledNames()
+    suspend fun isDisabled(name: String): Boolean = name.lowercase() in configRepository.disabledNames()
 
     /** 在指定作用域启用/禁用某个子代理。 */
-    fun setDisabled(name: String, disabled: Boolean, scope: AgentDefinitionScope) =
+    suspend fun setDisabled(name: String, disabled: Boolean, scope: AgentDefinitionScope) =
         configRepository.setDisabled(name, disabled, scope)
 
     /**
      * 写入定义文件（新建或编辑）。[originalName] 为编辑前的名称，新建时传 null；
      * 改了名就写新文件再删旧文件，等价于重命名。返回 null 表示成功。
      */
-    fun save(
+    suspend fun save(
         form: AgentDefinitionForm,
         scope: AgentDefinitionScope,
         originalName: String? = null
@@ -110,7 +110,7 @@ class AgentDefinitionRepository @Inject constructor(
     }
 
     /** 删除指定作用域的定义文件，不可恢复。返回是否成功。 */
-    fun delete(name: String, scope: AgentDefinitionScope): Boolean {
+    suspend fun delete(name: String, scope: AgentDefinitionScope): Boolean {
         val entry = listAll().firstOrNull {
             it.definition.name.equals(name, ignoreCase = true) && it.scope == scope
         } ?: return false

@@ -5,6 +5,7 @@ import com.aicode.feature.settings.data.repository.ExecutionModeHolder
 import java.io.File
 import java.io.InputStream
 import java.nio.charset.Charset
+import kotlinx.coroutines.flow.Flow
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -29,58 +30,58 @@ class DelegatingFileAccess @Inject constructor(
         ExecutionMode.LOCAL_PROOT -> localFileAccess
     }
 
-    override fun readFile(path: String): String = delegate().readFile(path)
+    override suspend fun readFile(path: String): String = delegate().readFile(path)
 
-    override fun readLines(path: String): Sequence<String> = delegate().readLines(path)
+    override fun readLines(path: String): Flow<String> = delegate().readLines(path)
 
-    override fun writeFile(path: String, content: String, overwrite: Boolean, encoding: Charset) =
+    override suspend fun writeFile(path: String, content: String, overwrite: Boolean, encoding: Charset) =
         delegate().writeFile(path, content, overwrite, encoding)
 
-    override fun exists(path: String): Boolean = delegate().exists(path)
+    override suspend fun exists(path: String): Boolean = delegate().exists(path)
 
-    override fun isDirectory(path: String): Boolean = delegate().isDirectory(path)
+    override suspend fun isDirectory(path: String): Boolean = delegate().isDirectory(path)
 
-    override fun isFile(path: String): Boolean = delegate().isFile(path)
+    override suspend fun isFile(path: String): Boolean = delegate().isFile(path)
 
-    override fun fileSize(path: String): Long = delegate().fileSize(path)
+    override suspend fun fileSize(path: String): Long = delegate().fileSize(path)
 
-    override fun lastModified(path: String): Long = delegate().lastModified(path)
+    override suspend fun lastModified(path: String): Long = delegate().lastModified(path)
 
-    override fun permissions(path: String): String = delegate().permissions(path)
+    override suspend fun permissions(path: String): String = delegate().permissions(path)
 
-    override fun listFiles(path: String): List<FileEntry> = delegate().listFiles(path)
+    override suspend fun listFiles(path: String): List<FileEntry> = delegate().listFiles(path)
 
-    override fun listFilesRecursive(path: String, maxDepth: Int): List<String> =
+    override suspend fun listFilesRecursive(path: String, maxDepth: Int): List<String> =
         delegate().listFilesRecursive(path, maxDepth)
 
-    override fun readFiles(paths: List<String>): Map<String, String> = delegate().readFiles(paths)
+    override suspend fun readFiles(paths: List<String>): Map<String, String> = delegate().readFiles(paths)
 
-    override fun readFileHeads(paths: List<String>, maxBytes: Int): Map<String, String> =
+    override suspend fun readFileHeads(paths: List<String>, maxBytes: Int): Map<String, String> =
         delegate().readFileHeads(paths, maxBytes)
 
-    override fun readBytes(path: String): ByteArray = delegate().readBytes(path)
+    override suspend fun readBytes(path: String): ByteArray = delegate().readBytes(path)
 
-    override fun writeBytes(path: String, bytes: ByteArray, overwrite: Boolean) =
+    override suspend fun writeBytes(path: String, bytes: ByteArray, overwrite: Boolean) =
         delegate().writeBytes(path, bytes, overwrite)
 
-    override fun writeStream(path: String, input: InputStream, overwrite: Boolean): Long =
+    override suspend fun writeStream(path: String, input: InputStream, overwrite: Boolean): Long =
         delegate().writeStream(path, input, overwrite)
 
-    override fun copyToLocal(path: String): File = delegate().copyToLocal(path)
+    override suspend fun copyToLocal(path: String): File = delegate().copyToLocal(path)
 
-    override fun delete(path: String) = delegate().delete(path)
+    override suspend fun delete(path: String) = delegate().delete(path)
 
-    override fun deleteRecursively(path: String) = delegate().deleteRecursively(path)
+    override suspend fun deleteRecursively(path: String) = delegate().deleteRecursively(path)
 
-    override fun rename(path: String, newPath: String) = delegate().rename(path, newPath)
+    override suspend fun rename(path: String, newPath: String) = delegate().rename(path, newPath)
 
-    override fun copy(path: String, newPath: String, overwrite: Boolean) = delegate().copy(path, newPath, overwrite)
+    override suspend fun copy(path: String, newPath: String, overwrite: Boolean) = delegate().copy(path, newPath, overwrite)
 
-    override fun move(path: String, newPath: String, overwrite: Boolean) = delegate().move(path, newPath, overwrite)
+    override suspend fun move(path: String, newPath: String, overwrite: Boolean) = delegate().move(path, newPath, overwrite)
 
-    override fun mkdirs(path: String) = delegate().mkdirs(path)
+    override suspend fun mkdirs(path: String) = delegate().mkdirs(path)
 
-    override fun parentPath(path: String): String? = delegate().parentPath(path)
+    override suspend fun parentPath(path: String): String? = delegate().parentPath(path)
 
-    override fun toDisplayPath(path: String): String = delegate().toDisplayPath(path)
+    override suspend fun toDisplayPath(path: String): String = delegate().toDisplayPath(path)
 }

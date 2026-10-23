@@ -838,7 +838,7 @@ class BrowserManager @Inject constructor(
      * `/etc/...`）映射为宿主真实文件——本地模式直接落到真实文件（相对子资源可正常加载），远程模式下载到临时文件
      * （仅页面本身可加载，相对子资源会失效）。解析失败时回退为原路径的 `file://`，交由 WebView 报错。
      */
-    private fun resolveLocalFileUrl(input: String): String {
+    private suspend fun resolveLocalFileUrl(input: String): String {
         val rawPath = if (input.startsWith("file://")) Uri.decode(input.removePrefix("file://")) else input
         if (rawPath.isBlank()) return input
         val expanded = pathHomeResolver.expandHome(rawPath)

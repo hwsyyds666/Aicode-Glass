@@ -79,7 +79,7 @@ class ListFilesTool @Inject constructor(
                 entryCount++
             }
 
-            fun listPath(path: String, showHeader: Boolean) {
+            suspend fun listPath(path: String, showHeader: Boolean) {
                 if (entryCount >= (options.maxLines ?: MAX_ENTRIES)) {
                     truncated = true
                     return
@@ -192,7 +192,7 @@ class ListFilesTool @Inject constructor(
         return options
     }
 
-    private fun listEntries(dirPath: String, options: LsOptions): List<LsEntry> {
+    private suspend fun listEntries(dirPath: String, options: LsOptions): List<LsEntry> {
         val entries = mutableListOf<LsEntry>()
         if (options.showAll && !options.showAlmostAll) {
             entries.add(LsEntry(".", dirPath, isDir = true, size = 0, lastModified = 0, permissions = "rwx"))

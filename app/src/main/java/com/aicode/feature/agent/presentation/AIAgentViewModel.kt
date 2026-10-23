@@ -541,7 +541,7 @@ class AIAgentViewModel @Inject constructor(
     }
 
     /** 读取工作区根并按 [expanded] 递归展开，产出扁平的可见节点列表；根读取失败则整体报错。 */
-    private fun buildBrowseTree(expanded: Set<String>): FileBrowseState {
+    private suspend fun buildBrowseTree(expanded: Set<String>): FileBrowseState {
         val startedAt = System.currentTimeMillis()
         listingCounter.set(0)
         val root = WorkspacePathMapper.CONTAINER_ROOT
@@ -574,7 +574,7 @@ class AIAgentViewModel @Inject constructor(
      * 带缓存的目录列举：命中直接返回快照；未命中才真 listFiles 并回填缓存。
      * 列举失败返回 null 且**不入缓存**（下次重建自然重试），调用方决定错误如何呈现。
      */
-    private fun listDirCached(path: String): List<FileEntry>? {
+    private suspend fun listDirCached(path: String): List<FileEntry>? {
         dirListingCache.get(path)?.let { return it }
         val entries = runCatching { fileAccess.listFiles(path) }.getOrNull() ?: return null
         dirListingCache.put(path, entries)
@@ -587,7 +587,7 @@ class AIAgentViewModel @Inject constructor(
      * 结果按失效缓存：变更批次触及根 .gitignore（[applyBrowseInvalidation]）、切换工作区、
      * 手动刷新时清除；避免每次重建都 exists+readFile 一遍（ROOT 模式下这是两次 su fork）。
      */
-    private fun cachedRootGitignore(root: String): List<String> {
+    private suspend fun cachedRootGitignore(root: String): List<String> {
         gitignoreCache?.let { return it }
         val patterns = runCatching {
             val path = "$root/.gitignore"
@@ -602,7 +602,7 @@ class AIAgentViewModel @Inject constructor(
         return patterns
     }
 
-    private fun appendBrowseChildren(
+    private suspend fun appendBrowseChildren(
         parent: String,
         entries: List<FileEntry>,
         depth: Int,
@@ -664,14 +664,21 @@ class AIAgentViewModel @Inject constructor(
     private fun mutateBrowse(
         busyPaths: Set<String> = emptySet(),
         onResult: (Boolean) -> Unit,
-        block: () -> Boolean
+        block: suspend () -> Boolean
     ) = viewModelScope.launch {
         if (busyPaths.isNotEmpty()) _fileOpPaths.value = _fileOpPaths.value + busyPaths
         try {
             val success = withContext(Dispatchers.IO) {
-                runCatching(block)
-                    .onFailure { FileLogger.w(TAG, "文件操作失败", it) }
-                    .getOrDefault(false)
+                // block 是 suspend 的，不能用 runCatching（其 lambda 非 suspend）；语义保持一致：
+                // 失败仅记录并回报 false，取消必须继续向上传播。
+                try {
+                    block()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    FileLogger.w(TAG, "文件操作失败", e)
+                    false
+                }
             }
             if (success) {
                 // 精准失效：只让本次操作涉及的目录重读（ROOT/SSH 没有 inotify 兜底时尤其重要），

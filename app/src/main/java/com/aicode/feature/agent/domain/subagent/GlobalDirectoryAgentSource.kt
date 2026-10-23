@@ -16,6 +16,6 @@ class GlobalDirectoryAgentSource @Inject constructor(
 
     val agentsRoot: String = "~/.aicode/agents"
 
-    override fun listDefinitions(): List<AgentDefinition> =
+    override suspend fun listDefinitions(): List<AgentDefinition> =
         AgentDefinitionDirectoryScanner.scan(fileAccess, agentsRoot)
 }

@@ -5,14 +5,19 @@ import android.net.Uri
 import android.util.Base64
 import android.webkit.WebResourceResponse
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import androidx.webkit.WebViewAssetLoader
 import com.aicode.core.util.FileLogger
 import com.aicode.feature.workspace.domain.FileAccessProvider
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
+import java.io.PipedInputStream
+import java.io.PipedOutputStream
 import java.net.URLDecoder
 import java.nio.file.Paths
 import javax.inject.Inject
@@ -44,6 +49,9 @@ class MarkdownPreviewViewModel @Inject constructor(
 
         /** 工作区在容器内的根路径，与 [com.aicode.feature.workspace.domain.WorkspacePathMapper.CONTAINER_ROOT] 一致。 */
         private const val WS_ROOT = "~/workspace"
+
+        /** [LocalAssetPathHandler] 管道缓冲：远程 SFTP 下载期间 WebView 读取的暂存上限。 */
+        private const val PIPE_BUFFER_BYTES = 64 * 1024
 
         /** 深色模式下页面底色，与 github-markdown-css 的 dark 主题一致。 */
         private const val BG_DARK = "#0d1117"
@@ -83,7 +91,7 @@ class MarkdownPreviewViewModel @Inject constructor(
      * 预览页 baseUrl：以被预览文件所在目录为基准，markdown 里的相对图片路径（如 `docs/a.png`）
      * 会解析到 `/local/<相对工作区根的目录>/docs/a.png`，由 [containerPathOf] 还原成容器路径读取。
      */
-    fun baseUrl(path: String): String {
+    suspend fun baseUrl(path: String): String {
         val dir = relativeDirOf(path)
         val encoded = Uri.encode(dir, "/")
         return if (encoded.isEmpty()) {
@@ -116,7 +124,7 @@ class MarkdownPreviewViewModel @Inject constructor(
     }
 
     /** 被预览文件所在目录相对工作区根的路径（无前后斜杠）；不在工作区内时退回工作区根。 */
-    private fun relativeDirOf(path: String): String {
+    private suspend fun relativeDirOf(path: String): String {
         val parent = fileAccess.parentPath(path)?.trimEnd('/') ?: return ""
         return when {
             parent == WS_ROOT -> ""
@@ -133,19 +141,42 @@ class MarkdownPreviewViewModel @Inject constructor(
                 FileLogger.w(TAG, "预览资源路径无法解析: $path")
                 return notFound()
             }
-            val bytes = runCatching { fileAccess.readBytes(containerPath) }
-                .onFailure { FileLogger.w(TAG, "读取预览资源失败: $containerPath", it) }
-                .getOrNull()
-            if (bytes == null) return notFound()
-            // 预览页里点击本地 Markdown 链接时，直接把目标文件渲染成预览页（浏览器式导航）
-            if (isMarkdown(containerPath)) {
-                val html = buildHtmlInternal(bytes.toString(Charsets.UTF_8), currentDark)
-                return WebResourceResponse(
-                    "text/html", "utf-8", 200, "OK", emptyMap(),
-                    ByteArrayInputStream(html.toByteArray(Charsets.UTF_8))
-                )
+            // PathHandler.handle 由 WebView 在后台线程同步调用，本身不能挂起。用管道把
+            // 「协程里挂起读取」的结果喂给 WebView：立即返回响应体，数据由 IO 协程异步写入
+            // ——不阻塞线程、不用 runBlocking，远程模式的 SFTP 下载也不再占住 WebView 线程。
+            val out = PipedOutputStream()
+            val body = PipedInputStream(out, PIPE_BUFFER_BYTES)
+            val markdown = isMarkdown(containerPath)
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    val bytes = runCatching { fileAccess.readBytes(containerPath) }
+                        .onFailure { FileLogger.w(TAG, "读取预览资源失败: $containerPath", it) }
+                        .getOrNull()
+                    if (bytes != null) {
+                        val payload = if (markdown) {
+                            // 预览页里点击本地 Markdown 链接时，直接把目标文件渲染成预览页（浏览器式导航）
+                            buildHtmlInternal(bytes.toString(Charsets.UTF_8), currentDark)
+                                .toByteArray(Charsets.UTF_8)
+                        } else {
+                            bytes
+                        }
+                        out.write(payload)
+                        out.flush()
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // WebView 中途放弃读取时 write 会抛 broken pipe，属正常结束路径，仅记录
+                    FileLogger.w(TAG, "预览资源写入失败: $containerPath", e)
+                } finally {
+                    runCatching { out.close() }
+                }
             }
-            return WebResourceResponse(mimeOf(containerPath), null, ByteArrayInputStream(bytes))
+            return WebResourceResponse(
+                if (markdown) "text/html" else mimeOf(containerPath),
+                if (markdown) "utf-8" else null,
+                body
+            )
         }
     }
 

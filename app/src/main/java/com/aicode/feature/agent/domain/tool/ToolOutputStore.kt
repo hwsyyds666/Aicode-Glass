@@ -48,7 +48,7 @@ class ToolOutputStore @Inject constructor(
      */
     val outputDir: File get() = File(containerInstaller.aicodeDir, OUTPUT_DIR)
 
-    fun process(toolName: String, callId: String, result: ToolResult): ToolResult {
+    suspend fun process(toolName: String, callId: String, result: ToolResult): ToolResult {
         return when (result) {
             is ToolResult.Success -> ToolResult.Success(processElement(toolName, callId, result.data))
             is ToolResult.Partial -> ToolResult.Partial(processElement(toolName, callId, result.data), result.message)
@@ -56,7 +56,7 @@ class ToolOutputStore @Inject constructor(
         }
     }
 
-    fun boundText(toolName: String, callId: String, text: String): StoredToolOutput {
+    suspend fun boundText(toolName: String, callId: String, text: String): StoredToolOutput {
         if (text.length <= MAX_INLINE_CHARS) {
             return StoredToolOutput(
                 preview = text,
@@ -76,7 +76,7 @@ class ToolOutputStore @Inject constructor(
         )
     }
 
-    private fun processElement(toolName: String, callId: String, element: JsonElement): JsonElement {
+    private suspend fun processElement(toolName: String, callId: String, element: JsonElement): JsonElement {
         val primitive = element as? JsonPrimitive
         if (primitive?.isString == true) {
             val stored = boundText(toolName, callId, primitive.content)
@@ -145,7 +145,7 @@ class ToolOutputStore @Inject constructor(
         }
     }
 
-    private fun writeFullOutput(toolName: String, callId: String, text: String): StoredPathResult {
+    private suspend fun writeFullOutput(toolName: String, callId: String, text: String): StoredPathResult {
         return try {
             val dir = "${pathHomeResolver.aicodeRoot()}/$OUTPUT_DIR"
             fileAccess.mkdirs(dir)
@@ -159,7 +159,7 @@ class ToolOutputStore @Inject constructor(
         }
     }
 
-    private fun uniqueOutputPath(dir: String, toolName: String, callId: String): String {
+    private suspend fun uniqueOutputPath(dir: String, toolName: String, callId: String): String {
         val timestamp = LocalDateTime.now().format(TIMESTAMP_FORMAT)
         val baseName = buildString {
             append(timestamp)

@@ -11,6 +11,7 @@ import com.aicode.core.util.FileLogger
 import com.aicode.core.util.LineDiff
 import com.aicode.feature.workspace.domain.FileAccessProvider
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -65,13 +66,13 @@ class ReadFileTool @Inject constructor(
             var truncatedByBytes = false
             var lineNo = 0
             withContext(Dispatchers.IO) {
-                fileAccess.readLines(path).forEach { line ->
+                fileAccess.readLines(path).collect { line ->
                     lineNo++
                     totalLines = lineNo
-                    if (lineNo < startLine) return@forEach
+                    if (lineNo < startLine) return@collect
                     if (lineNo > endCap) {
                         // 已越过窗口，但仍需继续计数以得到准确 total_lines。
-                        return@forEach
+                        return@collect
                     }
                     if (!truncatedByBytes) {
                         val lineBytes = line.toByteArray(Charsets.UTF_8).size + 1

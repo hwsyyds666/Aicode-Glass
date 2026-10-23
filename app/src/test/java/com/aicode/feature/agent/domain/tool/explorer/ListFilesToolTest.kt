@@ -35,30 +35,30 @@ class ListFilesToolTest {
     private val tool = ListFilesTool(FakeFileAccess())
 
     private inner class FakeFileAccess : FileAccessProvider {
-        override fun exists(path: String): Boolean = path == dir
-        override fun isDirectory(path: String): Boolean = path == dir
-        override fun isFile(path: String): Boolean = path != dir
-        override fun listFiles(path: String): List<FileEntry> = if (path == dir) files else emptyList()
-        override fun parentPath(path: String): String? = "/root/workspace"
-        override fun toDisplayPath(path: String): String = path
+        override suspend fun exists(path: String): Boolean = path == dir
+        override suspend fun isDirectory(path: String): Boolean = path == dir
+        override suspend fun isFile(path: String): Boolean = path != dir
+        override suspend fun listFiles(path: String): List<FileEntry> = if (path == dir) files else emptyList()
+        override suspend fun parentPath(path: String): String? = "/root/workspace"
+        override suspend fun toDisplayPath(path: String): String = path
 
-        override fun readFile(path: String): String = throw UnsupportedOperationException()
-        override fun readLines(path: String): Sequence<String> = throw UnsupportedOperationException()
-        override fun writeFile(path: String, content: String, overwrite: Boolean, encoding: Charset) = throw UnsupportedOperationException()
-        override fun fileSize(path: String): Long = throw UnsupportedOperationException()
-        override fun lastModified(path: String): Long = throw UnsupportedOperationException()
-        override fun permissions(path: String): String = throw UnsupportedOperationException()
-        override fun readBytes(path: String): ByteArray = throw UnsupportedOperationException()
-        override fun writeBytes(path: String, bytes: ByteArray, overwrite: Boolean) = throw UnsupportedOperationException()
-        override fun writeStream(path: String, input: InputStream, overwrite: Boolean): Long = throw UnsupportedOperationException()
-        override fun listFilesRecursive(path: String, maxDepth: Int): List<String> = emptyList()
-        override fun copyToLocal(path: String): File = throw UnsupportedOperationException()
-        override fun delete(path: String) = throw UnsupportedOperationException()
-        override fun mkdirs(path: String) = throw UnsupportedOperationException()
-        override fun deleteRecursively(path: String) = throw UnsupportedOperationException()
-        override fun rename(path: String, newPath: String) = throw UnsupportedOperationException()
-        override fun copy(path: String, newPath: String, overwrite: Boolean) = throw UnsupportedOperationException()
-        override fun move(path: String, newPath: String, overwrite: Boolean) = throw UnsupportedOperationException()
+        override suspend fun readFile(path: String): String = throw UnsupportedOperationException()
+        override fun readLines(path: String): kotlinx.coroutines.flow.Flow<String> = throw UnsupportedOperationException()
+        override suspend fun writeFile(path: String, content: String, overwrite: Boolean, encoding: Charset) = throw UnsupportedOperationException()
+        override suspend fun fileSize(path: String): Long = throw UnsupportedOperationException()
+        override suspend fun lastModified(path: String): Long = throw UnsupportedOperationException()
+        override suspend fun permissions(path: String): String = throw UnsupportedOperationException()
+        override suspend fun readBytes(path: String): ByteArray = throw UnsupportedOperationException()
+        override suspend fun writeBytes(path: String, bytes: ByteArray, overwrite: Boolean) = throw UnsupportedOperationException()
+        override suspend fun writeStream(path: String, input: InputStream, overwrite: Boolean): Long = throw UnsupportedOperationException()
+        override suspend fun listFilesRecursive(path: String, maxDepth: Int): List<String> = emptyList()
+        override suspend fun copyToLocal(path: String): File = throw UnsupportedOperationException()
+        override suspend fun delete(path: String) = throw UnsupportedOperationException()
+        override suspend fun mkdirs(path: String) = throw UnsupportedOperationException()
+        override suspend fun deleteRecursively(path: String) = throw UnsupportedOperationException()
+        override suspend fun rename(path: String, newPath: String) = throw UnsupportedOperationException()
+        override suspend fun copy(path: String, newPath: String, overwrite: Boolean) = throw UnsupportedOperationException()
+        override suspend fun move(path: String, newPath: String, overwrite: Boolean) = throw UnsupportedOperationException()
     }
 
     private suspend fun runList(args: String): ToolResult {

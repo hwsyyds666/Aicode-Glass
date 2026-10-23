@@ -5,11 +5,14 @@ import com.aicode.feature.agent.domain.container.ContainerInstaller
 import com.aicode.feature.workspace.domain.FileAccessProvider
 import com.aicode.feature.workspace.domain.ProjectAicodeRoot
 import io.mockk.Called
+import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import java.io.File
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.runBlocking
 import org.junit.Before
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -41,20 +44,20 @@ class SkillConfigRepositoryTest {
         every { hub.watchAicode(any(), any(), any(), any(), any()) } returns emptyFlow()
         every { hub.watchWorkspace(any(), any(), any(), any(), any()) } returns emptyFlow()
         fileAccess = mockk()
-        every { fileAccess.isFile("~/.aicode/skills.json") } answers {
+        coEvery { fileAccess.isFile("~/.aicode/skills.json") } answers {
             File(activeGlobalRoot, "skills.json").isFile
         }
-        every { fileAccess.readFile("~/.aicode/skills.json") } answers {
+        coEvery { fileAccess.readFile("~/.aicode/skills.json") } answers {
             File(activeGlobalRoot, "skills.json").readText()
         }
-        every { fileAccess.writeFile("~/.aicode/skills.json", any(), any(), any()) } answers {
+        coEvery { fileAccess.writeFile("~/.aicode/skills.json", any(), any(), any()) } answers {
             File(activeGlobalRoot, "skills.json").writeText(secondArg())
         }
         repository = SkillConfigRepository(installer, projectAicodeRoot, hub, fileAccess)
     }
 
     @Test
-    fun disabledNames_followsExecutionEnvironment_withoutMigratingLocalConfig() {
+    fun disabledNames_followsExecutionEnvironment_withoutMigratingLocalConfig() = runBlocking {
         File(localGlobalRoot, "skills.json").writeText("""{"disabled":["Local"]}""")
         File(activeGlobalRoot, "skills.json").writeText("""{"disabled":["Remote"]}""")
         File(projectRoot, "skills.json").writeText("""{"disabled":["Project"]}""")
@@ -65,7 +68,7 @@ class SkillConfigRepositoryTest {
     }
 
     @Test
-    fun setDisabled_global_readsAndWritesActiveBackend_only() {
+    fun setDisabled_global_readsAndWritesActiveBackend_only() = runBlocking {
         val localFile = File(localGlobalRoot, "skills.json")
         localFile.writeText("""{"disabled":["local"]}""")
         File(activeGlobalRoot, "skills.json").writeText("""{"disabled":["existing"]}""")
@@ -77,11 +80,11 @@ class SkillConfigRepositoryTest {
         assertEquals(setOf("new", "project"), repository.disabledNames())
         assertEquals(setOf("local"), SkillConfigRepository.readDisabled(localFile))
         assertEquals(setOf("project"), SkillConfigRepository.readDisabled(File(projectRoot, "skills.json")))
-        verify(exactly = 2) { fileAccess.writeFile("~/.aicode/skills.json", any(), any(), any()) }
+        coVerify(exactly = 2) { fileAccess.writeFile("~/.aicode/skills.json", any(), any(), any()) }
     }
 
     @Test
-    fun setDisabled_project_keepsLocalProjectRoot_withoutBackendAccess() {
+    fun setDisabled_project_keepsLocalProjectRoot_withoutBackendAccess() = runBlocking {
         repository.setDisabled("project", true, SkillScope.PROJECT)
         assertEquals(setOf("project"), SkillConfigRepository.readDisabled(File(projectRoot, "skills.json")))
         repository.setDisabled("project", false, SkillScope.PROJECT)
@@ -90,7 +93,7 @@ class SkillConfigRepositoryTest {
     }
 
     @Test
-    fun disabledNames_missingOrCorruptedRemoteConfig_doesNotFallBackToLocal() {
+    fun disabledNames_missingOrCorruptedRemoteConfig_doesNotFallBackToLocal() = runBlocking {
         File(localGlobalRoot, "skills.json").writeText("""{"disabled":["local"]}""")
         File(projectRoot, "skills.json").writeText("""{"disabled":["project"]}""")
         assertEquals(setOf("project"), repository.disabledNames())

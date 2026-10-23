@@ -7,10 +7,13 @@ import com.aicode.feature.agent.domain.container.friendlySshError
 import com.aicode.feature.workspace.data.repository.WorkspaceRepository
 import com.aicode.feature.workspace.domain.WorkspacePathMapper.Companion.CONTAINER_ROOT
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import net.schmizz.sshj.sftp.FileMode
 import net.schmizz.sshj.sftp.OpenMode
 import net.schmizz.sshj.sftp.RemoteFile
@@ -39,6 +42,16 @@ private const val MAX_REMOTE_READ_BYTES = 8L * 1024 * 1024
 
 /** 远程文件超过上限时抛出：调用方据此给出「内容过大」提示，而不是误判为文件不存在。 */
 class RemoteOutputTooLargeException(message: String) : IOException(message)
+
+/** 单次 SFTP 操作的默认超时（毫秒）：服务器无响应时明确报错，而不是把调用方无限挂起。 */
+private const val DEFAULT_SFTP_TIMEOUT_MS = 30_000L
+
+/** 大块传输（整文件读/写）按数据量放宽超时：基准时长 + 每 [IO_CHUNK] 字节增加 1 秒，慢链路也能传完。 */
+private const val SFTP_TIMEOUT_PER_CHUNK_MS = 1_000L
+
+/** 按数据量计算传输超时：基准 [DEFAULT_SFTP_TIMEOUT_MS] + 每 [IO_CHUNK] 字节 [SFTP_TIMEOUT_PER_CHUNK_MS]。 */
+private fun timeoutFor(bytes: Long): Long =
+    DEFAULT_SFTP_TIMEOUT_MS + (bytes / IO_CHUNK) * SFTP_TIMEOUT_PER_CHUNK_MS
 
 /**
  * [FileAccessProvider] 的远程实现：走 SFTP 协议读写远程文件。
@@ -76,8 +89,11 @@ class RemoteSftpFileAccess @Inject constructor(
     /**
      * 在独立 SFTP 通道上串行执行 [block]。传输层异常时丢弃当前通道（下次调用自动重建）后原样抛出；
      * 业务错误（文件不存在/已存在、SFTP 状态码错误）不重建。不做自动重试——写操作重试可能重复落盘。
+     *
+     * 全程挂起：等 [sftpMutex] 是可取消的挂起，不占线程；单次操作带超时（默认
+     * [DEFAULT_SFTP_TIMEOUT_MS]，大块传输按数据量放宽），超时抛明确错误而不是无限挂起。
      */
-    private fun <T> withSftp(block: (SFTPClient) -> T): T = runBlocking {
+    private suspend fun <T> withSftp(timeoutMs: Long = DEFAULT_SFTP_TIMEOUT_MS, block: (SFTPClient) -> T): T =
         withContext(Dispatchers.IO) {
             sftpMutex.withLock {
                 val sftp = try {
@@ -85,18 +101,32 @@ class RemoteSftpFileAccess @Inject constructor(
                 } catch (e: Exception) {
                     throw IOException(friendlySshError(e), e)
                 }
-                guarded { block(sftp) }
+                try {
+                    withTimeout(timeoutMs) { guarded { block(sftp) } }
+                } catch (e: TimeoutCancellationException) {
+                    // 只有真超时才会到这里（父协程取消时抛出的是取消异常，不会匹配本分支）：
+                    // 通道状态未知，丢弃待下次重建，给调用方明确错误。
+                    runCatching { connection.invalidateSftp() }
+                    throw IOException("SFTP 操作超时（${timeoutMs}ms 无响应），请检查网络后重试", e)
+                }
             }
         }
-    }
 
     /**
      * 复用已打开的 SFTP 通道执行一次操作（不重新取 client）。供 [readLines] 惰性迭代使用：每次只锁住
-     * 一次读取，`yield` 在锁外，调用方中途放弃迭代时不会把 [sftpMutex] 永久占住。
+     * 一次读取，`emit` 在锁外，调用方中途取消收集时不会把 [sftpMutex] 永久占住。
      */
-    private fun <T> onSftp(block: () -> T): T = runBlocking {
-        withContext(Dispatchers.IO) { sftpMutex.withLock { guarded(block) } }
-    }
+    private suspend fun <T> onSftp(timeoutMs: Long = DEFAULT_SFTP_TIMEOUT_MS, block: () -> T): T =
+        withContext(Dispatchers.IO) {
+            sftpMutex.withLock {
+                try {
+                    withTimeout(timeoutMs) { guarded(block) }
+                } catch (e: TimeoutCancellationException) {
+                    runCatching { connection.invalidateSftp() }
+                    throw IOException("SFTP 操作超时（${timeoutMs}ms 无响应），请检查网络后重试", e)
+                }
+            }
+        }
 
     /** 传输层异常时丢弃 SFTP 通道（下次调用自动重建）后原样抛出；业务错误不重建。 */
     private suspend fun <T> guarded(block: () -> T): T = try {
@@ -108,52 +138,50 @@ class RemoteSftpFileAccess @Inject constructor(
         throw e
     }
 
-    override fun readFile(path: String): String = String(readAll(toRemotePath(path)), Charsets.UTF_8)
+    override suspend fun readFile(path: String): String = String(readAll(toRemotePath(path)), Charsets.UTF_8)
 
     /**
      * 惰性逐行读取：每次只物化当前一行（单行封顶 64K 字符），读到哪算哪，整文件不进内存。
-     * 序列可重复迭代（每次迭代重新打开远程文件）；调用方需在 IO 线程上迭代。
+     * 冷 Flow：每次收集重新打开远程文件；收集结束或抛错时自动关闭；可取消。
      */
-    override fun readLines(path: String): Sequence<String> {
+    override fun readLines(path: String): Flow<String> = flow {
         val remote = toRemotePath(path)
-        return sequence {
-            val reader = withSftp { sftp ->
-                val attrs = sftp.statExistence(remote) ?: throw NoSuchFileException(File(remote))
-                if (attrs.type == FileMode.Type.DIRECTORY) throw IOException("是目录，无法按文件读取: $remote")
-                BoundedLineReader(InputStreamReader(RemoteFileInputStream(sftp.open(remote))))
+        val reader = withSftp { sftp ->
+            val attrs = sftp.statExistence(remote) ?: throw NoSuchFileException(File(remote))
+            if (attrs.type == FileMode.Type.DIRECTORY) throw IOException("是目录，无法按文件读取: $remote")
+            BoundedLineReader(InputStreamReader(RemoteFileInputStream(sftp.open(remote))))
+        }
+        try {
+            while (true) {
+                val line = onSftp { reader.readLine() } ?: break
+                emit(line.text)
             }
-            try {
-                while (true) {
-                    val line = onSftp { reader.readLine() } ?: break
-                    yield(line.text)
-                }
-            } finally {
-                runCatching { onSftp { reader.close() } }
-            }
+        } finally {
+            runCatching { onSftp { reader.close() } }
         }
     }
 
-    override fun writeFile(path: String, content: String, overwrite: Boolean, encoding: Charset) =
+    override suspend fun writeFile(path: String, content: String, overwrite: Boolean, encoding: Charset) =
         writeBytes(path, content.toByteArray(encoding), overwrite)
 
-    override fun exists(path: String): Boolean = withSftp { it.statExistence(toRemotePath(path)) != null }
+    override suspend fun exists(path: String): Boolean = withSftp { it.statExistence(toRemotePath(path)) != null }
 
-    override fun isDirectory(path: String): Boolean =
+    override suspend fun isDirectory(path: String): Boolean =
         withSftp { it.statExistence(toRemotePath(path))?.type == FileMode.Type.DIRECTORY }
 
-    override fun isFile(path: String): Boolean =
+    override suspend fun isFile(path: String): Boolean =
         withSftp { it.statExistence(toRemotePath(path))?.type == FileMode.Type.REGULAR }
 
-    override fun fileSize(path: String): Long =
+    override suspend fun fileSize(path: String): Long =
         withSftp { it.statExistence(toRemotePath(path))?.size ?: 0L }
 
-    override fun lastModified(path: String): Long =
+    override suspend fun lastModified(path: String): Long =
         withSftp { (it.statExistence(toRemotePath(path))?.mtime ?: 0L) * 1000L }
 
-    override fun permissions(path: String): String =
+    override suspend fun permissions(path: String): String =
         withSftp { it.statExistence(toRemotePath(path))?.permissions?.let(::formatPermissions) ?: "---" }
 
-    override fun listFiles(path: String): List<FileEntry> {
+    override suspend fun listFiles(path: String): List<FileEntry> {
         val remote = toRemotePath(path)
         return withSftp { sftp ->
             sftp.ls(remote).mapNotNull { info ->
@@ -171,7 +199,7 @@ class RemoteSftpFileAccess @Inject constructor(
         }
     }
 
-    override fun listFilesRecursive(path: String, maxDepth: Int): List<String> {
+    override suspend fun listFilesRecursive(path: String, maxDepth: Int): List<String> {
         val remote = toRemotePath(path)
         return withSftp { sftp ->
             val result = mutableListOf<String>()
@@ -193,11 +221,11 @@ class RemoteSftpFileAccess @Inject constructor(
         }
     }
 
-    override fun readBytes(path: String): ByteArray = readAll(toRemotePath(path))
+    override suspend fun readBytes(path: String): ByteArray = readAll(toRemotePath(path))
 
-    override fun writeBytes(path: String, bytes: ByteArray, overwrite: Boolean) {
+    override suspend fun writeBytes(path: String, bytes: ByteArray, overwrite: Boolean) {
         val remote = toRemotePath(path)
-        withSftp { sftp ->
+        withSftp(timeoutFor(bytes.size.toLong())) { sftp ->
             if (sftp.statExistence(remote) != null && !overwrite) throw FileAlreadyExistsException(File(remote))
             ensureParent(sftp, remote)
             sftp.open(remote, EnumSet.of(OpenMode.WRITE, OpenMode.CREAT, OpenMode.TRUNC)).use { rf ->
@@ -206,7 +234,7 @@ class RemoteSftpFileAccess @Inject constructor(
         }
     }
 
-    override fun writeStream(path: String, input: InputStream, overwrite: Boolean): Long {
+    override suspend fun writeStream(path: String, input: InputStream, overwrite: Boolean): Long {
         val remote = toRemotePath(path)
         // 先落到 .aicode-part 再改名：传输中途断开时不会在目标位置留下半截文件
         val tmp = "$remote.aicode-part"
@@ -237,7 +265,7 @@ class RemoteSftpFileAccess @Inject constructor(
         }
     }
 
-    override fun copyToLocal(path: String): File {
+    override suspend fun copyToLocal(path: String): File {
         val remote = toRemotePath(path)
         val tempFile = File.createTempFile("aicode_remote_", ".copy").apply { deleteOnExit() }
         return try {
@@ -255,7 +283,7 @@ class RemoteSftpFileAccess @Inject constructor(
         }
     }
 
-    override fun delete(path: String) {
+    override suspend fun delete(path: String) {
         val remote = toRemotePath(path)
         // 接口约定 delete 只删文件或空目录：目录非空时 rmdir 失败 → 抛异常（与本地 File.delete() 对齐）。
         withSftp { sftp ->
@@ -264,12 +292,12 @@ class RemoteSftpFileAccess @Inject constructor(
         }
     }
 
-    override fun deleteRecursively(path: String) {
+    override suspend fun deleteRecursively(path: String) {
         val remote = toRemotePath(path)
         withSftp { sftp -> deleteRecursive(sftp, remote) }
     }
 
-    override fun rename(path: String, newPath: String) {
+    override suspend fun rename(path: String, newPath: String) {
         val from = toRemotePath(path)
         val to = toRemotePath(newPath)
         withSftp { sftp ->
@@ -279,7 +307,7 @@ class RemoteSftpFileAccess @Inject constructor(
         }
     }
 
-    override fun copy(path: String, newPath: String, overwrite: Boolean) {
+    override suspend fun copy(path: String, newPath: String, overwrite: Boolean) {
         val from = Paths.get(toRemotePath(path)).normalize().toString()
         val to = Paths.get(toRemotePath(newPath)).normalize().toString()
         withSftp { sftp ->
@@ -295,7 +323,7 @@ class RemoteSftpFileAccess @Inject constructor(
         }
     }
 
-    override fun move(path: String, newPath: String, overwrite: Boolean) {
+    override suspend fun move(path: String, newPath: String, overwrite: Boolean) {
         val from = Paths.get(toRemotePath(path)).normalize().toString()
         val to = Paths.get(toRemotePath(newPath)).normalize().toString()
         withSftp { sftp ->
@@ -311,30 +339,31 @@ class RemoteSftpFileAccess @Inject constructor(
         }
     }
 
-    override fun mkdirs(path: String) {
+    override suspend fun mkdirs(path: String) {
         val remote = toRemotePath(path)
         withSftp { it.mkdirs(remote) }
     }
 
-    override fun parentPath(path: String): String? {
+    override suspend fun parentPath(path: String): String? {
         val remote = toRemotePath(path)
         val parent = remote.substringBeforeLast('/', "")
         if (parent.isEmpty()) return null
         return toDisplayPathFromRemote(parent)
     }
 
-    override fun toDisplayPath(path: String): String = toDisplayPathFromRemote(toRemotePath(path))
+    override suspend fun toDisplayPath(path: String): String = toDisplayPathFromRemote(toRemotePath(path))
 
     /** 读取远程文件全部字节；不存在抛 [NoSuchFileException]，超过 [MAX_REMOTE_READ_BYTES] 抛 [RemoteOutputTooLargeException]。 */
-    private fun readAll(remote: String): ByteArray = withSftp { sftp ->
-        val attrs = sftp.statExistence(remote) ?: throw NoSuchFileException(File(remote))
+    private suspend fun readAll(remote: String): ByteArray {
+        // 先 stat（小操作、短超时）拿到大小做上限检查，再按数据量放宽超时读内容。
+        val attrs = withSftp { it.statExistence(remote) } ?: throw NoSuchFileException(File(remote))
         if (attrs.type == FileMode.Type.DIRECTORY) throw IOException("是目录，无法按文件读取: $remote")
         if (attrs.size > MAX_REMOTE_READ_BYTES) {
             throw RemoteOutputTooLargeException(
                 "远程文件超过 ${MAX_REMOTE_READ_BYTES / 1024 / 1024}MB，请改用 start_line/end_line 分段读取"
             )
         }
-        sftp.open(remote).use { rf -> readFully(rf) }
+        return withSftp(timeoutFor(attrs.size)) { sftp -> sftp.open(remote).use { rf -> readFully(rf) } }
     }
 
     private fun readFully(rf: RemoteFile): ByteArray {

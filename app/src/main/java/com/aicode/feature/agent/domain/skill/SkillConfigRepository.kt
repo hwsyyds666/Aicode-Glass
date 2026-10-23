@@ -50,14 +50,14 @@ class SkillConfigRepository @Inject constructor(
     private fun projectFile(): File = File(projectAicodeRoot.current(), CONFIG_FILE)
 
     /** 当前生效的禁用技能名集合（全局 + 项目并集，归一化为小写）。 */
-    fun disabledNames(): Set<String> {
+    suspend fun disabledNames(): Set<String> {
         val global = readGlobalDisabled()
         val project = readDisabled(projectFile())
         return (global + project).map { it.lowercase() }.toSet()
     }
 
     /** 在指定作用域的配置中启用/禁用某个技能。 */
-    fun setDisabled(name: String, disabled: Boolean, scope: SkillScope) {
+    suspend fun setDisabled(name: String, disabled: Boolean, scope: SkillScope) {
         val names = (if (scope == SkillScope.GLOBAL) readGlobalDisabled() else readDisabled(projectFile()))
             .toMutableSet()
         if (disabled) names.add(name) else names.remove(name)
@@ -68,7 +68,7 @@ class SkillConfigRepository @Inject constructor(
         }
     }
 
-    private fun readGlobalDisabled(): Set<String> = runCatching {
+    private suspend fun readGlobalDisabled(): Set<String> = runCatching {
         if (fileAccess.isFile(GLOBAL_CONFIG_PATH)) parseDisabled(fileAccess.readFile(GLOBAL_CONFIG_PATH))
         else emptySet()
     }.getOrElse {

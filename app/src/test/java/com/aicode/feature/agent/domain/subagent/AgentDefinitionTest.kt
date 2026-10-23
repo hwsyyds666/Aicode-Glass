@@ -5,11 +5,14 @@ import com.aicode.feature.agent.domain.container.ContainerInstaller
 import com.aicode.feature.workspace.domain.FileAccessProvider
 import com.aicode.feature.workspace.domain.ProjectAicodeRoot
 import io.mockk.Called
+import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import java.io.File
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -41,20 +44,20 @@ class AgentDefinitionTest {
         every { hub.watchAicode(any(), any(), any(), any(), any()) } returns emptyFlow()
         every { hub.watchWorkspace(any(), any(), any(), any(), any()) } returns emptyFlow()
         fileAccess = mockk()
-        every { fileAccess.isFile("~/.aicode/agents.json") } answers {
+        coEvery { fileAccess.isFile("~/.aicode/agents.json") } answers {
             File(activeGlobalRoot, "agents.json").isFile
         }
-        every { fileAccess.readFile("~/.aicode/agents.json") } answers {
+        coEvery { fileAccess.readFile("~/.aicode/agents.json") } answers {
             File(activeGlobalRoot, "agents.json").readText()
         }
-        every { fileAccess.writeFile("~/.aicode/agents.json", any(), any(), any()) } answers {
+        coEvery { fileAccess.writeFile("~/.aicode/agents.json", any(), any(), any()) } answers {
             File(activeGlobalRoot, "agents.json").writeText(secondArg())
         }
         configRepository = AgentDefinitionConfigRepository(installer, projectAicodeRoot, hub, fileAccess)
     }
 
     @Test
-    fun disabledNames_followsExecutionEnvironment_withoutMigratingLocalConfig() {
+    fun disabledNames_followsExecutionEnvironment_withoutMigratingLocalConfig() = runBlocking {
         File(localGlobalRoot, "agents.json").writeText("""{"disabled":["Local"]}""")
         File(activeGlobalRoot, "agents.json").writeText("""{"disabled":["Remote"]}""")
         File(projectRoot, "agents.json").writeText("""{"disabled":["Project"]}""")
@@ -65,7 +68,7 @@ class AgentDefinitionTest {
     }
 
     @Test
-    fun setDisabled_global_readsAndWritesActiveBackend_only() {
+    fun setDisabled_global_readsAndWritesActiveBackend_only() = runBlocking {
         val localFile = File(localGlobalRoot, "agents.json")
         localFile.writeText("""{"disabled":["local"]}""")
         File(activeGlobalRoot, "agents.json").writeText("""{"disabled":["Existing"]}""")
@@ -80,11 +83,11 @@ class AgentDefinitionTest {
             setOf("project"),
             AgentDefinitionConfigRepository.parseDisabled(File(projectRoot, "agents.json").readText())
         )
-        verify(exactly = 2) { fileAccess.writeFile("~/.aicode/agents.json", any(), any(), any()) }
+        coVerify(exactly = 2) { fileAccess.writeFile("~/.aicode/agents.json", any(), any(), any()) }
     }
 
     @Test
-    fun setDisabled_project_keepsLocalProjectRoot_withoutBackendAccess() {
+    fun setDisabled_project_keepsLocalProjectRoot_withoutBackendAccess() = runBlocking {
         val file = File(projectRoot, "agents.json")
         configRepository.setDisabled("Project", true, AgentDefinitionScope.PROJECT)
         assertEquals(setOf("Project"), AgentDefinitionConfigRepository.parseDisabled(file.readText()))
@@ -94,7 +97,7 @@ class AgentDefinitionTest {
     }
 
     @Test
-    fun disabledNames_missingOrCorruptedRemoteConfig_doesNotFallBackToLocal() {
+    fun disabledNames_missingOrCorruptedRemoteConfig_doesNotFallBackToLocal() = runBlocking {
         File(localGlobalRoot, "agents.json").writeText("""{"disabled":["local"]}""")
         File(projectRoot, "agents.json").writeText("""{"disabled":["project"]}""")
         assertEquals(setOf("project"), configRepository.disabledNames())

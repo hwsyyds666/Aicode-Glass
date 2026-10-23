@@ -2,7 +2,7 @@ package com.aicode.feature.agent.domain.tool
 
 import com.aicode.feature.agent.domain.model.AgentContext
 import com.aicode.feature.agent.domain.workflow.AgentEvent
-import io.mockk.every
+import io.mockk.coEvery
 import io.mockk.mockk
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.asCoroutineDispatcher
@@ -31,7 +31,7 @@ class ToolInvokerTest {
 
     private val toolOutputStore: ToolOutputStore = mockk<ToolOutputStore>(relaxed = true).also { store ->
         // process 原样返回输入（裁剪/落盘是 ToolOutputStore 自身职责，此处聚焦线程与包装语义）
-        every { store.process(any(), any(), any()) } answers { thirdArg() }
+        coEvery { store.process(any(), any(), any()) } answers { thirdArg() }
     }
     private val invoker = ToolInvoker(toolOutputStore)
 

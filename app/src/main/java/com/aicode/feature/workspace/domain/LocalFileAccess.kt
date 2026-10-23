@@ -1,7 +1,8 @@
 package com.aicode.feature.workspace.domain
 
 import com.aicode.core.util.FileLogger
-import com.aicode.core.util.boundedLines
+import com.aicode.core.util.boundedLineFlow
+import kotlinx.coroutines.flow.Flow
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -25,21 +26,21 @@ class LocalFileAccess @Inject constructor(
 
     private fun resolve(path: String): File = pathMapper.toHostFile(path)
 
-    override fun readFile(path: String): String {
+    override suspend fun readFile(path: String): String {
         val file = resolve(path)
         if (!file.exists()) throw NoSuchFileException(file)
         return file.readText()
     }
 
-    override fun readLines(path: String): Sequence<String> {
+    override fun readLines(path: String): Flow<String> {
         val file = resolve(path)
         if (!file.exists()) throw NoSuchFileException(file)
-        // 惰性 Sequence：每次迭代才读下一行，大文件不整份载入；迭代结束后随 use 关闭 reader。
+        // 惰性 Flow：每次收集才重新打开 reader 逐行读取，大文件不整份载入；收集结束后随 use 关闭。
         // 单行封顶 64K 字符，避免单个超长行把内存顶爆。
-        return boundedLines { file.bufferedReader() }
+        return boundedLineFlow { file.bufferedReader() }
     }
 
-    override fun writeFile(path: String, content: String, overwrite: Boolean, encoding: Charset) {
+    override suspend fun writeFile(path: String, content: String, overwrite: Boolean, encoding: Charset) {
         val file = resolve(path)
         if (file.exists() && !overwrite) throw FileAlreadyExistsException(file)
         file.parentFile?.mkdirs()
@@ -59,17 +60,17 @@ class LocalFileAccess @Inject constructor(
         FileLogger.i(TAG, "写入: '$path' -> ${file.absolutePath} (${bytes.size} 字节)")
     }
 
-    override fun exists(path: String): Boolean = resolve(path).exists()
+    override suspend fun exists(path: String): Boolean = resolve(path).exists()
 
-    override fun isDirectory(path: String): Boolean = resolve(path).isDirectory
+    override suspend fun isDirectory(path: String): Boolean = resolve(path).isDirectory
 
-    override fun isFile(path: String): Boolean = resolve(path).isFile
+    override suspend fun isFile(path: String): Boolean = resolve(path).isFile
 
-    override fun fileSize(path: String): Long = resolve(path).length()
+    override suspend fun fileSize(path: String): Long = resolve(path).length()
 
-    override fun lastModified(path: String): Long = resolve(path).lastModified()
+    override suspend fun lastModified(path: String): Long = resolve(path).lastModified()
 
-    override fun permissions(path: String): String {
+    override suspend fun permissions(path: String): String {
         val file = resolve(path)
         val read = if (file.canRead()) "r" else "-"
         val write = if (file.canWrite()) "w" else "-"
@@ -77,7 +78,7 @@ class LocalFileAccess @Inject constructor(
         return read + write + execute
     }
 
-    override fun listFiles(path: String): List<FileEntry> {
+    override suspend fun listFiles(path: String): List<FileEntry> {
         val dir = resolve(path)
         return dir.listFiles().orEmpty().map { child ->
             FileEntry(
@@ -96,13 +97,13 @@ class LocalFileAccess @Inject constructor(
         }
     }
 
-    override fun readBytes(path: String): ByteArray {
+    override suspend fun readBytes(path: String): ByteArray {
         val file = resolve(path)
         if (!file.exists()) throw NoSuchFileException(file)
         return file.readBytes()
     }
 
-    override fun listFilesRecursive(path: String, maxDepth: Int): List<String> {
+    override suspend fun listFilesRecursive(path: String, maxDepth: Int): List<String> {
         val dir = resolve(path)
         if (!dir.isDirectory) return emptyList()
         return dir.walkTopDown().maxDepth(maxDepth)
@@ -111,7 +112,7 @@ class LocalFileAccess @Inject constructor(
             .toList()
     }
 
-    override fun writeBytes(path: String, bytes: ByteArray, overwrite: Boolean) {
+    override suspend fun writeBytes(path: String, bytes: ByteArray, overwrite: Boolean) {
         val file = resolve(path)
         if (file.exists() && !overwrite) throw FileAlreadyExistsException(file)
         file.parentFile?.mkdirs()
@@ -128,7 +129,7 @@ class LocalFileAccess @Inject constructor(
         FileLogger.i(TAG, "写入: '$path' -> ${file.absolutePath} (${bytes.size} 字节)")
     }
 
-    override fun writeStream(path: String, input: InputStream, overwrite: Boolean): Long {
+    override suspend fun writeStream(path: String, input: InputStream, overwrite: Boolean): Long {
         val file = resolve(path)
         if (file.exists() && !overwrite) throw FileAlreadyExistsException(file)
         file.parentFile?.mkdirs()
@@ -141,19 +142,19 @@ class LocalFileAccess @Inject constructor(
         }
     }
 
-    override fun copyToLocal(path: String): File = resolve(path)
+    override suspend fun copyToLocal(path: String): File = resolve(path)
 
-    override fun delete(path: String) {
+    override suspend fun delete(path: String) {
         resolve(path).delete()
     }
 
-    override fun deleteRecursively(path: String) {
+    override suspend fun deleteRecursively(path: String) {
         val file = resolve(path)
         if (!file.exists()) return
         if (!file.deleteRecursively()) throw IOException("delete failed: ${file.absolutePath}")
     }
 
-    override fun rename(path: String, newPath: String) {
+    override suspend fun rename(path: String, newPath: String) {
         val source = resolve(path)
         val target = resolve(newPath)
         if (!source.exists()) throw NoSuchFileException(source)
@@ -164,7 +165,7 @@ class LocalFileAccess @Inject constructor(
         }
     }
 
-    override fun copy(path: String, newPath: String, overwrite: Boolean) {
+    override suspend fun copy(path: String, newPath: String, overwrite: Boolean) {
         val source = resolve(path)
         val target = resolve(newPath)
         if (!source.exists()) throw NoSuchFileException(source)
@@ -185,7 +186,7 @@ class LocalFileAccess @Inject constructor(
         }
     }
 
-    override fun move(path: String, newPath: String, overwrite: Boolean) {
+    override suspend fun move(path: String, newPath: String, overwrite: Boolean) {
         val source = resolve(path)
         val target = resolve(newPath)
         if (!source.exists()) throw NoSuchFileException(source)
@@ -214,16 +215,16 @@ class LocalFileAccess @Inject constructor(
         if (!source.deleteRecursively()) throw IOException("delete-after-copy failed: ${source.absolutePath}")
     }
 
-    override fun mkdirs(path: String) {
+    override suspend fun mkdirs(path: String) {
         resolve(path).mkdirs()
     }
 
-    override fun parentPath(path: String): String? {
+    override suspend fun parentPath(path: String): String? {
         val parent = resolve(path).parentFile ?: return null
         return pathMapper.toContainerPath(parent.absolutePath)
     }
 
-    override fun toDisplayPath(path: String): String {
+    override suspend fun toDisplayPath(path: String): String {
         return pathMapper.toContainerPath(resolve(path).absolutePath)
     }
 

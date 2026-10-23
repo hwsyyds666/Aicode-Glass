@@ -2,6 +2,7 @@ package com.aicode.feature.agent.domain.skill
 
 import com.aicode.testutil.TestFileAccessProvider
 import java.io.File
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -22,17 +23,17 @@ private class CountingFileAccessProvider(
     var fullReadCalls = 0
     var batchReadCalls = 0
 
-    override fun readFile(path: String): String {
+    override suspend fun readFile(path: String): String {
         fullReadCalls++
         return delegate.readFile(path)
     }
 
-    override fun readFiles(paths: List<String>): Map<String, String> {
+    override suspend fun readFiles(paths: List<String>): Map<String, String> {
         batchReadCalls++
         return delegate.readFiles(paths)
     }
 
-    override fun readFileHeads(paths: List<String>, maxBytes: Int): Map<String, String> {
+    override suspend fun readFileHeads(paths: List<String>, maxBytes: Int): Map<String, String> {
         headReadCalls++
         val out = LinkedHashMap<String, String>(paths.size)
         for (p in paths) {
@@ -63,6 +64,9 @@ class SkillDirectoryScannerLocateTest {
 
     private val root: String get() = tempFolder.root.absolutePath
 
+    private fun locate(name: String): String? =
+        runBlocking { SkillDirectoryScanner.locateAndRead(provider, root, name) }
+
     @Test
     fun locate_matchesFrontmatterNameAndReadsOnlyOneFullFile() {
         // 5 个技能，正文都足够大（8K 头部装不下），确保头部读≠全文读
@@ -70,7 +74,7 @@ class SkillDirectoryScannerLocateTest {
             writeSkill("skill-$i", "---\nname: skill-$i\ndescription: d$i\n---\n" + "正".repeat(20_000))
         }
 
-        val instructions = SkillDirectoryScanner.locateAndRead(provider, root, "skill-3")
+        val instructions = locate("skill-3")
 
         assertTrue(instructions != null && instructions.contains("正"))
         assertEquals("正文应只读命中文件一次全文", 1, provider.fullReadCalls + provider.batchReadCalls)
@@ -81,7 +85,7 @@ class SkillDirectoryScannerLocateTest {
     fun locate_matchesByDirNameWhenFrontmatterNameMissing() {
         writeSkill("dir-only-skill", "---\ndescription: 无 name 字段\n---\n正文")
 
-        val instructions = SkillDirectoryScanner.locateAndRead(provider, root, "dir-only-skill")
+        val instructions = locate("dir-only-skill")
 
         assertEquals("正文", instructions)
         assertEquals(1, provider.headReadCalls)
@@ -92,15 +96,15 @@ class SkillDirectoryScannerLocateTest {
         // 目录名与 frontmatter 名不一致：必须按 frontmatter 名命中（与 scan 语义一致）
         writeSkill("dir-a", "---\nname: real-name\n---\n正文A")
 
-        assertNull(SkillDirectoryScanner.locateAndRead(provider, root, "dir-a"))
-        assertEquals("正文A", SkillDirectoryScanner.locateAndRead(provider, root, "real-name"))
+        assertNull(locate("dir-a"))
+        assertEquals("正文A", locate("real-name"))
     }
 
     @Test
     fun locate_caseInsensitive() {
         writeSkill("mixed-case", "---\nname: Mixed-Case\n---\n正文")
 
-        assertEquals("正文", SkillDirectoryScanner.locateAndRead(provider, root, "mixed-CASE"))
+        assertEquals("正文", locate("mixed-CASE"))
     }
 
     @Test
@@ -109,7 +113,7 @@ class SkillDirectoryScannerLocateTest {
         File(dir, "SKILL.md").writeText("---\nname: dual\n---\nSKILL 正文")
         File(dir, "CLAUDE.md").writeText("---\nname: dual\n---\nCLAUDE 正文")
 
-        assertEquals("SKILL 正文", SkillDirectoryScanner.locateAndRead(provider, root, "dual"))
+        assertEquals("SKILL 正文", locate("dual"))
     }
 
     @Test
@@ -117,14 +121,14 @@ class SkillDirectoryScannerLocateTest {
         val nested = File(tempFolder.root, "repo/skills/nested-skill").apply { mkdirs() }
         File(nested, "SKILL.md").writeText("---\nname: nested-skill\n---\n嵌套正文")
 
-        assertEquals("嵌套正文", SkillDirectoryScanner.locateAndRead(provider, root, "nested-skill"))
+        assertEquals("嵌套正文", locate("nested-skill"))
     }
 
     @Test
     fun locate_missingSkillReturnsNull() {
         writeSkill("exists", "---\nname: exists\n---\n正文")
 
-        assertNull(SkillDirectoryScanner.locateAndRead(provider, root, "not-exists"))
+        assertNull(locate("not-exists"))
     }
 
     @Test
@@ -138,14 +142,14 @@ class SkillDirectoryScannerLocateTest {
         )
 
         // 按 frontmatter 名加载：头部匹配不到 → 回退全量扫描仍能命中（与旧行为等价）
-        assertEquals("真正的正文", SkillDirectoryScanner.locateAndRead(provider, root, "deep-name"))
+        assertEquals("真正的正文", locate("deep-name"))
         // 按目录名加载：头部命中 → 读全文返回正文
-        assertEquals("真正的正文", SkillDirectoryScanner.locateAndRead(provider, root, "deep-dir"))
+        assertEquals("真正的正文", locate("deep-dir"))
     }
 
     @Test
     fun locate_emptyRootReturnsNull() {
-        assertNull(SkillDirectoryScanner.locateAndRead(provider, root, "any"))
+        assertNull(locate("any"))
     }
 
     @Test
@@ -153,6 +157,6 @@ class SkillDirectoryScannerLocateTest {
         writeSkill("broken", "---\nname: broken\n---\n") // 空正文，仍可解析
         writeSkill("good", "---\nname: good\n---\n好正文")
 
-        assertEquals("好正文", SkillDirectoryScanner.locateAndRead(provider, root, "good"))
+        assertEquals("好正文", locate("good"))
     }
 }

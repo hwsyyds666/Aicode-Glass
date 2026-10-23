@@ -21,26 +21,26 @@ class SkillRepository @Inject constructor(
     private val fileAccess: FileAccessProvider
 ) {
     /** 全部技能（含来源作用域），未过滤禁用；同名技能项目级优先（与 MCP 两级配置一致）。 */
-    fun listAllSkills(): List<SkillEntry> =
+    suspend fun listAllSkills(): List<SkillEntry> =
         mergeAll(globalDirectorySkillSource.listSkills(), projectDirectorySkillSource.listSkills())
 
     /** 启用的技能列表（注入系统提示词用），禁用技能被过滤。 */
-    fun listSkills(): List<Skill> =
+    suspend fun listSkills(): List<Skill> =
         filterDisabled(listAllSkills(), skillConfigRepository.disabledNames()).map { it.skill }
 
     /** 读取指定 skill 的完整指令正文；不存在 / 解析失败 / 已被禁用时返回 null。 */
-    fun loadInstructions(name: String): String? {
+    suspend fun loadInstructions(name: String): String? {
         if (name.lowercase() in skillConfigRepository.disabledNames()) return null
         return projectDirectorySkillSource.loadInstructions(name)
             ?: globalDirectorySkillSource.loadInstructions(name)
     }
 
     /** 技能是否在任一作用域中被禁用。 */
-    fun isSkillDisabled(name: String): Boolean =
+    suspend fun isSkillDisabled(name: String): Boolean =
         name.lowercase() in skillConfigRepository.disabledNames()
 
     /** 在指定作用域启用/禁用某个技能。 */
-    fun setSkillDisabled(name: String, disabled: Boolean, scope: SkillScope) =
+    suspend fun setSkillDisabled(name: String, disabled: Boolean, scope: SkillScope) =
         skillConfigRepository.setDisabled(name, disabled, scope)
 
     /**
@@ -49,7 +49,7 @@ class SkillRepository @Inject constructor(
      * 编辑时写回原目录里的原指令文件（可能叫 CLAUDE.md），改名只改 frontmatter 的 name、不动目录名——
      * 技能正文常按 `~/.aicode/skills/<目录>/run.py` 引用同目录脚本，跟着改名会把这些引用打断。
      */
-    fun save(form: SkillForm, scope: SkillScope, originalName: String? = null): SkillSaveError? {
+    suspend fun save(form: SkillForm, scope: SkillScope, originalName: String? = null): SkillSaveError? {
         val name = form.name.trim()
         if (!isValidName(name)) return SkillSaveError.INVALID_NAME
         if (form.instructions.isBlank()) return SkillSaveError.EMPTY_INSTRUCTIONS
@@ -99,19 +99,19 @@ class SkillRepository @Inject constructor(
      * 从 Markdown 文本导入技能到指定作用域；[fallbackName] 为 frontmatter 缺 name 时的兜底名。
      * 名称非法 / 同名冲突 / 正文为空时整体失败，不落盘。
      */
-    fun importMarkdown(text: String, fallbackName: String, scope: SkillScope): SkillImportReport =
+    suspend fun importMarkdown(text: String, fallbackName: String, scope: SkillScope): SkillImportReport =
         SkillImporter.importMarkdown(fileAccess, skillsRoot(scope), existingNamesIn(scope), text, fallbackName)
 
     /** 从 zip 输入流导入技能（可含多个技能目录）到指定作用域。 */
-    fun importZip(input: InputStream, fallbackName: String, scope: SkillScope): SkillImportReport =
+    suspend fun importZip(input: InputStream, fallbackName: String, scope: SkillScope): SkillImportReport =
         SkillImporter.importArchive(fileAccess, skillsRoot(scope), existingNamesIn(scope), input, fallbackName)
 
     /** 指定作用域下已有技能名（小写），供导入查重。 */
-    private fun existingNamesIn(scope: SkillScope): Set<String> =
+    private suspend fun existingNamesIn(scope: SkillScope): Set<String> =
         listAllSkills().filter { it.scope == scope }.map { it.skill.name.lowercase() }.toSet()
 
     /** 删除指定作用域的技能（删除其目录，不可恢复）。返回是否成功。 */
-    fun deleteSkill(name: String, scope: SkillScope): Boolean {
+    suspend fun deleteSkill(name: String, scope: SkillScope): Boolean {
         val entry = listAllSkills().firstOrNull {
             it.skill.name.equals(name, ignoreCase = true) && it.scope == scope
         } ?: return false
@@ -136,7 +136,7 @@ class SkillRepository @Inject constructor(
         private val ILLEGAL_NAME_CHARS = charArrayOf('/', '\\', ':', '*', '?', '"', '<', '>', '|')
 
         /** 目录里已有的指令文件完整路径：SKILL.md 优先，其次 CLAUDE.md（与 [SkillParser.parse] 同一套回退）。 */
-        internal fun instructionFile(provider: FileAccessProvider, dirPath: String): String? {
+        internal suspend fun instructionFile(provider: FileAccessProvider, dirPath: String): String? {
             val files = runCatching { provider.listFiles(dirPath) }.getOrNull() ?: return null
             val name = files.firstOrNull { !it.isDirectory && it.name.equals("SKILL.md", ignoreCase = true) }?.name
                 ?: files.firstOrNull { !it.isDirectory && it.name.equals("CLAUDE.md", ignoreCase = true) }?.name
@@ -157,7 +157,7 @@ class SkillRepository @Inject constructor(
             entries.filterNot { it.skill.name.lowercase() in disabled }
 
         /** 仅当目录存在且含 SKILL.md/CLAUDE.md 指令文件时才删除，避免误删非技能目录。 */
-        internal fun safeDeleteSkillDir(provider: FileAccessProvider, dirPath: String): Boolean {
+        internal suspend fun safeDeleteSkillDir(provider: FileAccessProvider, dirPath: String): Boolean {
             if (!provider.isDirectory(dirPath)) return false
             val hasInstruction = runCatching { provider.listFiles(dirPath) }.getOrNull()?.any {
                 !it.isDirectory && (it.name.equals("SKILL.md", ignoreCase = true) || it.name.equals("CLAUDE.md", ignoreCase = true))

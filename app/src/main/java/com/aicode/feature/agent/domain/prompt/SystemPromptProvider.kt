@@ -44,13 +44,13 @@ class SystemPromptProvider @Inject constructor(
 ) {
     // 抽象独立的 Source
     interface PromptSource {
-        fun build(ctx: AgentContext): String?
+        suspend fun build(ctx: AgentContext): String?
     }
 
     private inner class StaticRuleSource : PromptSource {
         // 每次都重新读盘：未编辑时字符串一致，KV Cache 照常命中；编辑后立即生效，无需重启。
         // 技能/记忆等运行期内容由末尾的 99-runtime-context.md 片段用 {{AICODE_*}} 变量承载。
-        override fun build(ctx: AgentContext): String = promptFragmentCatalog.renderStatic(ctx.projectRoot)
+        override suspend fun build(ctx: AgentContext): String = promptFragmentCatalog.renderStatic(ctx.projectRoot)
     }
 
     private inner class ActiveSkillsSource : PromptSource {
@@ -62,7 +62,7 @@ class SystemPromptProvider @Inject constructor(
         private val cachedListsByKey = ConcurrentHashMap<SourceCacheKey, List<Skill>>()
 
         /** 启用技能列表快照：系统提示清单与每轮相关技能提醒共用，避免重复扫盘。 */
-        fun skills(ctx: AgentContext): List<Skill> {
+        suspend fun skills(ctx: AgentContext): List<Skill> {
             val key = SourceCacheKey(ctx.sessionId, ctx.projectRoot)
             cachedListsByKey[key]?.let { return it }
             val skills = try {
@@ -76,7 +76,7 @@ class SystemPromptProvider @Inject constructor(
             return skills
         }
 
-        override fun build(ctx: AgentContext): String? {
+        override suspend fun build(ctx: AgentContext): String? {
             val skills = skills(ctx)
             if (skills.isEmpty()) return null
             val content = SkillListFormatter.format(skills)
@@ -107,7 +107,7 @@ class SystemPromptProvider @Inject constructor(
     private inner class SubAgentBaseSource : PromptSource {
         @Volatile private var cached: String? = null
 
-        override fun build(ctx: AgentContext): String =
+        override suspend fun build(ctx: AgentContext): String =
             cached ?: resolvePrompt(SUBAGENT_BASE_FILE)
                 .replace(LEADING_COMMENT, "")
                 .trim()
@@ -121,7 +121,7 @@ class SystemPromptProvider @Inject constructor(
     private inner class SubAgentListSource : PromptSource {
         private val cachedByKey = ConcurrentHashMap<SourceCacheKey, String>()
 
-        override fun build(ctx: AgentContext): String? {
+        override suspend fun build(ctx: AgentContext): String? {
             val key = SourceCacheKey(ctx.sessionId, ctx.projectRoot)
             val cached = cachedByKey[key]
             if (cached != null) return cached.ifEmpty { null }
@@ -155,7 +155,7 @@ class SystemPromptProvider @Inject constructor(
         private var lastModified: Long = 0
         private var lastProjectRoot: String = ""
 
-        override fun build(ctx: AgentContext): String? {
+        override suspend fun build(ctx: AgentContext): String? {
             if (ctx.projectRoot.isBlank()) return null
             val agentsFile = File(ctx.projectRoot, AGENTS_FILE)
             val claudeFile = File(ctx.projectRoot, CLAUDE_FILE)
@@ -186,12 +186,12 @@ class SystemPromptProvider @Inject constructor(
     }
 
     private inner class WorkspaceSource : PromptSource {
-        override fun build(ctx: AgentContext): String =
+        override suspend fun build(ctx: AgentContext): String =
             if (ctx.projectRoot.isNotBlank()) "~/workspace" else "（未选择工作区）"
     }
 
     private inner class EnvironmentSource : PromptSource {
-        override fun build(ctx: AgentContext): String =
+        override suspend fun build(ctx: AgentContext): String =
             when (executionModeHolder.currentMode()) {
                 ExecutionMode.LOCAL_PROOT -> "本地容器（PRoot）"
                 ExecutionMode.REMOTE_SSH -> "远程 SSH 服务器"
@@ -252,7 +252,7 @@ class SystemPromptProvider @Inject constructor(
         PromptFragmentResolver.numberedFragments(customDir).toMap()
     }
 
-    fun build(agentContext: AgentContext): String {
+    suspend fun build(agentContext: AgentContext): String {
         agentContext.agentDefinition?.let { return buildForSubAgent(it, agentContext) }
 
         if (PromptFragmentResolver.isBuiltinDisabled(customDir)) {
@@ -294,7 +294,7 @@ class SystemPromptProvider @Inject constructor(
      * 系统提示与历史消息逐字节不变，provider 前缀缓存照常命中（KV Cache 友好）。
      * 未命中 / 无技能返回 null。
      */
-    fun buildSkillHint(ctx: AgentContext, latestUserText: String): String? {
+    suspend fun buildSkillHint(ctx: AgentContext, latestUserText: String): String? {
         if (latestUserText.isBlank()) return null
         val skills = activeSkillsSource.skills(ctx)
         if (skills.isEmpty()) return null
@@ -305,7 +305,7 @@ class SystemPromptProvider @Inject constructor(
      * [PromptFragmentResolver.DISABLE_BUILTIN_FILE] 生效时：只输出 `prompts.custom/` 顶层的数字片段，
      * 不注入任何内置来源；动态内容仅通过 `{{AICODE_*}}` 变量按需取回。
      */
-    private fun buildCustomOnly(ctx: AgentContext): String {
+    private suspend fun buildCustomOnly(ctx: AgentContext): String {
         val content = promptFragmentCatalog.renderCustomOnly(ctx.projectRoot)
         if (content.isEmpty()) {
             FileLogger.w(
@@ -332,7 +332,7 @@ class SystemPromptProvider @Inject constructor(
      * 按子代理定义组装提示词：只注入 [AgentDefinition.inject] 列出的片段，再接 agent 自己的提示词。
      * 不注入可用子代理清单（子代理不能嵌套派发）。定义正文里的 `{{AICODE_*}}` 变量同样会展开。
      */
-    private fun buildForSubAgent(
+    private suspend fun buildForSubAgent(
         definition: AgentDefinition,
         agentContext: AgentContext
     ): String = buildString {

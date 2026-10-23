@@ -646,7 +646,7 @@ class ProviderDashboardRunner @Inject constructor(
      * 获取脚本目录 `~/.aicode/scripts` 下的所有可用脚本文件名列表。经 [FileAccessProvider] 访问，
      * 跟随当前执行环境（本地落 App 私有目录，远程落服务器 home 下的 `.aicode/scripts`）。
      */
-    fun listAvailableScripts(): List<String> {
+    suspend fun listAvailableScripts(): List<String> {
         val scriptsDir = "${pathHomeResolver.aicodeRoot()}/scripts"
         fileAccess.mkdirs(scriptsDir)
         return fileAccess.listFiles(scriptsDir)

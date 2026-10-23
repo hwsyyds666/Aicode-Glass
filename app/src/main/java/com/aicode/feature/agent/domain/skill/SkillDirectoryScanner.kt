@@ -33,8 +33,10 @@ object SkillDirectoryScanner {
      * 扫描 [root] 目录下所有合法技能，按名称排序。
      * 目录不存在时返回空列表；扫描过程异常（IO 失败、远程工作区未连接等）时降级为空列表并记日志，
      * 不向上抛——技能扫描失败不该让调用方（工作区切换、AI 请求）崩溃。
+     *
+     * 挂起函数：底层经 [FileAccessProvider]（远程模式走 SFTP），调用方须在协程里调用。
      */
-    fun scan(provider: FileAccessProvider, root: String): List<Skill> = runCatching {
+    suspend fun scan(provider: FileAccessProvider, root: String): List<Skill> = runCatching {
         val picked = instructionFiles(provider, root)
         if (picked.isEmpty()) return@runCatching emptyList()
 
@@ -58,8 +60,10 @@ object SkillDirectoryScanner {
      * 匹配语义与 [scan] 完全一致：frontmatter 缺 name 时回退目录名；同目录 SKILL.md 优先于 CLAUDE.md。
      * 头部匹配全部落空时回退 [scan] 全量匹配——frontmatter 超长被截断、或技能确实不存在时
      * 仍给出与全量扫描一致的结果（技能不存在时这份开销就是一次准确的「未找到」判据）。
+     *
+     * 挂起函数：底层经 [FileAccessProvider]（远程模式走 SFTP），调用方须在协程里调用。
      */
-    fun locateAndRead(provider: FileAccessProvider, root: String, name: String): String? = runCatching {
+    suspend fun locateAndRead(provider: FileAccessProvider, root: String, name: String): String? = runCatching {
         val picked = instructionFiles(provider, root)
         if (picked.isEmpty()) return@runCatching null
 
@@ -84,7 +88,7 @@ object SkillDirectoryScanner {
      * 递归列举 [root] 下的指令文件，返回 `(文件容器路径, 目录容器路径)`；
      * 同目录同时存在 SKILL.md / CLAUDE.md 时与 [scan] 一样只取 SKILL.md。
      */
-    private fun instructionFiles(provider: FileAccessProvider, root: String): List<Pair<String, String>> {
+    private suspend fun instructionFiles(provider: FileAccessProvider, root: String): List<Pair<String, String>> {
         val base = root.trimEnd('/')
         // 递归结果里已带文件名（形如 "repo/skills/my-skill/SKILL.md"），直接据此挑出技能文件，
         // 不再对每个目录回查一次 listFiles——真机 ROOT 通道下那等于每个 skill 多 fork 一个 su 进程。

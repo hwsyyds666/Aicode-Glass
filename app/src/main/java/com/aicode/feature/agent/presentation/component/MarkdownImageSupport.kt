@@ -73,7 +73,7 @@ internal class MarkdownImageTransformer(
         return ImageData(painter = p, modifier = modifier, contentScale = ContentScale.Fit)
     }
 
-    private fun decode(url: String): Painter? {
+    private suspend fun decode(url: String): Painter? {
         return try {
             val file = fileAccess.copyToLocal(url)
             if (!file.isFile || file.length() <= 0L) return null

@@ -2,6 +2,7 @@ package com.aicode.feature.agent.domain.skill
 
 import com.aicode.testutil.TestFileAccessProvider
 import java.io.File
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -25,7 +26,7 @@ class SkillParserTest {
                     instructions = instructions
                 )
             )
-            val parsed = SkillParser.parse(TestFileAccessProvider(), dir.absolutePath)
+            val parsed = runBlocking { SkillParser.parse(TestFileAccessProvider(), dir.absolutePath) }
             assertNotNull(parsed)
             parsed!!
         } finally {

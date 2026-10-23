@@ -4,6 +4,7 @@ import android.content.Context
 import com.aicode.R
 import com.aicode.feature.agent.domain.skill.Skill
 import com.aicode.feature.agent.domain.skill.SkillRepository
+import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.runBlocking
@@ -42,7 +43,7 @@ class SlashCommandRegistryTest {
         every { context.getString(R.string.slash_command_usage_desc) } returns "用量"
         every { context.getString(R.string.slash_command_compress_desc) } returns "压缩上下文"
         every { context.getString(R.string.slash_command_init_desc) } returns "初始化项目"
-        every { skillRepository.listSkills() } returns skills
+        coEvery { skillRepository.listSkills() } returns skills
         runBlocking { registry.refresh() }
     }
 

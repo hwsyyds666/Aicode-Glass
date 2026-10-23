@@ -1,11 +1,12 @@
 package com.aicode.feature.agent.domain.skill
 
 import com.aicode.testutil.TestFileAccessProvider
-import io.mockk.every
+import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.mockk
 import io.mockk.spyk
-import io.mockk.verify
 import java.io.File
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -15,13 +16,13 @@ class SkillRepositoryTest {
 
     private val provider = TestFileAccessProvider()
     private val globalSource = spyk(GlobalDirectorySkillSource(provider)).apply {
-        every { listSkills() } returns emptyList()
+        coEvery { listSkills() } returns emptyList()
     }
     private val projectSource = spyk(ProjectDirectorySkillSource(provider)).apply {
-        every { listSkills() } returns emptyList()
+        coEvery { listSkills() } returns emptyList()
     }
     private val config = mockk<SkillConfigRepository>().apply {
-        every { disabledNames() } returns emptySet()
+        coEvery { disabledNames() } returns emptySet()
     }
     private val repository = SkillRepository(globalSource, projectSource, config, provider)
 
@@ -32,53 +33,53 @@ class SkillRepositoryTest {
     )
 
     @Test
-    fun loadInstructions_projectOverridesSameNameWithDifferentBody() {
-        every { globalSource.loadInstructions("same") } returns "global instructions"
-        every { projectSource.loadInstructions("same") } returns "project instructions"
+    fun loadInstructions_projectOverridesSameNameWithDifferentBody() = runBlocking {
+        coEvery { globalSource.loadInstructions("same") } returns "global instructions"
+        coEvery { projectSource.loadInstructions("same") } returns "project instructions"
 
         assertEquals("project instructions", repository.loadInstructions("same"))
-        verify(exactly = 1) { projectSource.loadInstructions("same") }
-        verify(exactly = 0) { globalSource.loadInstructions(any()) }
+        coVerify(exactly = 1) { projectSource.loadInstructions("same") }
+        coVerify(exactly = 0) { globalSource.loadInstructions(any()) }
     }
 
     @Test
-    fun loadInstructions_projectOverridesCaseInsensitiveName() {
-        every { globalSource.loadInstructions(any()) } returns "global instructions"
-        every { projectSource.loadInstructions(any()) } returns "project instructions"
+    fun loadInstructions_projectOverridesCaseInsensitiveName() = runBlocking {
+        coEvery { globalSource.loadInstructions(any()) } returns "global instructions"
+        coEvery { projectSource.loadInstructions(any()) } returns "project instructions"
 
         assertEquals("project instructions", repository.loadInstructions("MIXEDCASE"))
-        verify(exactly = 0) { globalSource.loadInstructions(any()) }
+        coVerify(exactly = 0) { globalSource.loadInstructions(any()) }
     }
 
     @Test
-    fun loadInstructions_fallsBackToGlobalWhenProjectHasNoMatch() {
-        every { projectSource.loadInstructions("GLOBALONLY") } returns null
-        every { globalSource.loadInstructions("GLOBALONLY") } returns "global instructions"
+    fun loadInstructions_fallsBackToGlobalWhenProjectHasNoMatch() = runBlocking {
+        coEvery { projectSource.loadInstructions("GLOBALONLY") } returns null
+        coEvery { globalSource.loadInstructions("GLOBALONLY") } returns "global instructions"
 
         assertEquals("global instructions", repository.loadInstructions("GLOBALONLY"))
-        verify(exactly = 1) { projectSource.loadInstructions("GLOBALONLY") }
-        verify(exactly = 1) { globalSource.loadInstructions("GLOBALONLY") }
+        coVerify(exactly = 1) { projectSource.loadInstructions("GLOBALONLY") }
+        coVerify(exactly = 1) { globalSource.loadInstructions("GLOBALONLY") }
     }
 
     @Test
-    fun loadInstructions_returnsNullWhenNeitherSourceHasMatch() {
-        every { projectSource.loadInstructions("missing") } returns null
-        every { globalSource.loadInstructions("missing") } returns null
+    fun loadInstructions_returnsNullWhenNeitherSourceHasMatch() = runBlocking {
+        coEvery { projectSource.loadInstructions("missing") } returns null
+        coEvery { globalSource.loadInstructions("missing") } returns null
 
         assertNull(repository.loadInstructions("missing"))
-        verify(exactly = 1) { projectSource.loadInstructions("missing") }
-        verify(exactly = 1) { globalSource.loadInstructions("missing") }
+        coVerify(exactly = 1) { projectSource.loadInstructions("missing") }
+        coVerify(exactly = 1) { globalSource.loadInstructions("missing") }
     }
 
     @Test
-    fun loadInstructions_disabledNameBlocksBothSourcesCaseInsensitively() {
-        every { config.disabledNames() } returns setOf("mixedcase")
-        every { projectSource.loadInstructions(any()) } returns "project instructions"
-        every { globalSource.loadInstructions(any()) } returns "global instructions"
+    fun loadInstructions_disabledNameBlocksBothSourcesCaseInsensitively() = runBlocking {
+        coEvery { config.disabledNames() } returns setOf("mixedcase")
+        coEvery { projectSource.loadInstructions(any()) } returns "project instructions"
+        coEvery { globalSource.loadInstructions(any()) } returns "global instructions"
 
         assertNull(repository.loadInstructions("MIXEDCASE"))
-        verify(exactly = 0) { projectSource.loadInstructions(any()) }
-        verify(exactly = 0) { globalSource.loadInstructions(any()) }
+        coVerify(exactly = 0) { projectSource.loadInstructions(any()) }
+        coVerify(exactly = 0) { globalSource.loadInstructions(any()) }
     }
 
     @Test
@@ -175,18 +176,18 @@ class SkillRepositoryTest {
             File(skillDir, "run.py").writeText("print(1)")
 
             // 含 SKILL.md 的目录可删
-            assertTrue(SkillRepository.safeDeleteSkillDir(provider, skillDir.absolutePath))
+            assertTrue(runBlocking { SkillRepository.safeDeleteSkillDir(provider, skillDir.absolutePath) })
             assertTrue(!skillDir.exists())
 
             // 不含指令文件的目录拒绝删除
             val plainDir = File(temp, "not-a-skill")
             plainDir.mkdirs()
             File(plainDir, "readme.txt").writeText("x")
-            assertTrue(!SkillRepository.safeDeleteSkillDir(provider, plainDir.absolutePath))
+            assertTrue(!runBlocking { SkillRepository.safeDeleteSkillDir(provider, plainDir.absolutePath) })
             assertTrue(plainDir.exists())
 
             // 不存在的目录返回 false
-            assertTrue(!SkillRepository.safeDeleteSkillDir(provider, File(temp, "ghost").absolutePath))
+            assertTrue(!runBlocking { SkillRepository.safeDeleteSkillDir(provider, File(temp, "ghost").absolutePath) })
         } finally {
             temp.deleteRecursively()
         }
@@ -214,14 +215,23 @@ class SkillRepositoryTest {
             val both = File(temp, "both").apply { mkdirs() }
             File(both, "CLAUDE.md").writeText("x")
             File(both, "skill.md").writeText("x")
-            assertEquals("skill.md", SkillRepository.instructionFile(provider, both.absolutePath)?.substringAfterLast('/'))
+            assertEquals(
+                "skill.md",
+                runBlocking { SkillRepository.instructionFile(provider, both.absolutePath) }?.substringAfterLast('/')
+            )
 
             val claudeOnly = File(temp, "claude-only").apply { mkdirs() }
             File(claudeOnly, "CLAUDE.md").writeText("x")
-            assertEquals("CLAUDE.md", SkillRepository.instructionFile(provider, claudeOnly.absolutePath)?.substringAfterLast('/'))
+            assertEquals(
+                "CLAUDE.md",
+                runBlocking { SkillRepository.instructionFile(provider, claudeOnly.absolutePath) }?.substringAfterLast('/')
+            )
 
             val empty = File(temp, "empty").apply { mkdirs() }
-            assertEquals(null, SkillRepository.instructionFile(provider, empty.absolutePath))
+            assertEquals(
+                null,
+                runBlocking { SkillRepository.instructionFile(provider, empty.absolutePath) }
+            )
         } finally {
             temp.deleteRecursively()
         }

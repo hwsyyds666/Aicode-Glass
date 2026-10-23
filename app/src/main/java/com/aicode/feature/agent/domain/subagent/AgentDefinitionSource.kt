@@ -5,7 +5,8 @@ import com.aicode.feature.workspace.domain.FileAccessProvider
 
 /** 子代理定义来源：一个目录下的 `*.md`，每个文件一个 agent。 */
 interface AgentDefinitionSource {
-    fun listDefinitions(): List<AgentDefinition>
+    /** 挂起函数：底层经 [FileAccessProvider]（远程模式走 SFTP），调用方须在协程里调用。 */
+    suspend fun listDefinitions(): List<AgentDefinition>
 }
 
 /** 目录扫描：只取顶层 `*.md`，避免把技能目录等无关内容误当 agent 定义。 */
@@ -16,7 +17,7 @@ internal object AgentDefinitionDirectoryScanner {
      * 扫描 [root] 下顶层 `*.md`，每个文件一个定义。目录不存在时返回空列表；
      * 扫描过程异常（IO 失败、远程工作区未连接等）时降级为空列表并记日志，不向上抛。
      */
-    fun scan(provider: FileAccessProvider, root: String): List<AgentDefinition> = runCatching {
+    suspend fun scan(provider: FileAccessProvider, root: String): List<AgentDefinition> = runCatching {
         if (!provider.isDirectory(root)) return@runCatching emptyList()
         val base = root.trimEnd('/')
         val paths = provider.listFiles(root)

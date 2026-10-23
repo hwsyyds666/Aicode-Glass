@@ -14,8 +14,12 @@ object AgentDefinitionParser {
     private const val TAG = "AgentDefinitionParser"
     private const val MAX_DESC_CHARS = 500
 
-    /** 正文为空视为非法定义（agent 必须有提示词），返回 null。定义文件经 [provider] 以容器路径读取。 */
-    fun parse(provider: FileAccessProvider, filePath: String): AgentDefinition? {
+    /**
+     * 正文为空视为非法定义（agent 必须有提示词），返回 null。定义文件经 [provider] 以容器路径读取。
+     *
+     * 挂起函数：底层经 [FileAccessProvider]（远程模式走 SFTP），调用方须在协程里调用。
+     */
+    suspend fun parse(provider: FileAccessProvider, filePath: String): AgentDefinition? {
         val text = runCatching { provider.readFile(filePath) }.getOrElse {
             FileLogger.w(TAG, "读取子代理定义失败: $filePath", it)
             return null

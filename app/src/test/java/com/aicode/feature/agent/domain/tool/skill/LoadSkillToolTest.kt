@@ -3,7 +3,7 @@ package com.aicode.feature.agent.domain.tool.skill
 import com.aicode.feature.agent.domain.skill.Skill
 import com.aicode.feature.agent.domain.skill.SkillRepository
 import com.aicode.feature.agent.domain.tool.ToolResult
-import io.mockk.every
+import io.mockk.coEvery
 import io.mockk.mockk
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonElement
@@ -28,7 +28,7 @@ class LoadSkillToolTest {
 
     @Test
     fun execute_returnsInstructionsFromRepository() = runBlocking {
-        every { repository.loadInstructions("re-analyze") } returns "技能正文"
+        coEvery { repository.loadInstructions("re-analyze") } returns "技能正文"
 
         val result = tool.execute(args("re-analyze"))
 
@@ -57,8 +57,8 @@ class LoadSkillToolTest {
 
     @Test
     fun execute_unknownSkillListsAvailableOnes() = runBlocking {
-        every { repository.loadInstructions("nope") } returns null
-        every { repository.listSkills() } returns listOf(
+        coEvery { repository.loadInstructions("nope") } returns null
+        coEvery { repository.listSkills() } returns listOf(
             Skill(name = "re-analyze", description = "逆向分析", instructions = "x")
         )
 
@@ -72,7 +72,7 @@ class LoadSkillToolTest {
 
     @Test
     fun execute_passesNameThrough() = runBlocking {
-        every { repository.loadInstructions(any()) } returns "正文"
+        coEvery { repository.loadInstructions(any()) } returns "正文"
 
         val result = tool.execute(args("Re-Analyze"))
 
