@@ -7,6 +7,9 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.aicode.feature.agent.data.local.database.AgentDatabase
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.BeforeClass
 import org.junit.Rule
@@ -76,7 +79,80 @@ class MigrationTest {
     }
 
     /**
-     * 未来新增迁移（51+）时把 @AutoMigration/新迁移加进来后在此补升级用例：
-     * createDatabase(50) → 跑迁移数组 → 断言新列/新表存在。
+     * 性能专项 17·P1-4：迁移 59（58→59）为 agent_messages 建 (sessionId, timestamp) 复合索引。
+     *
+     * 验证点：
+     * 1. 旧版本库（v58）灌入的数据升级后完整无损；
+     * 2. 旧单列索引 index_agent_messages_sessionId 被删、新复合索引存在
+     *    （sqlite_master 与 PRAGMA index_info 双重确认）；
+     * 3. 核心查询 `WHERE sessionId = ? ORDER BY timestamp DESC LIMIT n` 走复合索引，
+     *    且不再出现 USE TEMP B-TREE FOR ORDER BY。
+     *
+     * runMigrationsAndValidate 会按导出的 59.json 逐表校验 TableInfo（含索引），
+     * 迁移产物与实体 Index 注解不一致时这里直接抛异常。
      */
+    @Test
+    fun migration_58_to_59_agentMessagesSessionTimestampIndex() {
+        // 1. 以 v58 建库并灌两条样本消息（覆盖 agent_messages 全部 NOT NULL 列）
+        helper.createDatabase(dbName, 58).use { db ->
+            db.execSQL(
+                "INSERT INTO agent_messages (id, sessionId, role, content, timestamp, isError, " +
+                    "isCompacted, isContextSummary, isCompactionMarker, inputTokens, outputTokens, " +
+                    "cachedInputTokens, isContextExcluded) VALUES " +
+                    "('m1', 'sess-a', 'USER', '你好', 1000, 0, 0, 0, 0, 0, 0, 0, 0), " +
+                    "('m2', 'sess-a', 'ASSISTANT', '在的', 2000, 0, 0, 0, 0, 0, 0, 0, 0)"
+            )
+        }
+
+        // 2. 从 assets 取 58→59 的文件式迁移，跑迁移并按 59.json 校验 schema
+        val migration59 = MigrationLoader.loadMigrations(context)
+            .filterIsInstance<FileMigration>()
+            .first { it.version == AgentDatabase.SCHEMA_VERSION }
+        val db = helper.runMigrationsAndValidate(
+            dbName,
+            AgentDatabase.SCHEMA_VERSION,
+            true,
+            migration59
+        )
+
+        // 3. 数据完整：两条消息都在
+        db.query("SELECT COUNT(*) FROM agent_messages").use { c ->
+            assertTrue(c.moveToFirst())
+            assertEquals(2, c.getInt(0))
+        }
+
+        // 4. 索引换血：旧单列索引已删、新复合索引存在
+        db.query(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'agent_messages'"
+        ).use { c ->
+            val names = mutableListOf<String>()
+            while (c.moveToNext()) names += c.getString(0)
+            assertFalse("旧单列索引应已删除，实际: $names", names.contains("index_agent_messages_sessionId"))
+            assertTrue("新复合索引应存在，实际: $names", names.contains("index_agent_messages_sessionId_timestamp"))
+        }
+        db.query("PRAGMA index_info(index_agent_messages_sessionId_timestamp)").use { c ->
+            val cols = mutableListOf<String>()
+            while (c.moveToNext()) cols += c.getString(2)
+            assertEquals(listOf("sessionId", "timestamp"), cols)
+        }
+
+        // 5. 核心查询走复合索引且无 TEMP B-TREE 排序
+        db.query(
+            "EXPLAIN QUERY PLAN SELECT * FROM agent_messages " +
+                "WHERE sessionId = ? ORDER BY timestamp DESC LIMIT ?",
+            arrayOf<Any>("sess-a", 20)
+        ).use { c ->
+            val plan = mutableListOf<String>()
+            while (c.moveToNext()) plan += c.getString(3)
+            assertTrue(
+                "应使用复合索引 index_agent_messages_sessionId_timestamp，实际计划: $plan",
+                plan.any { it.contains("index_agent_messages_sessionId_timestamp") }
+            )
+            assertFalse(
+                "不应再出现 USE TEMP B-TREE FOR ORDER BY，实际计划: $plan",
+                plan.any { it.contains("USE TEMP B-TREE") }
+            )
+        }
+        db.close()
+    }
 }

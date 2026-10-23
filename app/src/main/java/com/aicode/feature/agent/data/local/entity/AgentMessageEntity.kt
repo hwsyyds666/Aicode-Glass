@@ -14,7 +14,13 @@ import kotlinx.serialization.json.Json
 
 @Entity(
     tableName = "agent_messages",
-    indices = [Index(value = ["sessionId"])]
+    indices = [
+        // 性能专项 17·P1-4：(sessionId, timestamp) 复合索引。
+        // 会话消息回放/分页（WHERE sessionId = ? ORDER BY timestamp DESC LIMIT n）可沿索引有序扫描，
+        // 免去旧单列 sessionId 索引查出后再做 TEMP B-TREE 排序；旧索引被本索引左前缀覆盖，迁移 59 先删后建。
+        // 名称与 Room 默认命名一致：index_agent_messages_sessionId_timestamp。
+        Index(name = "index_agent_messages_sessionId_timestamp", value = ["sessionId", "timestamp"])
+    ]
 )
 data class AgentMessageEntity(
     @PrimaryKey val id: String,
