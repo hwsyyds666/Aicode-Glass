@@ -254,4 +254,210 @@ class ShellArgsTest {
         assertNull(buildFallbackSearchCommand(parseShellWords("foo src/ | grep bar")!!))
         assertNull(buildFallbackSearchCommand(parseShellWords("foo src/ | head -30; rm -rf /")!!))
     }
+
+    // ---------- positionalPathArgs ----------
+
+    @Test
+    fun positionalPathArgs_firstPositionalIsPattern_pathsFollow() {
+        assertEquals(
+            listOf("src/", "app/"),
+            positionalPathArgs(parseShellWords("-n foo src/ app/")!!)
+        )
+    }
+
+    @Test
+    fun positionalPathArgs_withRegexpFlag_allPositionalsArePaths() {
+        assertEquals(
+            listOf("src/", "app/"),
+            positionalPathArgs(parseShellWords("-e foo src/ app/")!!)
+        )
+    }
+
+    @Test
+    fun positionalPathArgs_valueFlagsSkipped() {
+        assertEquals(
+            listOf("app/"),
+            positionalPathArgs(parseShellWords("-g *.kt -A 2 foo app/")!!)
+        )
+    }
+
+    @Test
+    fun positionalPathArgs_dashDash_firstPositionalAfterDashDashIsPattern() {
+        // `-- -foo src/`：-- 后第一个位置参数 -foo 是模式串，路径只有 src/
+        assertEquals(
+            listOf("src/"),
+            positionalPathArgs(parseShellWords("-- -foo src/")!!)
+        )
+    }
+
+    // ---------- isSearchTargetInsideWorkspace ----------
+
+    @Test
+    fun isSearchTargetInsideWorkspace_noPathArgs_isInside() {
+        val root = tempWorkspace()
+        assertTrue(isSearchTargetInsideWorkspace(parseShellWords("-n foo")!!, root, "/data/user/0/com.aicode/files"))
+    }
+
+    @Test
+    fun isSearchTargetInsideWorkspace_absolutePathInside_isInside() {
+        assumePosixFilesystem()
+        val root = tempWorkspace()
+        assertTrue(isSearchTargetInsideWorkspace(parseShellWords("-n foo $root/app/src")!!, root, "/home"))
+    }
+
+    @Test
+    fun isSearchTargetInsideWorkspace_absolutePathOutside_isOutside() {
+        assumePosixFilesystem()
+        val root = tempWorkspace()
+        assertTrue(!isSearchTargetInsideWorkspace(parseShellWords("-n foo /system/etc")!!, root, "/home"))
+    }
+
+    @Test
+    fun isSearchTargetInsideWorkspace_mixedPaths_oneOutside_isOutside() {
+        assumePosixFilesystem()
+        val root = tempWorkspace()
+        val tokens = parseShellWords("-n foo $root/app /data/local/tmp")!!
+        assertTrue(!isSearchTargetInsideWorkspace(tokens, root, "/home"))
+    }
+
+    @Test
+    fun isSearchTargetInsideWorkspace_tildePath_resolvedViaHome() {
+        assumeCanonicalResolvesDirSymlinks()
+        val root = tempWorkspace()
+        val home = tempDirWithSymlink("workspace", root)
+        assertTrue(isSearchTargetInsideWorkspace(parseShellWords("-n foo ~/workspace/app")!!, root, home))
+    }
+
+    // ---------- translateTokensForContainer ----------
+
+    @Test
+    fun translateTokensForContainer_absolutePathsRewrittenToMountPoint() {
+        assumePosixFilesystem()
+        val root = tempWorkspace()
+        val translated = translateTokensForContainer(
+            parseShellWords("-n foo $root/app/src $root")!!,
+            workspaceRoot = root,
+            home = "/data/user/0/com.aicode/files"
+        )
+        assertEquals(listOf("-n", "foo", "/root/workspace/app/src", "/root/workspace"), translated)
+    }
+
+    @Test
+    fun translateTokensForContainer_patternAndRelativePathsUntouched() {
+        val root = tempWorkspace()
+        val translated = translateTokensForContainer(
+            parseShellWords("-i 'fun main' src/")!!,
+            workspaceRoot = root,
+            home = "/data/user/0/com.aicode/files"
+        )
+        assertEquals(listOf("-i", "fun main", "src/"), translated)
+    }
+
+    @Test
+    fun translateTokensForContainer_outsidePathUntouched() {
+        assumePosixFilesystem()
+        val root = tempWorkspace()
+        val translated = translateTokensForContainer(
+            parseShellWords("-n foo /system/etc/hosts")!!,
+            workspaceRoot = root,
+            home = "/data/user/0/com.aicode/files"
+        )
+        assertEquals(listOf("-n", "foo", "/system/etc/hosts"), translated)
+    }
+
+    @Test
+    fun translateTokensForContainer_valueFlagsNotTranslated() {
+        assumePosixFilesystem()
+        val root = tempWorkspace()
+        val translated = translateTokensForContainer(
+            parseShellWords("-g *.kt -A 2 foo $root/app")!!,
+            workspaceRoot = root,
+            home = "/data/user/0/com.aicode/files"
+        )
+        assertEquals(listOf("-g", "*.kt", "-A", "2", "foo", "/root/workspace/app"), translated)
+    }
+
+    @Test
+    fun translateTokensForContainer_withRegexpFlag_firstPositionalIsPath() {
+        assumePosixFilesystem()
+        val root = tempWorkspace()
+        // -e 显式给出模式时，第一个位置参数就是路径（不是模式串）
+        val translated = translateTokensForContainer(
+            parseShellWords("-e foo $root/app")!!,
+            workspaceRoot = root,
+            home = "/data/user/0/com.aicode/files"
+        )
+        assertEquals(listOf("-e", "foo", "/root/workspace/app"), translated)
+    }
+
+    @Test
+    fun translateTokensForContainer_tildePathViaHomeSymlink_translated() {
+        assumeCanonicalResolvesDirSymlinks()
+        val root = tempWorkspace()
+        val home = tempDirWithSymlink("workspace", root)
+        val translated = translateTokensForContainer(
+            parseShellWords("-n foo ~/workspace/app")!!,
+            workspaceRoot = root,
+            home = home
+        )
+        assertEquals(listOf("-n", "foo", "/root/workspace/app"), translated)
+    }
+
+    @Test
+    fun translateTokensForContainer_dashDash_pathsAfterStillTranslated() {
+        assumePosixFilesystem()
+        val root = tempWorkspace()
+        val translated = translateTokensForContainer(
+            parseShellWords("-- -foo $root/app")!!,
+            workspaceRoot = root,
+            home = "/data/user/0/com.aicode/files"
+        )
+        assertEquals(listOf("--", "-foo", "/root/workspace/app"), translated)
+    }
+
+    // ---------- 测试辅助 ----------
+
+    /**
+     * 假设 POSIX 风格绝对路径（`/...` 开头）。
+     *
+     * 被测逻辑面向 Android：工作区路径形如 `/data/user/0/...`。Windows 的绝对路径
+     * 以盘符开头（`C:/...`），`startsWith("/")` 判定不成立，用例在该平台无意义，
+     * 探测后跳过（不静默失败）。Linux/Android（含 CI）上照常执行。
+     */
+    private fun assumePosixFilesystem() {
+        org.junit.Assume.assumeTrue(java.io.File("/etc").exists())
+    }
+
+    /** 建一个真实临时目录作为工作区（canonical 解析需要路径存在）；返回正斜杠形式，避免 parseShellWords 吞掉 Windows 反斜杠。 */
+    private fun tempWorkspace(): String {
+        val dir = kotlin.io.path.createTempDirectory("aicode-ws").toFile()
+        dir.deleteOnExit()
+        return dir.canonicalPath.replace('\\', '/')
+    }
+
+    /** 建临时 home 目录，其中建 `name` symlink 指向 [target]，返回 home 绝对路径。 */
+    private fun tempDirWithSymlink(name: String, target: String): String {
+        val home = kotlin.io.path.createTempDirectory("aicode-home").toFile()
+        home.deleteOnExit()
+        java.nio.file.Files.createSymbolicLink(home.resolve(name).toPath(), java.io.File(target).toPath())
+        return home.canonicalPath
+    }
+
+    /**
+     * 当前 JVM 的 File.canonicalPath 是否解析目录 symlink。
+     *
+     * Linux/Android（realpath）会解析不存在的尾部路径中的父级 symlink——真机
+     * `~/workspace` symlink 正是该形态；Windows 的 canonicalPath 实现不解，
+     * 相关用例在该平台无意义，探测后跳过（不静默失败）。
+     */
+    private fun assumeCanonicalResolvesDirSymlinks() {
+        val probeRoot = tempWorkspace()
+        val probeHome = tempDirWithSymlink("workspace", probeRoot)
+        val resolved = runCatching {
+            java.io.File("$probeHome/workspace/x").canonicalPath.replace('\\', '/')
+        }.getOrNull()
+        org.junit.Assume.assumeTrue(
+            resolved != null && resolved.startsWith("$probeRoot/"),
+        )
+    }
 }

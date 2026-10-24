@@ -135,24 +135,30 @@ class RipgrepProvisioner @Inject constructor(
     private val installMutex = Mutex()
 
     /**
-     * 幂等地确保当前执行环境有可用的 rg。
+     * 幂等地确保指定执行环境有可用的 rg。
      *
      * @param force 跳过缓存强制重检——供 search 在实际执行 rg 返回 127 时调用（缓存可能因
      *   用户手动删除 rg 等原因为陈旧可用状态）。
+     * @param target 目标环境；null 按当前全局模式。供调用方显式指定通道使用——典型场景：
+     *   真机 ROOT 模式下工作区内搜索改走本地容器（容器 bind 了工作区且有真 rg），
+     *   rg 自愈也必须对容器目标生效，不能对真机目标（真机无包管理器，装了也白装）。
      */
-    suspend fun ensureAvailable(force: Boolean = false): RipgrepStatus {
-        val target = environment.currentTarget()
-        if (!environment.isReady(target)) {
-            FileLogger.w(TAG, "执行环境未就绪，跳过 rg 保障: target=$target")
+    suspend fun ensureAvailable(
+        force: Boolean = false,
+        target: DelegatingCommandEngine.TargetEnv? = null
+    ): RipgrepStatus {
+        val effectiveTarget = target ?: environment.currentTarget()
+        if (!environment.isReady(effectiveTarget)) {
+            FileLogger.w(TAG, "执行环境未就绪，跳过 rg 保障: target=$effectiveTarget")
             return RipgrepStatus.NotReady
         }
-        val key = environment.envKey(target)
+        val key = environment.envKey(effectiveTarget)
         if (!force) cachedStatus(key)?.let { return it }
         return installMutex.withLock {
             // 等锁期间可能已被并发调用装好，再查一次缓存
             if (!force) cachedStatus(key)?.let { return it }
-            runCatching { detectOrInstall(target) }
-                .onFailure { FileLogger.e(TAG, "rg 保障执行异常: target=$target", it) }
+            runCatching { detectOrInstall(effectiveTarget) }
+                .onFailure { FileLogger.e(TAG, "rg 保障执行异常: target=$effectiveTarget", it) }
                 .fold(
                     onSuccess = { status ->
                         cache[key] = (status is RipgrepStatus.Available) to System.currentTimeMillis()
