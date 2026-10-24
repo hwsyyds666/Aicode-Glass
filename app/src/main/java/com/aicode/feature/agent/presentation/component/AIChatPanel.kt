@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -36,6 +37,8 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -44,6 +47,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -74,7 +78,10 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aicode.R
@@ -94,6 +101,7 @@ import com.aicode.feature.agent.presentation.hasVisibleContent
 import com.aicode.feature.onboarding.domain.OnboardingStep
 import com.aicode.feature.onboarding.presentation.onboardingTarget
 import com.aicode.feature.settings.data.repository.TodoDisplayPosition
+import com.aicode.feature.settings.data.repository.OpenAIAccountRepository
 import com.aicode.core.ui.glassBackdrop
 import com.aicode.core.ui.rememberChatGlassLayer
 import com.aicode.core.ui.rememberGlassLuminance
@@ -193,6 +201,7 @@ internal fun turnKeyOf(firstMessageId: String): String = "turn:$firstMessageId"
  * 整轮任务折叠头 item 的渲染状态。非空即表示这是一条「执行中 / 已完成」头行。
  *
  * [endMessageId] 是轮末助手消息 id，据此查本轮耗时（见 [computeTaskDurations]，口径一致）。
+ * 失败信息不在这里汇总：展开后的工具卡片自带错误态，头上再挂「N 个步骤失败」纯属噪音。
  */
 internal data class TurnHeaderState(
     val key: String,
@@ -589,7 +598,6 @@ fun AIChatPanel(
     val pendingPermissionSessionTitle by viewModel.pendingToolPermissionSessionTitle.collectAsStateWithLifecycle()
     val pendingQuestion by viewModel.pendingUserQuestion.collectAsStateWithLifecycle()
     // 提前收集：标题栏下方的待办浮层需要在计划审批弹窗出现时联动收起（原在浮动层内收集，太靠后）
-    val planApproval by viewModel.pendingPlanApproval.collectAsStateWithLifecycle()
     val currentTodoItems by viewModel.currentSessionTodoItems.collectAsStateWithLifecycle()
     // 任务待办显示位置：标题栏下方 / 消息栏上方（默认，改造前既有行为）/ 关闭
     val todoDisplayPosition = settingsViewModel?.todoDisplayPosition?.collectAsStateWithLifecycle()?.value
@@ -600,17 +608,21 @@ fun AIChatPanel(
     val todoOverlayVisible = todoBelowTitleBar && currentTodoItems.isNotEmpty()
     val queuedRequests by viewModel.queuedRequests.collectAsStateWithLifecycle()
     val targetRewindMessageId by viewModel.targetRewindMessageId.collectAsStateWithLifecycle()
-    val providers = (settingsViewModel?.providers?.collectAsStateWithLifecycle()?.value ?: emptyList()).filter { it.isEnabled }
+    val rewindConfirmation by viewModel.rewindConfirmation.collectAsStateWithLifecycle()
+    val rewindNotice by viewModel.rewindNotice.collectAsStateWithLifecycle()
+    val providerSnapshot = settingsViewModel?.providers?.collectAsStateWithLifecycle()?.value ?: emptyList()
+    val providers = remember(providerSnapshot) { providerSnapshot.filter { it.isEnabled } }
     val modelMetadata = settingsViewModel?.modelMetadata?.collectAsStateWithLifecycle()?.value.orEmpty()
     val sessionProviderModel by viewModel.currentSessionProviderModel.collectAsStateWithLifecycle()
     val defaultProviderId = settingsViewModel?.defaultModelProviderId?.collectAsStateWithLifecycle()?.value ?: ""
     val defaultModelName = settingsViewModel?.defaultModel?.collectAsStateWithLifecycle()?.value ?: ""
     // 未绑定会话回退：新会话默认模型（主页空会话中选择后记忆），未设置则为 null（UI 显示默认图标/顶栏模型名留空）。
-    val defaultFallbackProvider = providers
-        .find { it.id == defaultProviderId }
-        ?.takeIf { it.hasUsableApiKey }
-        ?.let { if (defaultModelName.isNotBlank() && defaultModelName in it.models) it.copy(selectedModel = defaultModelName) else it }
-    val activeProvider = run {
+    val defaultFallbackProvider = remember(providers, defaultProviderId, defaultModelName) {
+        providers.find { it.id == defaultProviderId }
+            ?.takeIf { it.hasUsableApiKey }
+            ?.let { if (defaultModelName.isNotBlank() && defaultModelName in it.models) it.copy(selectedModel = defaultModelName) else it }
+    }
+    val activeProvider = remember(providers, sessionProviderModel, defaultFallbackProvider) {
         val (boundProviderId, boundModel) = sessionProviderModel
         if (!boundProviderId.isNullOrBlank()) {
             // 与 workflow.resolveProviderConfig 保持一致：绑定 provider 须启用且已填 apiKey，否则回退默认模型
@@ -630,10 +642,16 @@ fun AIChatPanel(
     val currentMode by viewModel.currentSessionMode.collectAsStateWithLifecycle()
     val slashCommands by viewModel.slashCommands.collectAsStateWithLifecycle()
 
-    var inputText by remember { mutableStateOf("") }
+    var inputText by remember(currentSessionId) { mutableStateOf("") }
     val inputDraft by viewModel.inputDraft.collectAsStateWithLifecycle()
-    LaunchedEffect(inputDraft) {
-        if (inputText != inputDraft) inputText = inputDraft
+    val latestInputText by rememberUpdatedState(inputText)
+    LaunchedEffect(currentSessionId, inputDraft) {
+        if (currentSessionId != null && inputText != inputDraft) inputText = inputDraft
+    }
+    DisposableEffect(currentSessionId) {
+        onDispose {
+            viewModel.updateInputDraft(currentSessionId, latestInputText)
+        }
     }
     // 输入 "/" 打开命令菜单时重扫技能，反映磁盘上技能的增删改。
     LaunchedEffect(inputText) {
@@ -1385,6 +1403,8 @@ fun AIChatPanel(
         Box(
             modifier = modifier
                 .fillMaxSize()
+                // 供 Macrobenchmark/UI Automator 用稳定资源 ID 定位 Compose 节点，不依赖界面语言或坐标。
+                .semantics { testTagsAsResourceId = true }
                 .padding(padding)
         ) {
         // 大屏正文列限宽居中：铺满整个平板宽度会让一行文字过长、气泡横跨全屏，读起来很累。
@@ -1424,6 +1444,7 @@ fun AIChatPanel(
                         state = listState,
                         modifier = Modifier
                             .fillMaxSize()
+                            .testTag("chat_benchmark_message_list")
                             .nestedScroll(userScrollConnection)
                             .pointerInput(listState) {
                                 awaitEachGesture {
@@ -1583,7 +1604,7 @@ fun AIChatPanel(
                                     }
                                     TailKind.KEY_SWITCHED -> {
                                         val ks = keySwitchState
-                                        if (ks != null) KeySwitchedBubble(ks.newIndex, ks.total) else Box(Modifier)
+                                        if (ks != null) KeySwitchedBubble(ks.newIndex, ks.total, ks.accountName) else Box(Modifier)
                                     }
                                     TailKind.NONE -> Box(Modifier)
                                 }
@@ -1605,7 +1626,7 @@ fun AIChatPanel(
                     // 绝不能把自身 todoExpanded 算进 forceCollapse——那会形成
                     // 「展开→上报→强制收起→复位→再展开」的死循环（症状：展不开、回页面时疯狂闪烁）。
                     forceCollapse = pendingPermission != null || pendingQuestion != null ||
-                        planApproval != null || imeVisible,
+                        imeVisible,
                     onExpandedChange = { todoExpanded = it },
                     glassBackdrop = glassLayer,
                     glassLuminance = { glassLuminance.luminance },
@@ -1623,6 +1644,11 @@ fun AIChatPanel(
             ChatHeader(
                 sessionTitle = sessionTitle,
                 modelName = activeProvider?.effectiveModel,
+                providerAccountName = activeProvider
+                    ?.takeIf(OpenAIAccountRepository::isAccountProvider)
+                    ?.name
+                    ?.substringAfter(" · ", missingDelimiterValue = "")
+                    ?.takeIf(String::isNotBlank),
                 inputTokens = sessionInputTokens,
                 outputTokens = sessionOutputTokens,
                 onOpenDrawer = {
@@ -1695,26 +1721,9 @@ fun AIChatPanel(
                 }
             }
 
-            val planForPanel = rememberLastNonNull(planApproval)
-            AnimatedVisibility(
-                visible = planApproval != null,
-                modifier = Modifier.graphicsLayer { alpha = floatingPanelAlpha },
-                enter = fadeIn() + expandVertically(),
-                exit = fadeOut() + shrinkVertically()
-            ) {
-                planForPanel?.let { state ->
-                    PlanApprovalPanel(
-                        state = state,
-                        onApprove = { viewModel.approvePlanAndBuild() },
-                        onRefine = { viewModel.refinePlan() },
-                        forceCollapse = dashboardCollapseActive
-                    )
-                }
-            }
-
             ChatInputBar(
                 value = inputText,
-                onValueChange = { inputText = it; viewModel.updateInputDraft(it) },
+                onValueChange = { inputText = it; viewModel.updateInputDraft(currentSessionId, it) },
                 onSend = sendMessage,
                 enterToSend = settingsViewModel?.enterToSend?.collectAsStateWithLifecycle()?.value ?: false,
                 onStop = { viewModel.stopAgent() },
@@ -1732,6 +1741,10 @@ fun AIChatPanel(
                 onToggleMode = { viewModel.setSessionMode(it) },
                 reasoningEffort = reasoningEffort,
                 onReasoningEffortChange = { viewModel.setSessionReasoningEffort(it) },
+                superAgentEnabled = currentSession?.superAgentEnabled == true,
+                canToggleSuperAgent = currentSession?.parentId == null,
+                onToggleSuperAgent = { viewModel.setSuperAgentEnabled(currentSession?.superAgentEnabled != true) },
+                onShowSuperAgentExplanation = viewModel::showSuperAgentExplanation,
                 pendingAttachments = pendingAttachments,
                 onRemoveAttachment = ::removePendingAttachment,
                 canUploadFiles = canUploadFiles,
@@ -1758,7 +1771,7 @@ fun AIChatPanel(
                 glassLuminance = { glassLuminance.luminance },
                 sessionId = currentSessionId.orEmpty(),
                 onTodoExpandedChange = { todoExpanded = it },
-                forceCollapseDashboard = pendingPermission != null || pendingQuestion != null || planApproval != null || imeVisible,
+                forceCollapseDashboard = pendingPermission != null || pendingQuestion != null || imeVisible,
                 onDashboardExpandedChange = { dashboardExpanded = it },
                 onRefreshDashboard = {
                     activeProvider?.let {
@@ -1849,12 +1862,103 @@ fun AIChatPanel(
                 RewindOptionsBottomSheet(
                     promptSnippet = targetMsg?.content ?: "",
                     onOptionSelected = { option ->
-                        viewModel.executeRewindOption(targetId, option) { text, attachments ->
-                            inputText = text
-                            pendingAttachments = attachments.map { it.toPendingAttachment() }
-                        }
+                        viewModel.dismissRewindMenu()
+                        viewModel.requestRewindConfirmation(targetId, option)
                     },
                     onDismissRequest = { viewModel.dismissRewindMenu() }
+                )
+            }
+
+            rewindConfirmation?.let { confirmation ->
+                androidx.compose.material3.AlertDialog(
+                    onDismissRequest = { viewModel.dismissRewindConfirmation() },
+                    title = { androidx.compose.material3.Text(stringResource(R.string.checkpoint_rewind_confirm_title)) },
+                    text = {
+                        Column {
+                            if (confirmation.option != RewindOption.RESTORE_CODE && confirmation.removedMessageCount > 0) {
+                                androidx.compose.material3.Text(
+                                    stringResource(R.string.checkpoint_rewind_messages_impact, confirmation.removedMessageCount)
+                                )
+                            }
+                            if (confirmation.removedSubagentCount > 0) {
+                                androidx.compose.material3.Text(
+                                    stringResource(R.string.checkpoint_rewind_subagents_deleted, confirmation.removedSubagentCount),
+                                    modifier = Modifier.padding(top = Spacing.xs)
+                                )
+                            }
+                            if (confirmation.stoppedSubagentCount > 0) {
+                                androidx.compose.material3.Text(
+                                    stringResource(R.string.checkpoint_rewind_subagents_stopped, confirmation.stoppedSubagentCount),
+                                    modifier = Modifier.padding(top = Spacing.xs)
+                                )
+                            }
+                            if (confirmation.option == RewindOption.RESTORE_CODE_AND_CONVERSATION ||
+                                confirmation.option == RewindOption.RESTORE_CODE
+                            ) {
+                                if (confirmation.fileSnapshotCount > 0) {
+                                    androidx.compose.material3.Text(
+                                        stringResource(R.string.checkpoint_rewind_workspace_snapshots, confirmation.fileSnapshotCount),
+                                        modifier = Modifier.padding(top = Spacing.xs)
+                                    )
+                                }
+                                if (confirmation.unverifiableFileSnapshotCount > 0) {
+                                    androidx.compose.material3.Text(
+                                        stringResource(
+                                            R.string.checkpoint_rewind_workspace_unverifiable,
+                                            confirmation.unverifiableFileSnapshotCount
+                                        ),
+                                        modifier = Modifier.padding(top = Spacing.xs)
+                                    )
+                                }
+                                if (confirmation.hasGitSnapshot) {
+                                    androidx.compose.material3.Text(
+                                        stringResource(R.string.checkpoint_rewind_git_snapshot_available),
+                                        modifier = Modifier.padding(top = Spacing.xs)
+                                    )
+                                }
+                            }
+                            if (confirmation.option == RewindOption.RESTORE_CONVERSATION) {
+                                androidx.compose.material3.Text(
+                                    stringResource(R.string.checkpoint_rewind_conversation_only_warning),
+                                    modifier = Modifier.padding(top = Spacing.xs)
+                                )
+                            }
+                        }
+                    },
+                    dismissButton = {
+                        androidx.compose.material3.TextButton(onClick = { viewModel.dismissRewindConfirmation() }) {
+                            androidx.compose.material3.Text(stringResource(R.string.checkpoint_rewind_cancel))
+                        }
+                    },
+                    confirmButton = {
+                        androidx.compose.material3.TextButton(onClick = {
+                            viewModel.dismissRewindConfirmation()
+                            viewModel.executeRewindOption(confirmation.messageId, confirmation.option) { text, attachments ->
+                                inputText = text
+                                pendingAttachments = attachments.map { it.toPendingAttachment() }
+                            }
+                        }) {
+                            androidx.compose.material3.Text(stringResource(R.string.checkpoint_rewind_confirm))
+                        }
+                    }
+                )
+            }
+
+            rewindNotice?.let { notice ->
+                androidx.compose.material3.AlertDialog(
+                    onDismissRequest = { viewModel.dismissRewindNotice() },
+                    title = { androidx.compose.material3.Text(stringResource(R.string.checkpoint_rewind_notice_title)) },
+                    text = {
+                        androidx.compose.material3.Text(
+                            notice,
+                            modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())
+                        )
+                    },
+                    confirmButton = {
+                        androidx.compose.material3.TextButton(onClick = { viewModel.dismissRewindNotice() }) {
+                            androidx.compose.material3.Text(stringResource(android.R.string.ok))
+                        }
+                    }
                 )
             }
 
@@ -1865,6 +1969,7 @@ fun AIChatPanel(
                     message = message,
                     onDismiss = { messageForMenu = null },
                     onEditClick = { editingMessage = message },
+                    onRegenerateClick = { viewModel.regenerateAssistantMessage(message.id) },
                     onCopyClick = {
                         copyScope.launch {
                             clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("message", message.content)))
@@ -1879,7 +1984,14 @@ fun AIChatPanel(
                     initialText = message.content,
                     onDismiss = { editingMessage = null },
                     onConfirm = { newContent ->
-                        viewModel.updateMessageContent(message.id, newContent)
+                        if (message.role == MessageRole.USER) {
+                            viewModel.editUserMessageAndResend(message.id, newContent) { text, attachments ->
+                                inputText = text
+                                pendingAttachments = attachments.map { it.toPendingAttachment() }
+                            }
+                        } else {
+                            viewModel.updateMessageContent(message.id, newContent)
+                        }
                         editingMessage = null
                     }
                 )

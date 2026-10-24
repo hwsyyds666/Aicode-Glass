@@ -7,6 +7,7 @@ import android.app.NotificationManager
 import android.content.Intent
 import android.os.Build
 import android.os.Process
+import android.os.StrictMode
 import androidx.work.Configuration
 import androidx.hilt.work.HiltWorkerFactory
 import com.aicode.core.net.AppProxy
@@ -212,6 +213,15 @@ class AIEditorApp : Application(), Configuration.Provider {
             return
         }
         super.onCreate()
+        if (BuildConfig.DEBUG) {
+            StrictMode.setThreadPolicy(
+                StrictMode.ThreadPolicy.Builder()
+                    .detectDiskReads()
+                    .detectDiskWrites()
+                    .penaltyLog()
+                    .build()
+            )
+        }
         logDeviceInfo()
         // 把提供商级代理注册表挂到 AppProxy（applyGlobal 已在 attachBaseContext 完成），
         // 此后按目标 host 分派 provider 专属代理；无 provider 配置时回退全局代理。
@@ -239,10 +249,6 @@ class AIEditorApp : Application(), Configuration.Provider {
         appScope.launch {
             kotlinx.coroutines.delay(500)
             ContainerInstaller.extractScripts(this@AIEditorApp)
-        }
-        appScope.launch {
-            kotlinx.coroutines.delay(500)
-            ContainerInstaller.extractAgents(this@AIEditorApp)
         }
         appScope.launch {
             kotlinx.coroutines.delay(500)
@@ -283,7 +289,7 @@ class AIEditorApp : Application(), Configuration.Provider {
                 runCatching { workspaceRepository.initialize() }
                     .onFailure { FileLogger.w(TAG, "SSH 重连后重新加载工作区失败", it) }
                 syncDocsToRemote()
-                releaseBuiltinAssetsToRemote()
+                releaseBuiltinScriptsToRemote()
             }
         }
         // 当前激活 profile 的连接配置变化（编辑连接/编辑 profile/切 profile/切模式）即重连，改连接即时生效。
@@ -298,7 +304,7 @@ class AIEditorApp : Application(), Configuration.Provider {
                     remoteSshConnection.connect(config)
                     // 连接成功后同步内置文档到远程 ~/.aicode/docs/，供 AI 查阅。
                     syncDocsToRemote()
-                    releaseBuiltinAssetsToRemote()
+                    releaseBuiltinScriptsToRemote()
                 }.onFailure { FileLogger.e(TAG, "SSH 连接失败，将在首次命令时重试", it) }
             }
         }
@@ -376,12 +382,8 @@ class AIEditorApp : Application(), Configuration.Provider {
         }.onFailure { FileLogger.w(TAG, "同步内置文档到远程失败", it) }
     }
 
-    /**
-     * 释放内置子代理定义（Explore）与面板示例脚本到远程 `~/.aicode/agents`、`~/.aicode/scripts`。
-     * 远程模式下全局 agents/scripts 以远端为准，内置默认需在远端存在才能开箱即用；仅补齐缺失、不覆盖用户修改。
-     */
-    private suspend fun releaseBuiltinAssetsToRemote() {
-        remoteSshConnection.uploadBuiltinFiles("agents", collectAssetBytes("agents"))
+    /** 仅同步面板示例脚本；内置子代理类型由应用提供，不再向磁盘释放定义文件。 */
+    private suspend fun releaseBuiltinScriptsToRemote() {
         remoteSshConnection.uploadBuiltinFiles("scripts", collectAssetBytes("aicode/scripts"), executable = true)
     }
 

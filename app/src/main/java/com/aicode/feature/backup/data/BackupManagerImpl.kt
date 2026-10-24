@@ -1,9 +1,11 @@
 package com.aicode.feature.backup.data
 
 import android.content.Context
+import androidx.room.withTransaction
 import com.aicode.core.security.KeystoreCipher
 import com.aicode.core.util.FileLogger
 import com.aicode.core.util.GitIgnoreMatcher
+import com.aicode.R
 import com.aicode.feature.agent.data.local.dao.AgentMessageDao
 import com.aicode.feature.agent.data.local.dao.ChatSessionDao
 import com.aicode.feature.agent.data.local.dao.TodoItemDao
@@ -23,6 +25,7 @@ import com.aicode.feature.backup.domain.BackupOptions
 import com.aicode.feature.backup.domain.BackupSnapshot
 import com.aicode.feature.backup.domain.ChatSessionDto
 import com.aicode.feature.backup.domain.ImportPreview
+import com.aicode.feature.backup.domain.OpenAIAccountBackupDto
 import com.aicode.feature.backup.domain.ProviderDto
 import com.aicode.feature.backup.domain.RemoteConnectionDto
 import com.aicode.feature.backup.domain.RemoteMountDto
@@ -31,8 +34,11 @@ import com.aicode.feature.backup.domain.TodoItemDto
 import com.aicode.feature.backup.domain.WorkspaceBackupMeta
 import com.aicode.feature.backup.domain.toMetadata
 import com.aicode.feature.settings.data.local.dao.AIProviderDao
+import com.aicode.feature.settings.data.local.dao.OpenAIAccountDao
 import com.aicode.feature.settings.data.local.entity.AIProviderEntity
+import com.aicode.feature.settings.data.local.entity.OpenAIAccountEntity
 import com.aicode.feature.settings.data.repository.CompactionModelSettingsRepository
+import com.aicode.feature.settings.data.repository.OpenAIAccountRepository
 import com.aicode.feature.settings.data.repository.AgentSoundSettingsRepository
 import com.aicode.feature.settings.data.repository.GeneralSettingsRepository
 import com.aicode.feature.settings.data.repository.KeepaliveSettingsRepository
@@ -48,6 +54,8 @@ import com.aicode.feature.workspace.data.repository.WorkspaceRepository
 import com.aicode.feature.workspace.domain.model.RemoteProtocol
 import com.aicode.feature.workspace.domain.model.Workspace
 import com.aicode.feature.workspace.domain.model.WorkspaceType
+import org.json.JSONArray
+import org.json.JSONObject
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -72,7 +80,9 @@ import javax.inject.Singleton
 @Singleton
 class BackupManagerImpl @Inject constructor(
     @param:ApplicationContext private val context: Context,
+    private val database: AgentDatabase,
     private val aiProviderDao: AIProviderDao,
+    private val openAIAccountDao: OpenAIAccountDao,
     private val remoteConnectionDao: RemoteConnectionDao,
     private val chatSessionDao: ChatSessionDao,
     private val agentMessageDao: AgentMessageDao,
@@ -202,7 +212,7 @@ class BackupManagerImpl @Inject constructor(
                     var entry = tar.nextEntry
                     while (entry != null) {
                         if (entry.name == FILE_METADATA) {
-                            val plain = tar.readBytes()
+                            val plain = readTarEntryBounded(tar, entry.name, entry.size, MAX_METADATA_BYTES)
                             val metadata = json.decodeFromString(BackupMetadata.serializer(), String(plain, Charsets.UTF_8))
                             checkVersion(metadata.schemaVersion)
                             workspaces = metadata.workspaces
@@ -310,39 +320,66 @@ class BackupManagerImpl @Inject constructor(
         }
     }
 
-    private suspend fun buildMetadata(options: BackupOptions): BackupMetadata = BackupMetadata(
-        schemaVersion = currentSchemaVersion(),
-        appVersion = appVersionName(),
-        createdAt = System.currentTimeMillis(),
-        providers = if (options.providers) aiProviderDao.getAllProvidersOnce().map { it.toDto() } else emptyList(),
-        remoteConnections = if (options.remoteConnections) remoteConnectionDao.getAllConnectionsOnce().map { it.toDto() } else emptyList(),
-        remoteMounts = if (options.remoteConnections) remoteConnectionDao.getAllMountsOnce().map { it.toDto() } else emptyList(),
-        mcpServers = if (options.mcpServers) mcpConfigRepository.getGlobalServers() else emptyList(),
-        globalPermissionRules = if (options.permissionRules) permissionRulesRepository.getGlobalRulesOnce() else emptyList(),
-        themeMode = if (options.appSettings) themeSettingsRepository.snapshot() else null,
-        themePresetId = if (options.appSettings) themeSettingsRepository.presetSnapshot() else null,
-        dynamicColorEnabled = if (options.appSettings) themeSettingsRepository.dynamicColorSnapshot() else false,
-        keepaliveEnabled = if (options.appSettings) keepaliveSettingsRepository.snapshot() else false,
-        screenOnEnabled = if (options.appSettings) screenOnSettingsRepository.snapshot() else false,
-        agentSoundEnabled = if (options.appSettings) agentSoundSettingsRepository.snapshot() else false,
-        autoRemoveStaleModels = if (options.appSettings) generalSettingsRepository.autoRemoveStaleModelsSnapshot() else true,
-        startupSessionMode = if (options.appSettings) generalSettingsRepository.startupSessionModeSnapshot() else null,
-        firstByteTimeoutSec = if (options.appSettings) generalSettingsRepository.firstByteTimeoutSecSnapshot() else 300,
-        streamIdleTimeoutSec = if (options.appSettings) generalSettingsRepository.streamIdleTimeoutSecSnapshot() else 0,
-        maxNetworkRetries = if (options.appSettings) generalSettingsRepository.maxNetworkRetriesSnapshot() else 6,
-        enterToSend = if (options.appSettings) generalSettingsRepository.enterToSendSnapshot() else false,
-        compactionThresholdPercent = if (options.appSettings) generalSettingsRepository.compactionThresholdPercentSnapshot() else 90,
-        sendFileMaxSizeMb = if (options.appSettings) generalSettingsRepository.sendFileMaxSizeMbSnapshot() else 100,
-        deleteExternalWorkspaceSessions = if (options.appSettings) generalSettingsRepository.deleteExternalWorkspaceSessionsSnapshot() else false,
-        todoDisplayPosition = if (options.appSettings) generalSettingsRepository.todoDisplayPositionSnapshot() else null,
-        logLevel = if (options.appSettings) logSettingsRepository.snapshot() else null,
-        visionProviderId = if (options.appSettings) visionModelSettingsRepository.getVisionProviderId() else "",
-        visionModel = if (options.appSettings) visionModelSettingsRepository.getVisionModel() else "",
-        compactionProviderId = if (options.appSettings) compactionModelSettingsRepository.getCompactionProviderId() else "",
-        compactionModel = if (options.appSettings) compactionModelSettingsRepository.getCompactionModel() else "",
-        syncSettings = if (options.appSettings) syncSettingsRepository.snapshot() else null,
-        workspaces = if (options.workspaceFiles) collectWorkspaceMetas() else emptyList()
-    )
+    private suspend fun buildMetadata(options: BackupOptions): BackupMetadata {
+        val allProviders = if (options.providers) aiProviderDao.getAllProvidersOnce() else emptyList()
+        val providersById = allProviders.associateBy(AIProviderEntity::id)
+        val openAIAccounts = if (options.providers) openAIAccountDao.getAllOnce() else emptyList()
+        return BackupMetadata(
+            schemaVersion = currentSchemaVersion(),
+            appVersion = appVersionName(),
+            createdAt = System.currentTimeMillis(),
+            // OAuth profile credentials remain device-bound. Export only enough non-secret metadata
+            // to recreate disabled, reauthentication-required cards on another device.
+            providers = allProviders
+                .filterNot { KeystoreCipher.decryptString(it.apiKey).startsWith(OpenAIAccountRepository.PROVIDER_MARKER_PREFIX) }
+                .map { it.toDto() },
+            openAIAccounts = openAIAccounts.map { account ->
+                val provider = providersById[account.providerId]
+                OpenAIAccountBackupDto(
+                    id = account.id,
+                    providerId = account.providerId,
+                    clientId = account.clientId,
+                    email = account.email,
+                    displayName = account.displayName,
+                    hostId = account.hostId,
+                    modelCatalogJson = account.modelCatalogJson,
+                    providerName = provider?.name ?: "OpenAI",
+                    models = provider?.models.orEmpty(),
+                    selectedModel = provider?.let { it.selectedModel.ifBlank { it.defaultModel } }.orEmpty(),
+                    providerEnabled = provider?.isEnabled ?: true,
+                    sortOrder = provider?.sortOrder ?: -1,
+                    createdAt = account.createdAt
+                )
+            },
+            remoteConnections = if (options.remoteConnections) remoteConnectionDao.getAllConnectionsOnce().map { it.toDto() } else emptyList(),
+            remoteMounts = if (options.remoteConnections) remoteConnectionDao.getAllMountsOnce().map { it.toDto() } else emptyList(),
+            mcpServers = if (options.mcpServers) mcpConfigRepository.getGlobalServers() else emptyList(),
+            globalPermissionRules = if (options.permissionRules) permissionRulesRepository.getGlobalRulesOnce() else emptyList(),
+            themeMode = if (options.appSettings) themeSettingsRepository.snapshot() else null,
+            themePresetId = if (options.appSettings) themeSettingsRepository.presetSnapshot() else null,
+            dynamicColorEnabled = if (options.appSettings) themeSettingsRepository.dynamicColorSnapshot() else false,
+            keepaliveEnabled = if (options.appSettings) keepaliveSettingsRepository.snapshot() else false,
+            screenOnEnabled = if (options.appSettings) screenOnSettingsRepository.snapshot() else false,
+            agentSoundEnabled = if (options.appSettings) agentSoundSettingsRepository.snapshot() else false,
+            autoRemoveStaleModels = if (options.appSettings) generalSettingsRepository.autoRemoveStaleModelsSnapshot() else true,
+            startupSessionMode = if (options.appSettings) generalSettingsRepository.startupSessionModeSnapshot() else null,
+            firstByteTimeoutSec = if (options.appSettings) generalSettingsRepository.firstByteTimeoutSecSnapshot() else 300,
+            streamIdleTimeoutSec = if (options.appSettings) generalSettingsRepository.streamIdleTimeoutSecSnapshot() else 0,
+            maxNetworkRetries = if (options.appSettings) generalSettingsRepository.maxNetworkRetriesSnapshot() else 6,
+            enterToSend = if (options.appSettings) generalSettingsRepository.enterToSendSnapshot() else false,
+            compactionThresholdPercent = if (options.appSettings) generalSettingsRepository.compactionThresholdPercentSnapshot() else 90,
+            sendFileMaxSizeMb = if (options.appSettings) generalSettingsRepository.sendFileMaxSizeMbSnapshot() else 100,
+            deleteExternalWorkspaceSessions = if (options.appSettings) generalSettingsRepository.deleteExternalWorkspaceSessionsSnapshot() else false,
+            todoDisplayPosition = if (options.appSettings) generalSettingsRepository.todoDisplayPositionSnapshot() else null,
+            logLevel = if (options.appSettings) logSettingsRepository.snapshot() else null,
+            visionProviderId = if (options.appSettings) visionModelSettingsRepository.getVisionProviderId() else "",
+            visionModel = if (options.appSettings) visionModelSettingsRepository.getVisionModel() else "",
+            compactionProviderId = if (options.appSettings) compactionModelSettingsRepository.getCompactionProviderId() else "",
+            compactionModel = if (options.appSettings) compactionModelSettingsRepository.getCompactionModel() else "",
+            syncSettings = if (options.appSettings) syncSettingsRepository.snapshot() else null,
+            workspaces = if (options.workspaceFiles) collectWorkspaceMetas() else emptyList()
+        )
+    }
 
     private fun writeMetadataEntry(tar: TarArchiveOutputStream, metadata: BackupMetadata) {
         val content = json.encodeToString(BackupMetadata.serializer(), metadata).toByteArray(Charsets.UTF_8)
@@ -458,13 +495,13 @@ class BackupManagerImpl @Inject constructor(
         while (entry != null) {
             when (entry.name) {
                 FILE_LEGACY_SNAPSHOT -> {
-                    val plain = tar.readBytes()
+                    val plain = readTarEntryBounded(tar, entry.name, entry.size, MAX_LEGACY_SNAPSHOT_BYTES)
                     val snapshot = json.decodeFromString(BackupSnapshot.serializer(), String(plain, Charsets.UTF_8))
                     checkVersion(snapshot.schemaVersion)
                     return restoreLegacy(snapshot)
                 }
                 FILE_METADATA -> {
-                    val plain = tar.readBytes()
+                    val plain = readTarEntryBounded(tar, entry.name, entry.size, MAX_METADATA_BYTES)
                     metadata = json.decodeFromString(BackupMetadata.serializer(), String(plain, Charsets.UTF_8))
                     checkVersion(metadata.schemaVersion)
                 }
@@ -512,6 +549,14 @@ class BackupManagerImpl @Inject constructor(
     }
 
     /** 逐行解析 jsonl 条目，每 [PAGE_SIZE] 条回调一次批量插入；返回该文件的总条数。 */
+    /** Metadata is small by format. Reject oversized tar headers and stream with a hard cap. */
+    private fun readTarEntryBounded(
+        tar: TarArchiveInputStream,
+        entryName: String,
+        declaredSize: Long,
+        maxBytes: Int
+    ): ByteArray = BoundedBackupEntryReader.read(tar, entryName, declaredSize, maxBytes)
+
     private suspend fun <T> restoreJsonl(tar: TarArchiveInputStream, serializer: KSerializer<T>, insert: suspend (List<T>) -> Unit): Int {
         val buffer = ByteArray(64 * 1024)
         val line = ByteArrayOutputStream(16 * 1024)
@@ -585,12 +630,17 @@ class BackupManagerImpl @Inject constructor(
     private suspend fun restoreMeta(meta: BackupMetadata): RestoreStats {
         FileLogger.i(
             TAG,
-            "还原元数据：providers=${meta.providers.size} remoteConnections=${meta.remoteConnections.size} remoteMounts=${meta.remoteMounts.size} " +
+            "还原元数据：providers=${meta.providers.size} openAIAccounts=${meta.openAIAccounts.size} remoteConnections=${meta.remoteConnections.size} remoteMounts=${meta.remoteMounts.size} " +
                 "mcpServers=${meta.mcpServers.size} permissionRules=${meta.globalPermissionRules.size} syncSettings=${meta.syncSettings != null}"
         )
         if (meta.providers.isNotEmpty()) {
-            aiProviderDao.insertAllProviders(meta.providers.map { it.toEntity() })
+            aiProviderDao.insertAllProviders(
+                meta.providers
+                    .filterNot { it.apiKey.startsWith(OpenAIAccountRepository.PROVIDER_MARKER_PREFIX) }
+                    .map { it.toEntity() }
+            )
         }
+        val restoredOpenAIAccounts = restoreOpenAIAccountMetadata(meta.openAIAccounts)
         if (meta.remoteConnections.isNotEmpty()) {
             remoteConnectionDao.insertAllConnections(meta.remoteConnections.mapNotNull { it.toEntity() })
         }
@@ -634,12 +684,110 @@ class BackupManagerImpl @Inject constructor(
 
         return RestoreStats(
             providers = meta.providers.size,
+            openAIAccounts = restoredOpenAIAccounts,
             remoteConnections = meta.remoteConnections.size,
             remoteMounts = meta.remoteMounts.size,
             mcpServers = meta.mcpServers.size,
             globalPermissionRules = meta.globalPermissionRules.size
         )
     }
+
+    /** Restore account cards without credentials; users must explicitly sign in again on this device. */
+    private suspend fun restoreOpenAIAccountMetadata(items: List<OpenAIAccountBackupDto>): Int {
+        var restored = 0
+        val now = System.currentTimeMillis()
+        for (raw in items) {
+            val id = raw.id.trim().takeIf { it.matches(OPENAI_ACCOUNT_ID) } ?: continue
+            val expectedProviderId = OpenAIAccountRepository.PROVIDER_ID_PREFIX + id
+            if (raw.providerId != expectedProviderId) continue
+            val clientId = raw.clientId.trim().takeIf { it.length in 1..MAX_BACKUP_CLIENT_ID && it.none(::isLineBreak) } ?: continue
+            val email = raw.email.trim().take(MAX_BACKUP_ACCOUNT_TEXT).takeUnless { it.any(::isLineBreak) }.orEmpty()
+            val displayName = raw.displayName.trim().take(MAX_BACKUP_ACCOUNT_TEXT).takeUnless { it.any(::isLineBreak) }
+                .orEmpty().ifBlank { email.ifBlank { context.getString(R.string.openai_account_default_name) } }
+            val modelCatalog = sanitizeOpenAIModelCatalog(raw.modelCatalogJson)
+            val modelSlugsFromCatalog = JSONArray(modelCatalog).let { catalog ->
+                buildList {
+                    for (index in 0 until catalog.length()) {
+                        catalog.optJSONObject(index)?.optString("slug")?.takeIf(::isSafeModelSlug)?.let(::add)
+                    }
+                }
+            }
+            val modelSlugs = raw.models.split('\n')
+                .map(String::trim)
+                .filter(::isSafeModelSlug)
+                .distinct()
+                .ifEmpty { modelSlugsFromCatalog }
+            val selectedModel = raw.selectedModel.takeIf { it in modelSlugs }.orEmpty().ifBlank { modelSlugs.firstOrNull().orEmpty() }
+            val providerName = raw.providerName.trim().take(MAX_BACKUP_ACCOUNT_TEXT).takeUnless { it.any(::isLineBreak) }
+                .orEmpty().ifBlank { "OpenAI" }
+            val hostId = raw.hostId.takeIf(com.aicode.feature.settings.data.repository.OpenAIOAuthProtocol::isSupportedHostId).orEmpty()
+            val createdAt = raw.createdAt.takeIf { it > 0L } ?: now
+            val account = OpenAIAccountEntity(
+                id = id,
+                providerId = expectedProviderId,
+                subject = "backup-import:$id",
+                email = email,
+                displayName = displayName,
+                clientId = clientId,
+                encryptedAccessToken = "",
+                encryptedRefreshToken = "",
+                encryptedIdToken = "",
+                scopes = "",
+                accessTokenExpiresAt = 0L,
+                hostId = hostId,
+                modelCatalogJson = modelCatalog,
+                status = OpenAIAccountEntity.STATUS_NEEDS_LOGIN,
+                lastError = context.getString(R.string.openai_error_reauthorize),
+                restoreProviderEnabled = raw.providerEnabled,
+                createdAt = createdAt,
+                updatedAt = now
+            )
+            val provider = AIProviderEntity(
+                id = expectedProviderId,
+                name = providerName,
+                type = "OPENAI",
+                apiKey = KeystoreCipher.encryptString(OpenAIAccountRepository.PROVIDER_MARKER_PREFIX + id),
+                baseUrl = OPENAI_ACCOUNT_BASE_URL,
+                defaultModel = selectedModel,
+                models = modelSlugs.joinToString("\n"),
+                selectedModel = selectedModel,
+                // A restored account has no local credentials; keep it out of routing until login.
+                // OpenAIAccountEntity.restoreProviderEnabled remembers the user's intended setting.
+                isEnabled = false,
+                useResponseApi = true,
+                sortOrder = raw.sortOrder.coerceAtLeast(-1)
+            )
+            val inserted = database.withTransaction {
+                // Never replace a real local account or a provider row that already owns this ID.
+                if (openAIAccountDao.getById(id) != null || aiProviderDao.getProviderById(expectedProviderId) != null) {
+                    false
+                } else {
+                    openAIAccountDao.upsert(account)
+                    aiProviderDao.insertProvider(provider)
+                    true
+                }
+            }
+            if (inserted) restored++
+        }
+        return restored
+    }
+
+    private fun sanitizeOpenAIModelCatalog(value: String): String {
+        if (value.length > MAX_MODEL_CATALOG_BACKUP_CHARS) return "[]"
+        val source = runCatching { JSONArray(value) }.getOrNull() ?: return "[]"
+        return JSONArray().apply {
+            for (index in 0 until source.length()) {
+                val model = source.optJSONObject(index) ?: continue
+                val slug = model.optString("slug").trim().takeIf(::isSafeModelSlug) ?: continue
+                val displayName = model.optString("display_name").trim().take(MAX_BACKUP_ACCOUNT_TEXT).ifBlank { slug }
+                put(JSONObject().put("slug", slug).put("display_name", displayName))
+            }
+        }.toString()
+    }
+
+    private fun isSafeModelSlug(value: String): Boolean = value.length in 1..128 && value.matches(SAFE_MODEL_SLUG)
+
+    private fun isLineBreak(value: Char): Boolean = value == '\n' || value == '\r' || value == '\u0000'
 
     /**
      * 还原单个工作区文件条目：`workspaces/<name>/<相对路径>`。
@@ -849,7 +997,15 @@ class BackupManagerImpl @Inject constructor(
     private companion object {
         const val TAG = "BackupManager"
         const val PAGE_SIZE = 500
+        const val MAX_BACKUP_CLIENT_ID = 512
+        const val MAX_BACKUP_ACCOUNT_TEXT = 256
+        const val MAX_MODEL_CATALOG_BACKUP_CHARS = 64 * 1024
+        const val OPENAI_ACCOUNT_BASE_URL = "https://api.openai.com/"
+        val OPENAI_ACCOUNT_ID = Regex("[A-Za-z0-9._-]{1,128}")
+        val SAFE_MODEL_SLUG = Regex("[A-Za-z0-9._:-]{1,128}")
         const val FILE_METADATA = "metadata.json"
+        const val MAX_METADATA_BYTES = 1024 * 1024
+        const val MAX_LEGACY_SNAPSHOT_BYTES = 64 * 1024 * 1024
         const val FILE_SESSIONS = "chatSessions.jsonl"
         const val FILE_MESSAGES = "messages.jsonl"
         const val FILE_TODOS = "todoItems.jsonl"

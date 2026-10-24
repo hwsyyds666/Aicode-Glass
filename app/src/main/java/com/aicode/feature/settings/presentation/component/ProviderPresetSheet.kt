@@ -178,11 +178,15 @@ internal fun ProviderPresetSheet(
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
                                     ) {
-                                        McpPill(
-                                            text = preset.type.lowercase(),
-                                            textColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
-                                        )
+                                        // The AiCode preset's internal supplier/protocol tag is implementation detail;
+                                        // keep its user-facing name and benefits, but don't expose the code badge.
+                                        if (shouldShowProviderProtocolCode(preset.id)) {
+                                            McpPill(
+                                                text = preset.type.lowercase(),
+                                                textColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                backgroundColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                                            )
+                                        }
                                         preset.tags.forEach { tag ->
                                             Box(
                                                 modifier = Modifier
@@ -240,3 +244,6 @@ internal fun ProviderPresetSheet(
         }
     }
 }
+
+internal fun shouldShowProviderProtocolCode(presetId: String): Boolean =
+    !presetId.equals("aicode", ignoreCase = true)

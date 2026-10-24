@@ -20,6 +20,14 @@ AiCode 自身不提供模型，需先接入一个模型服务。入口在「设�
 
 配好后切到「模型」标签拉取模型，即可回主页开始对话。
 
+## OpenAI 官方 ChatGPT 账号
+
+供应商页顶部的「ChatGPT 账号」入口使用 [OpenAI 官方 Sign in with ChatGPT 流程](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)。授权令牌只加密保存在本机 Android Keystore 保护的数据库中，请求直接发往 `api.openai.com`；模型列表按当前账号从官方 `/v1/models` 刷新。聊天顶栏会显示当前会话的模型和 OpenAI 账号身份。
+
+本机只允许保存一个 ChatGPT 计划用量账号档案；已有档案时需先移除，才能连接替代档案。OpenAI [SIWC 条款](https://openai.com/policies/sign-in-with-chatgpt-terms/)禁止通过创建多个账号、拆分用量或轮换账号规避限额，因此不应把替换账号作为绕过额度限制的手段。账号卡片支持启用/停用、刷新模型、刷新额度、重新授权和二次确认删除；本机请求数及 token 统计不代表 ChatGPT 套餐剩余额度。额度快照来自未公开的 OpenAI 用量接口，可能随时变化；以 OpenAI 官方用量页为准。
+
+会话始终绑定用户选中的同一个账号，不按账号间额度排名，也不会在额度触顶时自动切换或重试其他账号。若 OpenAI 返回 `subscription_sharing_usage_limit_exceeded`，应用会原样报告限额并保留请求 ID（若有）；请等待额度恢复或查看 OpenAI 用量页。额度接口不可用时不会伪造额度。
+
 ## 管理供应商列表
 
 列表每行显示名称、上游格式、模型数量和启用状态。

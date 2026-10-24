@@ -54,6 +54,12 @@ class ShizukuTool @Inject constructor(
             description = "要通过 adb shell 执行的 Shell 命令",
             required = true
         ),
+        "intent" to ToolParameter(
+            name = "intent",
+            type = ParameterType.STRING,
+            description = "必填：说明该宿主系统命令如何服务于用户当前任务；授权弹窗会显示此原因。",
+            required = true
+        ),
         "timeout" to ToolParameter(
             name = "timeout",
             type = ParameterType.INTEGER,

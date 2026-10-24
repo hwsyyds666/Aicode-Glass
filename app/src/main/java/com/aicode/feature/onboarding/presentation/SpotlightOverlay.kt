@@ -3,11 +3,7 @@ package com.aicode.feature.onboarding.presentation
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -64,6 +60,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import com.aicode.core.ui.rememberLifecyclePulseAlpha
 import androidx.compose.ui.unit.sp
 import com.aicode.R
 import com.aicode.core.theme.Radius
@@ -97,15 +94,12 @@ fun SpotlightOverlay(
     val cardGapPx = with(density) { 12.dp.toPx() }
 
     // 呼吸灯动画：在高亮描边周围产生柔和微光脉冲
-    val infiniteTransition = rememberInfiniteTransition(label = "SpotlightPulse")
-    val pulseAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.50f,
-        targetValue = 0.90f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1200, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "PulseAlpha"
+    val pulseAlpha by rememberLifecyclePulseAlpha(
+        label = "SpotlightPulse",
+        halfCycleMillis = 1200,
+        minAlpha = 0.50f,
+        maxAlpha = 0.90f,
+        easing = FastOutSlowInEasing
     )
 
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {

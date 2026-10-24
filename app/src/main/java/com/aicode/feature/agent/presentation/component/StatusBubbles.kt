@@ -1,5 +1,6 @@
 package com.aicode.feature.agent.presentation.component
 
+import android.os.SystemClock
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.expandVertically
@@ -8,6 +9,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.StartOffset
+import androidx.compose.animation.core.StartOffsetType
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.keyframes
@@ -36,6 +38,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -65,6 +68,8 @@ import androidx.compose.ui.unit.dp
 import com.aicode.R
 import com.aicode.core.theme.Brand
 import com.aicode.core.theme.Spacing
+import com.aicode.core.ui.animationStartOffsetMillis
+import com.aicode.core.ui.rememberLifecycleStarted
 import com.aicode.feature.agent.domain.provider.RetryErrorInfo
 import com.aicode.feature.agent.domain.provider.RetryErrorKind
 import compose.icons.FeatherIcons
@@ -106,13 +111,20 @@ internal fun Modifier.rippleHighlight(
     bandRatio: Float = RIPPLE_BAND_RATIO,
     periodMs: Int = RIPPLE_PERIOD_MS
 ): Modifier {
+    val lifecycleStarted = rememberLifecycleStarted()
+    if (!lifecycleStarted) return drawWithContent { drawContent() }
+    val animationOrigin = remember { SystemClock.uptimeMillis() }
+    val startOffsetMillis = remember(lifecycleStarted) {
+        animationStartOffsetMillis(animationOrigin, SystemClock.uptimeMillis(), periodMs)
+    }
     val transition = rememberInfiniteTransition(label = "ripple-highlight")
     val progress by transition.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
             animation = tween(durationMillis = periodMs, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
+            repeatMode = RepeatMode.Restart,
+            initialStartOffset = StartOffset(startOffsetMillis, StartOffsetType.FastForward)
         ),
         label = "ripple-progress"
     )
@@ -272,7 +284,7 @@ internal fun RetryingBubble(attempt: Int, maxRetries: Int, error: RetryErrorInfo
  * 不套描边卡片，只有图标 + 文案 + 三点跳动。
  */
 @Composable
-internal fun KeySwitchedBubble(newIndex: Int, total: Int) {
+internal fun KeySwitchedBubble(newIndex: Int, total: Int, accountName: String? = null) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -287,7 +299,8 @@ internal fun KeySwitchedBubble(newIndex: Int, total: Int) {
             modifier = Modifier.size(14.dp)
         )
         Text(
-            text = stringResource(R.string.chat_key_switched, newIndex, total),
+            text = if (accountName.isNullOrBlank()) stringResource(R.string.chat_key_switched, newIndex, total)
+            else stringResource(R.string.chat_account_switched, accountName),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall
         )
@@ -824,7 +837,20 @@ internal fun TypingDots(
     /** 是否单独给读屏播报「正在生成」：嵌在 [AgentBusyIndicator] 里时由外层状态行统一播报。 */
     announce: Boolean = true
 ) {
-    val transition = rememberInfiniteTransition(label = "typing-dots")
+    val lifecycleStarted = rememberLifecycleStarted()
+    val animationOrigin = remember { SystemClock.uptimeMillis() }
+    val hasStarted = remember { booleanArrayOf(false) }
+    val (elapsedOffsetMillis, isResuming) = remember(lifecycleStarted) {
+        if (!lifecycleStarted) {
+            0 to false
+        } else {
+            val offset = animationStartOffsetMillis(animationOrigin, SystemClock.uptimeMillis(), 900)
+            val resuming = hasStarted[0]
+            hasStarted[0] = true
+            offset to resuming
+        }
+    }
+    val transition = if (lifecycleStarted) rememberInfiniteTransition(label = "typing-dots") else null
     val label = stringResource(R.string.chat_status_generating)
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -836,22 +862,35 @@ internal fun TypingDots(
             )
     ) {
         repeat(3) { index ->
-            val offsetY by transition.animateFloat(
-                initialValue = 0f,
-                targetValue = 0f,
-                animationSpec = infiniteRepeatable(
-                    animation = keyframes {
-                        durationMillis = 900
-                        0f at 0
-                        -5f at 180
-                        0f at 360
-                        0f at 900
-                    },
-                    repeatMode = RepeatMode.Restart,
-                    initialStartOffset = StartOffset(index * 150)
-                ),
-                label = "dot-$index"
-            )
+            val dotOffset = if (lifecycleStarted && transition != null) {
+                val offsetMillis = if (isResuming) {
+                    (elapsedOffsetMillis + index * 150) % 900
+                } else {
+                    index * 150
+                }
+                transition.animateFloat(
+                    initialValue = 0f,
+                    targetValue = 0f,
+                    animationSpec = infiniteRepeatable(
+                        animation = keyframes {
+                            durationMillis = 900
+                            0f at 0
+                            -5f at 180
+                            0f at 360
+                            0f at 900
+                        },
+                        repeatMode = RepeatMode.Restart,
+                        initialStartOffset = StartOffset(
+                            offsetMillis,
+                            if (isResuming) StartOffsetType.FastForward else StartOffsetType.Delay
+                        )
+                    ),
+                    label = "dot-$index"
+                )
+            } else {
+                remember(index) { mutableFloatStateOf(0f) }
+            }
+            val offsetY by dotOffset
             Box(
                 modifier = Modifier
                     .graphicsLayer { translationY = offsetY }

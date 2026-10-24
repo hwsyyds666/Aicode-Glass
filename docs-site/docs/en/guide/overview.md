@@ -16,6 +16,7 @@ Entries marked with a version (e.g. "since 1.11.0") were introduced in that vers
 | Terminal | Multi-tab sessions, auxiliary key bar, color and font settings |
 | File browsing & code editing | Indented tree view, syntax highlighting, built-in code editor (since 1.11.0) |
 | Git version management | Visual status management, branch switching, commit history, revert and delete (since 1.11.0) |
+| GitHub workspaces | Device Flow sign-in, paginated repository browsing and cloning, user-approved pull requests |
 | Tablet & large screen | Responsive split panes, persistent sidebar, side-by-side workbench (since 1.11.0) |
 
 ## Settings

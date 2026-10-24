@@ -14,5 +14,7 @@ data class CheckpointFileSnapshotEntity(
     val filePath: String,
     val snapshotRelativePath: String,
     val changeType: String,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    /** Last version produced by this session; null means rollback must fail closed. */
+    val expectedFingerprint: String? = null
 )

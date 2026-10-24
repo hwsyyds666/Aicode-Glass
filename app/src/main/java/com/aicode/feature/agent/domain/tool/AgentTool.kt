@@ -93,7 +93,13 @@ data class PendingToolPermission(
      * 「自主执行」挡位下 AI 命令审查器给出的危险说明（审查拒绝/不确定转人工时填入）；
      * 非空时弹窗应以醒目样式展示，提醒用户执行后果。
      */
-    val reviewNote: String? = null
+    val reviewNote: String? = null,
+    /** Dedicated reject / AI-review / one-shot approval flow for deletion commands. */
+    val deletionReview: Boolean = false,
+    /** An AI reviewer returned a non-allow verdict and the human must make the final choice. */
+    val deletionReviewCompleted: Boolean = false,
+    /** Keeps a subagent origin visible at the authorization boundary. */
+    val sourceLabel: String? = null
 )
 
 abstract class AgentTool {

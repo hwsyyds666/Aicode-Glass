@@ -2,6 +2,7 @@ package com.aicode.feature.agent.domain.tool
 
 import com.aicode.feature.agent.domain.model.AgentContext
 import com.aicode.feature.agent.domain.model.AgentImage
+import com.aicode.feature.agent.domain.subagent.SubAgentWriteScopeGuard
 import com.aicode.feature.agent.presentation.AgentAttachment
 import com.aicode.feature.agent.domain.workflow.AgentEvent
 import kotlinx.coroutines.CancellationException
@@ -61,6 +62,15 @@ class ToolInvoker @Inject constructor(
         if (tool == null) {
             return ToolRunResult(ToolResult.Error("工具 $name 不存在", "TOOL_NOT_FOUND").toTransportString(), true)
         }
+        context.agentDefinition?.takeUnless { it.allowsTool(name) }?.let { definition ->
+            return ToolRunResult(ToolResult.Error("${definition.name} 子代理类型不允许调用工具 $name", "SUBAGENT_TOOL_DENIED").toTransportString(), true)
+        }
+        if (context.allowedWritePaths != null || context.allowedReadPaths != null) {
+            val boundary = SubAgentWriteScopeGuard.check(name, toolCall.arguments, tool.effectiveCapabilities(toolCall.arguments), context)
+            if (!boundary.allowed) {
+                return ToolRunResult(ToolResult.Error(boundary.reason ?: "子代理范围检查拒绝", "SUBAGENT_SCOPE_DENIED").toTransportString(), true)
+            }
+        }
         return try {
             withContext(Dispatchers.IO) {
                 val result = tool.executeWithContext(toolCall.arguments, context)
@@ -83,17 +93,33 @@ class ToolInvoker @Inject constructor(
      * [onEvent] 即 workflow 的 `send`——channelFlow 的 send 可从任意线程调用，IO 线程回传安全。
      */
     suspend fun runStream(
-        tool: StreamingAgentTool,
+        tool: AgentTool,
         toolCall: ToolCall,
         context: AgentContext,
         onEvent: suspend (AgentEvent) -> Unit
     ): ToolRunResult {
+        val streamingTool = tool as? StreamingAgentTool
+            ?: return ToolRunResult(ToolResult.Error("工具不支持流式执行", "STREAM_NOT_SUPPORTED").toTransportString(), true)
+        context.agentDefinition?.takeUnless { it.allowsTool(tool.name) }?.let { definition ->
+            return ToolRunResult(ToolResult.Error("${definition.name} 子代理类型不允许调用工具 ${tool.name}", "SUBAGENT_TOOL_DENIED").toTransportString(), true)
+        }
+        if (context.allowedWritePaths != null || context.allowedReadPaths != null) {
+            val boundary = SubAgentWriteScopeGuard.check(
+                tool.name,
+                toolCall.arguments,
+                tool.effectiveCapabilities(toolCall.arguments),
+                context
+            )
+            if (!boundary.allowed) {
+                return ToolRunResult(ToolResult.Error(boundary.reason ?: "子代理范围检查拒绝", "SUBAGENT_SCOPE_DENIED").toTransportString(), true)
+            }
+        }
         val live = StringBuilder()
         var lastEmitMs = 0L
         var finalResult: ToolResult? = null
         return try {
             withContext(Dispatchers.IO) {
-                tool.executeStream(toolCall.arguments, context).collect { ev ->
+                streamingTool.executeStream(toolCall.arguments, context).collect { ev ->
                     when (ev) {
                         is ToolStreamEvent.Progress -> {
                             live.append(ev.chunk).append('\n')

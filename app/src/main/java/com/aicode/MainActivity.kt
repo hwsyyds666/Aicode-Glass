@@ -404,6 +404,7 @@ fun AppNavigation(
 
     // Activity 级别的 ViewModel——Drawer 和 AIChatPanel 共享同一个实例。
     val agentViewModel: AIAgentViewModel = hiltViewModel()
+    val fileBrowserViewModel: com.aicode.feature.agent.presentation.FileBrowserViewModel = hiltViewModel()
     val settingsViewModel: SettingsViewModel = hiltViewModel()
     val workspaceViewModel: WorkspaceViewModel = hiltViewModel()
 
@@ -450,12 +451,12 @@ fun AppNavigation(
     val agentStates by agentViewModel.agentStates.collectAsStateWithLifecycle()
     val awaitingPermissionSessionIds by agentViewModel.awaitingPermissionSessionIds.collectAsStateWithLifecycle()
     val subSessionsByParent by agentViewModel.subSessionsByParent.collectAsStateWithLifecycle()
-    val expandedPaths by agentViewModel.expandedPaths.collectAsStateWithLifecycle()
-    val expandingPath by agentViewModel.expandingPath.collectAsStateWithLifecycle()
-    val fileOpPaths by agentViewModel.fileOpPaths.collectAsStateWithLifecycle()
-    val browseState by agentViewModel.browseState.collectAsStateWithLifecycle()
-    val browseClipboard by agentViewModel.browseClipboard.collectAsStateWithLifecycle()
-    val pasteConflict by agentViewModel.pasteConflict.collectAsStateWithLifecycle()
+    val expandedPaths by fileBrowserViewModel.expandedPaths.collectAsStateWithLifecycle()
+    val expandingPath by fileBrowserViewModel.expandingPath.collectAsStateWithLifecycle()
+    val fileOpPaths by fileBrowserViewModel.fileOpPaths.collectAsStateWithLifecycle()
+    val browseState by fileBrowserViewModel.browseState.collectAsStateWithLifecycle()
+    val browseClipboard by fileBrowserViewModel.browseClipboard.collectAsStateWithLifecycle()
+    val pasteConflict by fileBrowserViewModel.pasteConflict.collectAsStateWithLifecycle()
     val chatSearchQuery by agentViewModel.chatSearchQuery.collectAsStateWithLifecycle()
     val chatSearchState by agentViewModel.chatSearchState.collectAsStateWithLifecycle()
 
@@ -499,7 +500,7 @@ fun AppNavigation(
     // 大屏看是否停在聊天页（侧栏只在聊天页展开）。
     val sidebarVisible = if (permanentDrawer) currentRoute == "chat" else drawerState.isOpen
     LaunchedEffect(sidebarVisible) {
-        if (sidebarVisible) agentViewModel.refreshBrowse()
+        if (sidebarVisible) fileBrowserViewModel.refreshBrowse()
     }
 
     // 右栏工作台：大屏下编辑器 / 终端 / Git 与聊天并排，窄窗仍走全屏路由。
@@ -592,41 +593,41 @@ fun AppNavigation(
             fileOpPaths = fileOpPaths,
             clipboard = browseClipboard,
             pasteConflict = pasteConflict,
-            onToggleExpand = { agentViewModel.toggleExpand(it) },
+            onToggleExpand = { fileBrowserViewModel.toggleExpand(it) },
             onOpenFile = openTreeEntry,
-            onRefreshBrowse = { agentViewModel.refreshBrowse() },
+            onRefreshBrowse = { fileBrowserViewModel.refreshBrowse() },
             onCreateFile = { parent, name ->
-                agentViewModel.createBrowseFile(parent, name) { ok ->
+                fileBrowserViewModel.createBrowseFile(parent, name) { ok ->
                     if (!ok) toastFileOpFailed(context, R.string.file_browser_create_failed)
                 }
             },
             onCreateFolder = { parent, name ->
-                agentViewModel.createBrowseFolder(parent, name) { ok ->
+                fileBrowserViewModel.createBrowseFolder(parent, name) { ok ->
                     if (!ok) toastFileOpFailed(context, R.string.file_browser_create_failed)
                 }
             },
             onRenameEntry = { path, newName ->
-                agentViewModel.renameBrowseEntry(path, newName) { ok ->
+                fileBrowserViewModel.renameBrowseEntry(path, newName) { ok ->
                     if (!ok) toastFileOpFailed(context, R.string.file_browser_rename_failed)
                 }
             },
             onDeleteEntry = { path ->
-                agentViewModel.deleteBrowseEntry(path) { ok ->
+                fileBrowserViewModel.deleteBrowseEntry(path) { ok ->
                     if (!ok) toastFileOpFailed(context, R.string.file_browser_delete_failed)
                 }
             },
             onCopyEntry = { path, name ->
-                agentViewModel.copyBrowseEntry(path, name)
+                fileBrowserViewModel.copyBrowseEntry(path, name)
             },
             onCutEntry = { path, name ->
-                agentViewModel.cutBrowseEntry(path, name)
+                fileBrowserViewModel.cutBrowseEntry(path, name)
             },
             onPasteEntry = { targetDir, onResult ->
-                agentViewModel.pasteBrowseEntry(targetDir, onResult)
+                fileBrowserViewModel.pasteBrowseEntry(targetDir, onResult)
             },
-            onClearClipboard = { agentViewModel.clearBrowseClipboard() },
-            onPasteOverwrite = { agentViewModel.pasteBrowseEntryOverwrite() },
-            onCancelPasteOverwrite = { agentViewModel.clearPasteConflict() },
+            onClearClipboard = { fileBrowserViewModel.clearBrowseClipboard() },
+            onPasteOverwrite = { fileBrowserViewModel.pasteBrowseEntryOverwrite() },
+            onCancelPasteOverwrite = { fileBrowserViewModel.clearPasteConflict() },
             onSelect = {
                 agentViewModel.selectSession(it.id)
                 if (!permanentDrawer) scope.launch { drawerState.close() }

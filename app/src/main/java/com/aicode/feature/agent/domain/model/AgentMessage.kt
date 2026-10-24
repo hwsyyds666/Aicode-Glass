@@ -81,5 +81,18 @@ data class AgentContext(
      * 本会话绑定的自定义子代理定义；非空表示这是一个按定义运行的子代理会话，
      * 系统提示词与工具集都按其配置组装（见 [com.aicode.feature.agent.domain.prompt.SystemPromptProvider]）。
      */
-    val agentDefinition: AgentDefinition? = null
+    val agentDefinition: AgentDefinition? = null,
+    /** 子代理会话的来源标签，供权限确认等安全边界展示。 */
+    val sourceLabel: String? = null,
+    /** null for legacy/root sessions; an empty list explicitly means no write access. */
+    val allowedWritePaths: List<String>? = null,
+    val allowedReadPaths: List<String>? = null,
+    /** True only when the user's current request explicitly asks for child-agent delegation. */
+    val explicitSubAgentRequest: Boolean = false,
+    /** Per-session toggle snapshot captured when this user request started. */
+    val superAgentEnabled: Boolean = false,
+    /** Parent chat id for checkpoints created by child-agent writes. */
+    val checkpointSessionId: String? = null,
+    /** Originating parent-turn checkpoint; blank explicitly means a legacy child has no safe checkpoint. */
+    val checkpointId: String? = null
 )

@@ -15,13 +15,14 @@ import io.mockk.verify
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * 工具授权策略引擎的分支覆盖。规则加载经 mock 注入，聚焦 [ToolPermissionPolicyEngine.evaluate]
- * 的裁决逻辑：PLAN/ASK 模式特判、完全权限挡位、DENY 优先、白名单/记忆规则、rm 高危删除防护与不可记忆降级。
+ * 的裁决逻辑：PLAN/ASK 模式边界、完全权限挡位、DENY 优先、白名单/记忆规则、rm 高危删除防护与不可记忆降级。
  * 底层 [ShellCommandParser] / [BuiltInSafeCommands] 的解析细节由各自独立测试覆盖，不在此重复。
  */
 class ToolPermissionPolicyEngineTest {
@@ -53,47 +54,60 @@ class ToolPermissionPolicyEngineTest {
         return t
     }
 
-    private fun bash(command: String) = mapOf("command" to JsonPrimitive(command))
+    private fun bash(command: String) = mapOf(
+        "command" to JsonPrimitive(command),
+        "intent" to JsonPrimitive("test command for current user task")
+    )
 
-    private fun terminal(action: String) = mapOf("action" to JsonPrimitive(action))
+    private fun terminal(action: String) = mapOf(
+        "action" to JsonPrimitive(action),
+        "command" to JsonPrimitive("echo terminal-policy-test"),
+        "input" to JsonPrimitive("echo terminal-policy-test"),
+        "intent" to JsonPrimitive("Verify terminal authorization behavior in the current test.")
+    )
 
-    // ── PLAN 模式：写/执行类工具一律拒绝 ─────────────────────────────
+    // ── PLAN 与 BUILD 使用相同的工具授权挡位，ASK 仍独立只读 ──────────
 
     @Test
-    fun planMode_deniesWorkspaceWriteTool() = runTest {
-        val e = engine()
-        val r = e.evaluate(tool(ToolCapability.WRITE_WORKSPACE), "writeFile", emptyMap(), AgentMode.PLAN)
-        assertEquals(ToolPermissionPolicyEngine.Verdict.DENY, r.verdict)
-        assertNotNull(r.denyReason)
+    fun planMode_usesCurrentAuthLevelForWorkspaceWrites() = runTest {
+        val ruleBased = engine(level = CommandAuthLevel.RULE_BASED)
+            .evaluate(tool(ToolCapability.WRITE_WORKSPACE), "writeFile", emptyMap(), AgentMode.PLAN)
+        val buildRuleBased = engine(level = CommandAuthLevel.RULE_BASED)
+            .evaluate(tool(ToolCapability.WRITE_WORKSPACE), "writeFile", emptyMap(), AgentMode.BUILD)
+        val fullAccess = engine(level = CommandAuthLevel.FULL_ACCESS)
+            .evaluate(tool(ToolCapability.WRITE_WORKSPACE), "writeFile", emptyMap(), AgentMode.PLAN)
+        assertEquals(buildRuleBased.verdict, ruleBased.verdict)
+        assertEquals(ToolPermissionPolicyEngine.Verdict.ASK, ruleBased.verdict)
+        assertEquals(ToolPermissionPolicyEngine.Verdict.ALLOW, fullAccess.verdict)
     }
 
     @Test
-    fun planMode_deniesBash() = runTest {
-        val e = engine()
-        val r = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("ls -la"), AgentMode.PLAN)
-        assertEquals(ToolPermissionPolicyEngine.Verdict.DENY, r.verdict)
+    fun planMode_shellUsesSameAuthAndDeletionRulesAsBuild() = runTest {
+        val e = engine(level = CommandAuthLevel.FULL_ACCESS)
+        val ordinary = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("touch output.txt"), AgentMode.PLAN)
+        val deletion = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("rm -f output.txt"), AgentMode.PLAN, "/root/workspace")
+        assertEquals(ToolPermissionPolicyEngine.Verdict.ALLOW, ordinary.verdict)
+        assertEquals(ToolPermissionPolicyEngine.Verdict.ASK, deletion.verdict)
+        assertNotNull(deletion.deletionAnalysis)
     }
 
     @Test
-    fun planMode_deniesTerminalStart() = runTest {
-        val e = engine()
+    fun planMode_terminalStartUsesCurrentAuthLevel() = runTest {
+        val e = engine(level = CommandAuthLevel.FULL_ACCESS)
         val r = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "terminal", terminal("start"), AgentMode.PLAN)
-        assertEquals(ToolPermissionPolicyEngine.Verdict.DENY, r.verdict)
+        assertEquals(ToolPermissionPolicyEngine.Verdict.ALLOW, r.verdict)
     }
 
     @Test
-    fun planMode_allowsReadOnlyExplorerTool() = runTest {
-        val e = engine()
-        val r = e.evaluate(tool(ToolCapability.READ_WORKSPACE), "list", emptyMap(), AgentMode.PLAN)
-        assertEquals(ToolPermissionPolicyEngine.Verdict.ASK, r.verdict)
-    }
-
-    @Test
-    fun planMode_allowsTerminalRead() = runTest {
-        val e = engine()
-        val r = e.evaluate(tool(ToolCapability.READ_WORKSPACE), "terminal", terminal("read"), AgentMode.PLAN)
-        // 无任何规则时按整工具 ASK（可记忆），而非 DENY
-        assertEquals(ToolPermissionPolicyEngine.Verdict.ASK, r.verdict)
+    fun terminalCommandWithoutIntentIsDeniedEvenAtFullAccess() = runTest {
+        val result = engine(level = CommandAuthLevel.FULL_ACCESS).evaluate(
+            tool(ToolCapability.EXECUTE_COMMANDS),
+            "terminal",
+            mapOf("action" to JsonPrimitive("start"), "command" to JsonPrimitive("echo hi")),
+            AgentMode.BUILD,
+            "/root/workspace"
+        )
+        assertEquals(ToolPermissionPolicyEngine.Verdict.DENY, result.verdict)
     }
 
     // ── 完全权限挡位：直接放行但保留灾难性 rm 防护 ────────────────────
@@ -118,22 +132,55 @@ class ToolPermissionPolicyEngineTest {
         val e = engine(level = CommandAuthLevel.FULL_ACCESS)
         val r = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("rm -rf /"), AgentMode.BUILD)
         assertEquals(ToolPermissionPolicyEngine.Verdict.DENY, r.verdict)
-        assertTrue(r.denyReason?.startsWith("安全防护：禁止执行高危删除操作（根目录删除）") == true)
+        assertTrue(r.denyReason?.startsWith("安全防护：禁止删除根目录") == true)
     }
 
     @Test
-    fun fullAccessLevel_stillBlocksWorkspaceRm() = runTest {
+    fun fullAccessLevel_workspaceWildcardDeleteStillNeedsExplicitApproval() = runTest {
         val e = engine(level = CommandAuthLevel.FULL_ACCESS)
         val r = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("rm -rf ~/workspace/*"), AgentMode.BUILD)
+        assertEquals(ToolPermissionPolicyEngine.Verdict.ASK, r.verdict)
+        assertNotNull(r.deletionAnalysis)
+    }
+
+    @Test
+    fun workspaceFileDeleteUsesDedicatedOneShotReviewFlow() = runTest {
+        val r = engine().evaluate(
+            tool(ToolCapability.EXECUTE_COMMANDS),
+            "Bash",
+            bash("rm -f build/cache.bin"),
+            AgentMode.BUILD,
+            workingDirectory = "/root/workspace"
+        )
+        assertEquals(ToolPermissionPolicyEngine.Verdict.ASK, r.verdict)
+        assertTrue(r.aiReviewable)
+        assertTrue(r.rememberablePatterns.isEmpty())
+        assertNotNull(r.deletionAnalysis)
+        assertTrue(r.deletionAnalysis?.targets?.single()?.outsideWorkspace == false)
+    }
+
+    @Test
+    fun disabledSafety_stillHardBlocksRootDelete() = runTest {
+        // 删除硬拦截始终生效，不随通用安全拦截开关或完全权限挡位关闭。
+        val e = engine(safetyDisabled = true, level = CommandAuthLevel.FULL_ACCESS)
+        val r = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("rm -rf /"), AgentMode.BUILD)
         assertEquals(ToolPermissionPolicyEngine.Verdict.DENY, r.verdict)
     }
 
     @Test
-    fun disabledSafety_allModes_allowsCatastrophicRm() = runTest {
-        // 「禁用安全拦截」现对全部模式生效（原 AUTO 专属开关随 AUTO 一并退场）
-        val e = engine(safetyDisabled = true, level = CommandAuthLevel.FULL_ACCESS)
-        val r = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("rm -rf /"), AgentMode.BUILD)
-        assertEquals(ToolPermissionPolicyEngine.Verdict.ALLOW, r.verdict)
+    fun shellCommandWithoutDeclaredIntent_isDeniedBeforeEveryAuthLevel() = runTest {
+        for (level in CommandAuthLevel.entries) {
+            val e = engine(level = level, safetyDisabled = true)
+            val result = e.evaluate(
+                tool(ToolCapability.EXECUTE_COMMANDS),
+                "Bash",
+                mapOf("command" to JsonPrimitive("pwd")),
+                AgentMode.BUILD,
+                workingDirectory = "/root/workspace"
+            )
+            assertEquals("$level", ToolPermissionPolicyEngine.Verdict.DENY, result.verdict)
+            assertTrue(result.denyReason?.contains("意图") == true)
+        }
     }
 
     // ── ASK 模式：写操作硬拒绝，且禁止 AI 自行切入 PLAN ─────────────
@@ -235,10 +282,10 @@ class ToolPermissionPolicyEngineTest {
     }
 
     @Test
-    fun mixOfSafeAndNonHighRisk_allowed() = runTest {
+    fun mixOfSafeCommands_allowed() = runTest {
         // 高危规则只覆盖递归/通配/批量删除，裸 `rm x` 未命中；整条命令可静态判定 → 放行。
         val e = engine()
-        val r = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("ls -la && rm x"), AgentMode.BUILD)
+        val r = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("ls -la && git status --short"), AgentMode.BUILD)
         assertEquals(ToolPermissionPolicyEngine.Verdict.ALLOW, r.verdict)
     }
 
@@ -267,13 +314,13 @@ class ToolPermissionPolicyEngineTest {
     // ── rm 精细校验：无目标 / 递归 / 通配的规则不得放行 ───────────────
 
     @Test
-    fun bareRmRuleIgnored_nonRecursiveRmAllowed() = runTest {
+    fun bareRmRuleIgnored_nonRecursiveRmStillRequiresOneShotApproval() = runTest {
         val e = engine(
             PermissionRule("Bash", "rm", PermissionDecision.ALLOW)
         )
         val r = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("rm file.txt"), AgentMode.BUILD)
         // 规则不参与；`rm file.txt` 非递归/无通配，未命中高危规则 → 放行
-        assertEquals(ToolPermissionPolicyEngine.Verdict.ALLOW, r.verdict)
+        assertEquals(ToolPermissionPolicyEngine.Verdict.ASK, r.verdict)
     }
 
     @Test
@@ -317,40 +364,48 @@ class ToolPermissionPolicyEngineTest {
         assertEquals(ToolPermissionPolicyEngine.Verdict.DENY, r.verdict)
     }
 
-    // ── 提权：携带 elevate 将硬拒绝降级为一次性授权 ───────────────────
+    // ── 删除硬拦截不可由 elevate 绕过 ────────────────────────────────
 
     @Test
-    fun catastrophicRm_elevate_asksUser() = runTest {
+    fun catastrophicRm_elevateStillHardDenies() = runTest {
         val e = engine()
         val r = e.evaluate(
             tool(ToolCapability.EXECUTE_COMMANDS),
             "Bash",
-            mapOf("command" to JsonPrimitive("rm -rf /"), "elevate" to JsonPrimitive(true)),
+            mapOf(
+                "command" to JsonPrimitive("rm -rf /"),
+                "intent" to JsonPrimitive("Delete a path requested by the user."),
+                "elevate" to JsonPrimitive(true)
+            ),
             AgentMode.BUILD
         )
-        assertEquals(ToolPermissionPolicyEngine.Verdict.ASK, r.verdict)
+        assertEquals(ToolPermissionPolicyEngine.Verdict.DENY, r.verdict)
         assertTrue(r.rememberablePatterns.isEmpty())
-        assertNotNull(r.askTitle)
+        assertTrue(r.denyReason?.contains("安全防护") == true)
     }
 
     @Test
-    fun catastrophicRm_denyReasonHintsElevate() = runTest {
+    fun catastrophicRm_denyReasonDoesNotSuggestElevation() = runTest {
         val e = engine()
         val r = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("rm -rf /"), AgentMode.BUILD)
         assertEquals(ToolPermissionPolicyEngine.Verdict.DENY, r.verdict)
-        assertTrue(r.denyReason?.contains("elevate") == true)
+        assertTrue(r.denyReason?.contains("elevate") == false)
     }
 
     @Test
-    fun catastrophicRm_fullAccessLevel_elevate_asksUser() = runTest {
+    fun catastrophicRm_fullAccessLevel_elevateStillHardDenies() = runTest {
         val e = engine(level = CommandAuthLevel.FULL_ACCESS)
         val r = e.evaluate(
             tool(ToolCapability.EXECUTE_COMMANDS),
             "Bash",
-            mapOf("command" to JsonPrimitive("rm -rf /"), "elevate" to JsonPrimitive(true)),
+            mapOf(
+                "command" to JsonPrimitive("rm -rf /"),
+                "intent" to JsonPrimitive("Delete a path requested by the user."),
+                "elevate" to JsonPrimitive(true)
+            ),
             AgentMode.BUILD
         )
-        assertEquals(ToolPermissionPolicyEngine.Verdict.ASK, r.verdict)
+        assertEquals(ToolPermissionPolicyEngine.Verdict.DENY, r.verdict)
     }
 
     // ── 路径归一化：多种等价写法均需拦截，工作区子目录放行 ─────────────
@@ -367,7 +422,7 @@ class ToolPermissionPolicyEngineTest {
         assertTrue(denied("rm -rf /tmp/../etc"))
         assertTrue(denied("rm -rf /foo/../"))
         assertTrue(denied("rm -rf \$HOME"))
-        assertTrue(denied("rm -rf \${HOME}/foo"))
+        assertTrue(!denied("rm -rf \${HOME}/foo")) // 主目录内的普通目标需人工确认，不作为根目录硬拦截
         assertTrue(denied("rm -rf /et*"))
         assertTrue(denied("rm -rf /usr*"))
         assertTrue(denied("rm -rf /srv"))
@@ -382,9 +437,12 @@ class ToolPermissionPolicyEngineTest {
     }
 
     @Test
-    fun workspaceRoot_stillDenied() = runTest {
+    fun workspaceRootItself_isHardBlockedButItsContentsRequireApproval() = runTest {
         assertTrue(denied("rm -rf ~/workspace"))
-        assertTrue(denied("rm -rf ~/workspace/*"))
+        assertEquals(
+            ToolPermissionPolicyEngine.Verdict.ASK,
+            engine().evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("rm -rf ~/workspace/*"), AgentMode.BUILD).verdict
+        )
         assertTrue(denied("rm -rf ~/workspace/.."))
     }
 
@@ -441,7 +499,10 @@ class ToolPermissionPolicyEngineTest {
 
     // ── Shizuku 高危工具：一律弹窗、不可记忆，完全权限也不豁免 ─────────
 
-    private fun shizuku(command: String) = mapOf("command" to JsonPrimitive(command))
+    private fun shizuku(command: String) = mapOf(
+        "command" to JsonPrimitive(command),
+        "intent" to JsonPrimitive("test command for current user task")
+    )
 
     @Test
     fun shizuku_buildMode_asksWithoutRememberable() = runTest {
@@ -497,10 +558,11 @@ class ToolPermissionPolicyEngineTest {
     }
 
     @Test
-    fun shizuku_planMode_denied() = runTest {
+    fun shizuku_planMode_usesHighRiskApproval() = runTest {
         val e = engine()
         val r = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Shizuku", shizuku("pm list packages"), AgentMode.PLAN)
-        assertEquals(ToolPermissionPolicyEngine.Verdict.DENY, r.verdict)
+        assertEquals(ToolPermissionPolicyEngine.Verdict.ASK, r.verdict)
+        assertTrue(r.rememberablePatterns.isEmpty())
     }
 
     // ── 非 shell 工具 ───────────────────────────────────────────────
@@ -521,6 +583,23 @@ class ToolPermissionPolicyEngineTest {
         assertEquals(ToolPermissionPolicyEngine.Verdict.ASK, r.verdict)
         assertTrue(r.rememberablePatterns.isEmpty())
         assertNotNull(r.rememberDisabledReason)
+    }
+
+    @Test
+    fun externalToolIsOneShotEvenWithFullAccessOrRememberedAllow() = runTest {
+        val result = engine(
+            PermissionRule("createPullRequest", PermissionRule.WHOLE_TOOL, PermissionDecision.ALLOW),
+            level = CommandAuthLevel.FULL_ACCESS
+        ).evaluate(
+            tool(ToolCapability.EXTERNAL_TOOL),
+            "createPullRequest",
+            emptyMap(),
+            AgentMode.BUILD
+        )
+
+        assertEquals(ToolPermissionPolicyEngine.Verdict.ASK, result.verdict)
+        assertTrue(result.rememberablePatterns.isEmpty())
+        assertNotNull(result.rememberDisabledReason)
     }
 
     @Test
@@ -554,7 +633,7 @@ class ToolPermissionPolicyEngineTest {
     @Test
     fun ruleBased_highRiskHit_asksWithRuleTitle() = runTest {
         val e = engine()
-        val r = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("rm -rf /tmp/build"), AgentMode.BUILD)
+        val r = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("dd if=/dev/zero of=/dev/sda"), AgentMode.BUILD)
         assertEquals(ToolPermissionPolicyEngine.Verdict.ASK, r.verdict)
         assertTrue(r.askTitle?.startsWith("命中高危规则") == true)
         // 递归删除不可记忆
@@ -563,19 +642,19 @@ class ToolPermissionPolicyEngineTest {
     }
 
     @Test
-    fun ruleBased_nonRecursiveRmWithoutRuleHit_allows() = runTest {
+    fun ruleBased_nonRecursiveRmWithoutRuleHitRequiresOneShotApproval() = runTest {
         // 裸 rm 单文件不在高危规则覆盖范围内（高危只管递归/通配/批量），可静态判定 → 放行
         val e = engine()
         val r = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("rm file.txt"), AgentMode.BUILD)
-        assertEquals(ToolPermissionPolicyEngine.Verdict.ALLOW, r.verdict)
+        assertEquals(ToolPermissionPolicyEngine.Verdict.ASK, r.verdict)
     }
 
     @Test
-    fun ruleBased_allRulesDisabled_allows() = runTest {
-        // 用户停用全部高危规则后，可静态判定的普通命令直接放行
+    fun ruleBased_allRulesDisabledStillRequiresDeletionApproval() = runTest {
+        // Disabling generic high-risk rules never disables the dedicated delete approval flow.
         val e = engine(highRiskRules = HighRiskRulePresets.RULES.map { it.copy(enabled = false) })
         val r = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("rm file.txt"), AgentMode.BUILD)
-        assertEquals(ToolPermissionPolicyEngine.Verdict.ALLOW, r.verdict)
+        assertEquals(ToolPermissionPolicyEngine.Verdict.ASK, r.verdict)
     }
 
     @Test
@@ -602,6 +681,34 @@ class ToolPermissionPolicyEngineTest {
         val e = engine(level = CommandAuthLevel.FULL_ACCESS)
         val r = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("git reset --hard origin/main"), AgentMode.BUILD)
         assertEquals(ToolPermissionPolicyEngine.Verdict.ALLOW, r.verdict)
+    }
+
+    @Test
+    fun gitHubMutationsAlwaysRequireOneShotApproval() = runTest {
+        for (level in CommandAuthLevel.entries) {
+            val engine = engine(level = level, safetyDisabled = true)
+            for (command in listOf(
+                "git push origin feature",
+                "git -C /root/workspace push origin feature",
+                "gh pr create --title x --body y",
+                "gh --repo owner/repo pr create --title x --body y",
+                "gh api repos/owner/repo/pulls --method POST",
+                "git branch -D feature",
+                "git -C /root/workspace branch --delete feature"
+            )) {
+                val result = engine.evaluate(
+                    tool(ToolCapability.EXECUTE_COMMANDS),
+                    "Bash",
+                    bash(command),
+                    AgentMode.BUILD,
+                    workingDirectory = "/root/workspace"
+                )
+                assertEquals("$level should require approval for: $command", ToolPermissionPolicyEngine.Verdict.ASK, result.verdict)
+                assertTrue(result.rememberablePatterns.isEmpty())
+                assertNotNull(result.rememberDisabledReason)
+                assertFalse(result.aiReviewable)
+            }
+        }
     }
 
     @Test
@@ -634,11 +741,11 @@ class ToolPermissionPolicyEngineTest {
     }
 
     @Test
-    fun fullAccess_safetyDisabled_allowsCatastrophicRm() = runTest {
-        // 「禁用安全拦截」现对全部模式与挡位生效（原 AUTO 专属开关随 AUTO 退场）
+    fun fullAccess_safetyDisabled_stillHardBlocksRootRm() = runTest {
+        // 通用安全拦截开关不关闭删除目标的硬拦截。
         val e = engine(level = CommandAuthLevel.FULL_ACCESS, safetyDisabled = true)
         val r = e.evaluate(tool(ToolCapability.EXECUTE_COMMANDS), "Bash", bash("rm -rf /"), AgentMode.BUILD)
-        assertEquals(ToolPermissionPolicyEngine.Verdict.ALLOW, r.verdict)
+        assertEquals(ToolPermissionPolicyEngine.Verdict.DENY, r.verdict)
     }
 
     // ── 「自主执行」挡位：统一标记 aiReviewable 交工作流层 AI 审查 ─────────────
@@ -652,6 +759,21 @@ class ToolPermissionPolicyEngineTest {
         // 命令的「始终允许」记忆已下线，一律只支持单次放行
         assertTrue(r.rememberablePatterns.isEmpty())
         assertNotNull(r.rememberDisabledReason)
+    }
+
+    @Test
+    fun shellCommandWithoutIntent_isRejectedEvenIfOtherwiseSafe() = runTest {
+        val e = engine(level = CommandAuthLevel.AUTONOMOUS)
+        val result = e.evaluate(
+            tool(ToolCapability.EXECUTE_COMMANDS),
+            "Bash",
+            mapOf("command" to JsonPrimitive("pwd")),
+            AgentMode.BUILD,
+            "/root/workspace"
+        )
+
+        assertEquals(ToolPermissionPolicyEngine.Verdict.DENY, result.verdict)
+        assertTrue(result.denyReason.orEmpty().contains("意图"))
     }
 
     @Test

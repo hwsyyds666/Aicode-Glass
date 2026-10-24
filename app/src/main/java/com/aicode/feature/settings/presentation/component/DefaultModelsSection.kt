@@ -21,11 +21,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import com.aicode.core.ui.AdaptiveModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -44,12 +47,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aicode.R
 import com.aicode.core.theme.Spacing
+import com.aicode.core.ui.AppSwitch
 import com.aicode.feature.onboarding.domain.OnboardingStep
 import com.aicode.feature.onboarding.presentation.onboardingTarget
 import com.aicode.feature.settings.data.local.ModelSheetCollapseStore
 import com.aicode.feature.settings.domain.model.AIProviderConfig
 import com.aicode.feature.settings.domain.model.ModelMetadata
 import com.aicode.feature.settings.domain.model.modelMetadataKey
+import com.aicode.feature.settings.data.repository.SubAgentModelChoice
+import com.aicode.feature.settings.data.repository.SubAgentModelTier
+import com.aicode.feature.agent.domain.model.ReasoningEffort
 import compose.icons.FeatherIcons
 import compose.icons.feathericons.ArrowDown
 import compose.icons.feathericons.ArrowUp
@@ -61,6 +68,9 @@ import compose.icons.feathericons.Minimize2
 import compose.icons.feathericons.Shield
 import compose.icons.feathericons.Sliders
 import compose.icons.feathericons.Type
+import compose.icons.feathericons.Zap
+import compose.icons.feathericons.Cpu
+import compose.icons.feathericons.GitBranch
 
 /**
  * 默认模型二级页：集中管理应用中的默认/特定用途模型设置（如识图模型、压缩模型）。
@@ -78,6 +88,11 @@ internal fun DefaultModelsSection(
     imageGenModel: String,
     reviewerProviderId: String,
     reviewerModel: String,
+    fastSubAgentModel: SubAgentModelChoice,
+    powerSubAgentModel: SubAgentModelChoice,
+    maxSubAgentRunning: Int,
+    maxSubAgentTotal: Int,
+    subAgentTimeoutMinutes: Int,
     modelMetadata: Map<String, ModelMetadata>,
     onLoadMetadata: () -> Unit,
     onSelectVisionModel: (providerId: String, model: String) -> Unit,
@@ -90,6 +105,12 @@ internal fun DefaultModelsSection(
     onClearImageGenModel: () -> Unit,
     onSelectReviewerModel: (providerId: String, model: String) -> Unit,
     onClearReviewerModel: () -> Unit,
+    onSelectSubAgentModel: (tier: SubAgentModelTier, providerId: String, model: String) -> Unit,
+    onClearSubAgentModel: (tier: SubAgentModelTier) -> Unit,
+    onChangeSubAgentReasoning: (tier: SubAgentModelTier, effort: String) -> Unit,
+    onSetMaxSubAgentRunning: (Int) -> Unit,
+    onSetMaxSubAgentTotal: (Int) -> Unit,
+    onSetSubAgentTimeoutMinutes: (Int) -> Unit,
     /** 上下文窗口统一值是否生效（仅用于副标题展示，开关本身在二级页里）。 */
     contextWindowEnabled: Boolean,
     /** 点击整行进入二级设置页（开关与三个窗口值都在二级页里配置）。 */
@@ -100,6 +121,8 @@ internal fun DefaultModelsSection(
     var showTitleSheet by remember { mutableStateOf(false) }
     var showImageGenSheet by remember { mutableStateOf(false) }
     var showReviewerSheet by remember { mutableStateOf(false) }
+    var showFastSubAgentSheet by remember { mutableStateOf(false) }
+    var showPowerSubAgentSheet by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { onLoadMetadata() }
 
@@ -228,6 +251,125 @@ internal fun DefaultModelsSection(
             )
         }
 
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = Spacing.lg, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = FeatherIcons.GitBranch,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+                Spacer(Modifier.width(Spacing.md))
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = stringResource(R.string.settings_subagent_models_title),
+                        style = MaterialTheme.typography.titleSmall
+                    )
+                    Text(
+                        text = stringResource(R.string.settings_subagent_models_description),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+        SettingsGroup {
+            SubAgentModelTierRow(
+                icon = FeatherIcons.Zap,
+                title = stringResource(R.string.settings_subagent_fast_title),
+                description = stringResource(R.string.settings_subagent_fast_description),
+                providers = providers,
+                choice = fastSubAgentModel,
+                onSelectModel = { showFastSubAgentSheet = true },
+                onChangeEffort = { onChangeSubAgentReasoning(SubAgentModelTier.FAST, it) }
+            )
+            SettingsDivider()
+            SubAgentModelTierRow(
+                icon = FeatherIcons.Cpu,
+                title = stringResource(R.string.settings_subagent_power_title),
+                description = stringResource(R.string.settings_subagent_power_description),
+                providers = providers,
+                choice = powerSubAgentModel,
+                onSelectModel = { showPowerSubAgentSheet = true },
+                onChangeEffort = { onChangeSubAgentReasoning(SubAgentModelTier.POWER, it) }
+            )
+        }
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = Spacing.lg, vertical = 13.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = FeatherIcons.Sliders,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(Modifier.width(Spacing.md))
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = stringResource(R.string.settings_subagent_limits_title),
+                        style = MaterialTheme.typography.titleSmall
+                    )
+                    Text(
+                        text = stringResource(R.string.settings_subagent_limits_description),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+        SettingsGroup {
+            SubAgentLimitRow(
+                title = stringResource(R.string.settings_subagent_max_running),
+                subtitle = stringResource(R.string.settings_subagent_max_running_description),
+                value = maxSubAgentRunning,
+                values = (1..8).toList(),
+                displayValue = maxSubAgentRunning.toString(),
+                displayOption = { it.toString() },
+                onSelect = onSetMaxSubAgentRunning
+            )
+            SettingsDivider()
+            SubAgentLimitRow(
+                title = stringResource(R.string.settings_subagent_max_total),
+                subtitle = stringResource(R.string.settings_subagent_max_total_description),
+                value = maxSubAgentTotal,
+                values = listOf(1, 2, 3, 4, 6, 8, 12, 16, 20, 24, 32),
+                displayValue = maxSubAgentTotal.toString(),
+                displayOption = { it.toString() },
+                onSelect = onSetMaxSubAgentTotal
+            )
+            SettingsDivider()
+            SubAgentLimitRow(
+                title = stringResource(R.string.settings_subagent_timeout),
+                subtitle = stringResource(R.string.settings_subagent_timeout_description),
+                value = subAgentTimeoutMinutes,
+                values = listOf(1, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180),
+                displayValue = stringResource(R.string.settings_subagent_minutes_value, subAgentTimeoutMinutes),
+                displayOption = { stringResource(R.string.settings_subagent_minutes_value, it) },
+                onSelect = onSetSubAgentTimeoutMinutes
+            )
+        }
+
         // ── 上下文窗口统一高级设置 ──
         // 入口行只负责「进二级页」，真正的开关与三个窗口值都在二级页里设置——
         // 之前在外层也放了个开关，但必填校验会把它弹回关闭态（等于打不开），反而误导。
@@ -353,6 +495,229 @@ internal fun DefaultModelsSection(
             onDismiss = { showReviewerSheet = false }
         )
     }
+
+    if (showFastSubAgentSheet) {
+        ModelSelectionSheet(
+            title = stringResource(R.string.settings_subagent_fast_title),
+            noModelsText = stringResource(R.string.settings_subagent_no_models),
+            providers = providers,
+            currentProviderId = fastSubAgentModel.providerId,
+            currentModel = fastSubAgentModel.model,
+            modelMetadata = modelMetadata,
+            onSelect = { pid, model -> onSelectSubAgentModel(SubAgentModelTier.FAST, pid, model); showFastSubAgentSheet = false },
+            onClear = { onClearSubAgentModel(SubAgentModelTier.FAST); showFastSubAgentSheet = false },
+            onDismiss = { showFastSubAgentSheet = false }
+        )
+    }
+
+    if (showPowerSubAgentSheet) {
+        ModelSelectionSheet(
+            title = stringResource(R.string.settings_subagent_power_title),
+            noModelsText = stringResource(R.string.settings_subagent_no_models),
+            providers = providers,
+            currentProviderId = powerSubAgentModel.providerId,
+            currentModel = powerSubAgentModel.model,
+            modelMetadata = modelMetadata,
+            onSelect = { pid, model -> onSelectSubAgentModel(SubAgentModelTier.POWER, pid, model); showPowerSubAgentSheet = false },
+            onClear = { onClearSubAgentModel(SubAgentModelTier.POWER); showPowerSubAgentSheet = false },
+            onDismiss = { showPowerSubAgentSheet = false }
+        )
+    }
+}
+
+/**
+ * 通用单选弹层：与模型选择弹窗（[ModelSelectionSheet]）同一套底部弹层规范，
+ * 替代早年散落的 DropdownMenu（锚定式小浮层，与设置页其余交互完全两种语言）。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun <T> OptionPickerSheet(
+    title: String,
+    options: List<T>,
+    selected: T,
+    optionLabel: @Composable (T) -> String,
+    onSelect: (T) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    AdaptiveModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        sheetGesturesEnabled = true,
+        containerColor = settingsPageBackground()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = Spacing.lg)
+                .padding(bottom = Spacing.lg)
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.padding(vertical = Spacing.md)
+            )
+            Column(modifier = Modifier.heightIn(max = 420.dp)) {
+                options.forEach { option ->
+                    val isSelected = option == selected
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .clickable { onSelect(option) }
+                            .padding(horizontal = Spacing.sm),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = optionLabel(option),
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = if (isSelected) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (isSelected) {
+                            Icon(
+                                imageVector = FeatherIcons.Check,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SubAgentLimitRow(
+    title: String,
+    subtitle: String,
+    value: Int,
+    values: List<Int>,
+    displayValue: String,
+    displayOption: @Composable (Int) -> String,
+    onSelect: (Int) -> Unit
+) {
+    var showPicker by remember { mutableStateOf(false) }
+    SettingsRow(
+        icon = FeatherIcons.Sliders,
+        title = title,
+        subtitle = subtitle,
+        onClick = { showPicker = true },
+        trailing = {
+            Text(
+                text = displayValue,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1
+            )
+        }
+    )
+    if (showPicker) {
+        OptionPickerSheet(
+            title = title,
+            options = values,
+            selected = value,
+            optionLabel = { option -> displayOption(option) },
+            onSelect = { picked ->
+                onSelect(picked)
+                showPicker = false
+            },
+            onDismiss = { showPicker = false }
+        )
+    }
+}
+
+@Composable
+private fun SubAgentModelTierRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    description: String,
+    providers: List<AIProviderConfig>,
+    choice: SubAgentModelChoice,
+    onSelectModel: () -> Unit,
+    onChangeEffort: (String) -> Unit
+) {
+    var showEffortPicker by remember { mutableStateOf(false) }
+    val providerName = providers.firstOrNull { it.id == choice.providerId }?.name
+    val modelLabel = if (choice.followsParent) {
+        stringResource(R.string.settings_subagent_follow_chat)
+    } else {
+        listOfNotNull(providerName, choice.model).joinToString(" · ").ifBlank { choice.model }
+    }
+    SettingsRow(
+        icon = icon,
+        title = title,
+        subtitle = description,
+        onClick = onSelectModel,
+        trailing = {
+            Column(
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(Spacing.xs)
+            ) {
+                Text(
+                    text = modelLabel,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                // 思考强度：与模型并列的独立入口，弹层与设置页其余选择器统一
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                    contentColor = MaterialTheme.colorScheme.primary
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .clickable { showEffortPicker = true }
+                            .padding(horizontal = Spacing.md, vertical = Spacing.xs),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = FeatherIcons.Cpu,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(Modifier.width(Spacing.xs))
+                        Text(
+                            text = stringResource(
+                                R.string.settings_subagent_effort_value,
+                                stringResource(reasoningEffortLabel(choice.reasoningEffort))
+                            ),
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
+                }
+            }
+        }
+    )
+    if (showEffortPicker) {
+        OptionPickerSheet(
+            title = stringResource(R.string.subagent_editor_effort),
+            options = ReasoningEffort.entries.filter { it != ReasoningEffort.NONE },
+            selected = ReasoningEffort.entries.firstOrNull { it.apiValue == choice.reasoningEffort }
+                ?: ReasoningEffort.MEDIUM,
+            optionLabel = { effort -> stringResource(reasoningEffortLabel(effort.apiValue)) },
+            onSelect = { effort ->
+                onChangeEffort(effort.apiValue)
+                showEffortPicker = false
+            },
+            onDismiss = { showEffortPicker = false }
+        )
+    }
+}
+
+private fun reasoningEffortLabel(value: String): Int = when (value.lowercase()) {
+    "minimal" -> R.string.chat_reasoning_effort_minimal
+    "low" -> R.string.chat_reasoning_effort_low
+    "high" -> R.string.chat_reasoning_effort_high
+    "xhigh" -> R.string.chat_reasoning_effort_xhigh
+    "max" -> R.string.chat_reasoning_effort_max
+    else -> R.string.chat_reasoning_effort_medium
 }
 
 /**

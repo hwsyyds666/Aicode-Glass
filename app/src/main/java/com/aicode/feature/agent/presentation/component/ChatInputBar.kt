@@ -9,6 +9,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -72,9 +74,15 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.toggleableState
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
@@ -102,7 +110,6 @@ import com.aicode.feature.agent.domain.model.ReasoningEffort
 import com.aicode.feature.agent.domain.model.TodoItem
 import com.aicode.feature.agent.domain.permission.PermissionChoice
 import com.aicode.feature.agent.domain.tool.PendingToolPermission
-import com.aicode.feature.agent.domain.tool.mode.PlanApprovalRequest
 import com.aicode.feature.agent.presentation.AgentUIState
 import com.aicode.feature.agent.presentation.QueuedRequest
 import com.aicode.feature.settings.domain.model.AIProviderConfig
@@ -120,6 +127,7 @@ import compose.icons.feathericons.Check
 import compose.icons.feathericons.ChevronDown
 import compose.icons.feathericons.ChevronUp
 import compose.icons.feathericons.Copy
+import compose.icons.feathericons.GitBranch
 import compose.icons.feathericons.Map
 import compose.icons.feathericons.Maximize
 import compose.icons.feathericons.MessageCircle
@@ -143,6 +151,7 @@ private val INPUT_FIELD_MAX_HEIGHT = 140.dp
  */
 private val INPUT_FIELD_CONTENT_PADDING = 16.dp
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun ChatInputBar(
     value: String,
@@ -163,6 +172,10 @@ internal fun ChatInputBar(
     onToggleMode: (AgentMode) -> Unit,
     reasoningEffort: ReasoningEffort,
     onReasoningEffortChange: (ReasoningEffort) -> Unit,
+    superAgentEnabled: Boolean = false,
+    canToggleSuperAgent: Boolean = true,
+    onToggleSuperAgent: () -> Unit = {},
+    onShowSuperAgentExplanation: () -> Unit = {},
     pendingAttachments: List<PendingUploadAttachment>,
     onRemoveAttachment: (Int) -> Unit,
     canUploadFiles: Boolean,
@@ -433,6 +446,7 @@ internal fun ChatInputBar(
                         modifier = Modifier
                             .weight(1f)
                             .heightIn(min = INPUT_FIELD_MIN_HEIGHT, max = INPUT_FIELD_MAX_HEIGHT)
+                            .testTag("chat_benchmark_message_input")
                             .onSizeChanged { inputFieldWidthPx = it.width },
                         placeholder = {
                             Text(
@@ -535,6 +549,48 @@ internal fun ChatInputBar(
                             onChange = onReasoningEffortChange,
                             enabled = !isBusy
                         )
+                        if (canToggleSuperAgent) {
+                            val accessibilityLabel = stringResource(
+                                if (superAgentEnabled) R.string.chat_super_agent_accessibility_on
+                                else R.string.chat_super_agent_accessibility_off
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .clip(RoundedCornerShape(Radius.md))
+                                    .background(
+                                        if (superAgentEnabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                                        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f)
+                                    )
+                                    .border(
+                                        BorderStroke(
+                                            1.dp,
+                                            if (superAgentEnabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
+                                            else MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+                                        ),
+                                        RoundedCornerShape(Radius.md)
+                                    )
+                                    .combinedClickable(
+                                        onClick = onToggleSuperAgent,
+                                        onLongClick = onShowSuperAgentExplanation
+                                    )
+                                    .semantics {
+                                        contentDescription = accessibilityLabel
+                                        stateDescription = accessibilityLabel
+                                        role = Role.Switch
+                                        toggleableState = if (superAgentEnabled) ToggleableState.On else ToggleableState.Off
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = FeatherIcons.GitBranch,
+                                    contentDescription = null,
+                                    tint = if (superAgentEnabled) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
                     }
                     UploadIconButton(
                         enabled = !isBusy,
@@ -579,7 +635,6 @@ internal fun ChatInputBar(
         )
     }
 }
-
 /**
  * 全屏输入框：底部输入框被高度上限截断、框内滚动时，点右上角「展开」进入这里，
  * 用整屏编辑同一份草稿（内容实时回写，收起后输入框里就是最新文本）。
@@ -674,7 +729,6 @@ private fun FullScreenInputDialog(
         }
     }
 }
-
 @Composable
 internal fun UploadIconButton(
     enabled: Boolean,
@@ -759,7 +813,8 @@ internal fun SendButton(
                 .size(36.dp)
                 .clip(CircleShape)
                 .background(buttonColor)
-                .clickable(enabled = clickable, onClick = if (showStop) onStop else onSend),
+                .clickable(enabled = clickable, onClick = if (showStop) onStop else onSend)
+                .testTag(if (showStop) "chat_benchmark_stop_button" else "chat_benchmark_send_button"),
             contentAlignment = Alignment.Center
         ) {
             if (showStop) {
@@ -791,6 +846,10 @@ internal fun ToolPermissionPanel(
     isScrolling: Boolean = false
 ) {
     var expanded by remember { mutableStateOf(true) }
+    val rejectFocusRequester = remember(request.id) { FocusRequester() }
+    LaunchedEffect(request.id, request.deletionReview, request.deletionReviewCompleted) {
+        if (request.deletionReview) rejectFocusRequester.requestFocus()
+    }
     // 余额面板展开时同帧收起本面板，避免叠加
     val effectiveExpanded = expanded && !forceCollapse
 
@@ -870,6 +929,14 @@ internal fun ToolPermissionPanel(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    if (!request.sourceLabel.isNullOrBlank()) {
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = stringResource(R.string.chat_perm_deletion_source, request.sourceLabel.orEmpty()),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
@@ -970,26 +1037,54 @@ internal fun ToolPermissionPanel(
                     )
 
                     Spacer(Modifier.height(Spacing.sm))
-                    Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
-                        AgentActionButton(
-                            text = stringResource(R.string.chat_perm_deny),
-                            onClick = { onChoice(PermissionChoice.REJECT) },
-                            modifier = Modifier.weight(1f),
-                            tone = AgentActionTone.Danger
-                        )
-                        AgentActionButton(
-                            text = stringResource(R.string.chat_perm_always_allow),
-                            onClick = { onChoice(PermissionChoice.ALWAYS) },
-                            modifier = Modifier.weight(1f),
-                            enabled = canRemember,
-                            tone = AgentActionTone.Neutral
-                        )
-                        AgentActionButton(
-                            text = stringResource(R.string.common_allow),
-                            onClick = { onChoice(PermissionChoice.ONCE) },
-                            modifier = Modifier.weight(1f),
-                            tone = AgentActionTone.Success
-                        )
+                    if (request.deletionReview) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                            AgentActionButton(
+                                text = stringResource(R.string.chat_perm_deny),
+                                onClick = { onChoice(PermissionChoice.REJECT) },
+                                modifier = Modifier.weight(1f).focusRequester(rejectFocusRequester),
+                                tone = AgentActionTone.Danger
+                            )
+                            if (!request.deletionReviewCompleted) {
+                                AgentActionButton(
+                                    text = stringResource(R.string.chat_perm_review_with_ai),
+                                    onClick = { onChoice(PermissionChoice.REVIEW) },
+                                    modifier = Modifier.weight(1f),
+                                    tone = AgentActionTone.Neutral
+                                )
+                            }
+                            AgentActionButton(
+                                text = stringResource(
+                                    if (request.deletionReviewCompleted) R.string.chat_perm_still_allow_once
+                                    else R.string.chat_perm_allow_once
+                                ),
+                                onClick = { onChoice(PermissionChoice.ONCE) },
+                                modifier = Modifier.weight(1f),
+                                tone = AgentActionTone.Success
+                            )
+                        }
+                    } else {
+                        Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                            AgentActionButton(
+                                text = stringResource(R.string.chat_perm_deny),
+                                onClick = { onChoice(PermissionChoice.REJECT) },
+                                modifier = Modifier.weight(1f),
+                                tone = AgentActionTone.Danger
+                            )
+                            AgentActionButton(
+                                text = stringResource(R.string.chat_perm_always_allow),
+                                onClick = { onChoice(PermissionChoice.ALWAYS) },
+                                modifier = Modifier.weight(1f),
+                                enabled = canRemember,
+                                tone = AgentActionTone.Neutral
+                            )
+                            AgentActionButton(
+                                text = stringResource(R.string.common_allow),
+                                onClick = { onChoice(PermissionChoice.ONCE) },
+                                modifier = Modifier.weight(1f),
+                                tone = AgentActionTone.Success
+                            )
+                        }
                     }
                 }
             }
@@ -1128,10 +1223,19 @@ private fun AgentModeChip(
             AgentMode.ASK -> R.string.chat_mode_ask
         }
     )
+    val chipDescription = stringResource(
+        when (mode) {
+            AgentMode.BUILD -> R.string.chat_mode_build_accessibility
+            AgentMode.PLAN -> R.string.chat_mode_plan_accessibility
+            AgentMode.ASK -> R.string.chat_mode_ask_accessibility
+        }
+    )
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = chipColor,
-        modifier = Modifier.clickable(onClick = onClick)
+        modifier = Modifier
+            .clickable(onClick = onClick)
+            .semantics { contentDescription = chipDescription }
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
@@ -1151,107 +1255,6 @@ private fun AgentModeChip(
                     color = chipTextColor
                 )
             )
-        }
-    }
-}
-
-/**
- * 计划审查面板：AI 从 PLAN 模式切回 BUILD 时弹出，展示计划摘要供用户批准或继续反馈。
- * 风格与 ToolPermissionPanel / AskUserQuestionPanel 一致。
- */
-@Composable
-internal fun PlanApprovalPanel(
-    state: PlanApprovalRequest,
-    onApprove: () -> Unit,
-    onRefine: () -> Unit,
-    forceCollapse: Boolean = false
-) {
-    var expanded by remember { mutableStateOf(true) }
-    // 余额面板展开时同帧收起本面板，避免叠加顶开输入框
-    val effectiveExpanded = expanded && !forceCollapse
-
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = Spacing.lg, vertical = Spacing.xs),
-        color = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(Radius.md),
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
-    ) {
-        Column(modifier = Modifier.padding(Spacing.md)) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(Radius.sm))
-                    .clickable { expanded = !expanded },
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.tertiary)
-                )
-                Spacer(Modifier.width(Spacing.sm))
-                Text(
-                    text = stringResource(R.string.chat_plan_completed),
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f)
-                )
-                ExpandableChevronIcon(
-                    expanded = effectiveExpanded,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    size = 18.dp
-                )
-            }
-
-            AnimatedVisibility(
-                visible = effectiveExpanded,
-                enter = fadeIn(tween(180)) + expandVertically(tween(220)),
-                exit = fadeOut(tween(140)) + shrinkVertically(tween(180))
-            ) {
-                Column {
-                    if (state.reason.isNotBlank()) {
-                        Spacer(Modifier.height(Spacing.xs))
-                        SelectionContainer {
-                            Column(
-                                modifier = Modifier.heightIn(max = 160.dp).verticalScroll(rememberScrollState())
-                            ) {
-                                Text(
-                                    text = state.reason,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                    }
-
-                    Spacer(Modifier.height(Spacing.md))
-                    Text(
-                        text = stringResource(R.string.chat_plan_approval_hint),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.height(Spacing.sm))
-                    Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
-                        AgentActionButton(
-                            text = stringResource(R.string.chat_continue_feedback),
-                            onClick = onRefine,
-                            modifier = Modifier.weight(1f),
-                            tone = AgentActionTone.Neutral
-                        )
-                        AgentActionButton(
-                            text = stringResource(R.string.chat_approve_and_implement),
-                            onClick = onApprove,
-                            modifier = Modifier.weight(1f),
-                            tone = AgentActionTone.Success
-                        )
-                    }
-                }
-            }
         }
     }
 }

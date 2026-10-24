@@ -9,6 +9,7 @@ import com.aicode.feature.agent.data.local.entity.LlmCallRecordEntity
 import com.aicode.feature.agent.data.remote.anthropic.AnthropicApi
 import com.aicode.feature.agent.data.remote.gemini.GeminiApi
 import com.aicode.feature.agent.data.remote.openai.OpenAIApi
+import com.aicode.feature.settings.data.repository.OpenAIAccountRepository
 import com.aicode.feature.agent.domain.model.AgentContext
 import com.aicode.feature.agent.domain.model.AgentImage
 import com.aicode.feature.agent.domain.model.AgentMessage
@@ -62,6 +63,7 @@ class ViewImageTool @Inject constructor(
     private val sessionUseCase: SessionUseCase,
     private val llmCallRecordDao: LlmCallRecordDao,
     private val openAIApi: OpenAIApi,
+    private val openAIAccountRepository: OpenAIAccountRepository,
     private val anthropicApi: AnthropicApi,
     private val geminiApi: GeminiApi
 ) : AbstractContextualTool() {
@@ -303,7 +305,8 @@ class ViewImageTool @Inject constructor(
             val boundModel = session?.model
             if (!boundProviderId.isNullOrBlank()) {
                 val config = aiProviderRepository.getProviderById(boundProviderId)
-                if (config != null && config.isEnabled && config.apiKey.isNotBlank()) {
+                val isOAuthAccount = config?.let(OpenAIAccountRepository::isAccountProvider) == true
+                if (config != null && (config.isEnabled || isOAuthAccount) && config.apiKey.isNotBlank()) {
                     return if (!boundModel.isNullOrBlank()) config.copy(selectedModel = boundModel) else config
                 }
             }
@@ -312,7 +315,8 @@ class ViewImageTool @Inject constructor(
         val defaultModel = defaultModelSettingsRepository.getDefaultModel()
         if (defaultProviderId.isNotBlank() && defaultModel.isNotBlank()) {
             val config = aiProviderRepository.getProviderById(defaultProviderId)
-            if (config != null && config.isEnabled && config.apiKey.isNotBlank()) {
+            val isOAuthAccount = config?.let(OpenAIAccountRepository::isAccountProvider) == true
+            if (config != null && (config.isEnabled || isOAuthAccount) && config.apiKey.isNotBlank()) {
                 return config.copy(selectedModel = defaultModel)
             }
         }
@@ -320,6 +324,11 @@ class ViewImageTool @Inject constructor(
     }
 
     private suspend fun createStandaloneProvider(config: AIProviderConfig, sessionId: String?): AIProvider {
+        val openAIAccountId = OpenAIAccountRepository.accountIdFromProviderMarker(config.apiKey)
+        val accountRoute = if (openAIAccountId != null) {
+            openAIAccountRepository.routeForModel(openAIAccountId, config.effectiveModel)
+                ?: throw IllegalStateException(openAIAccountRepository.noAvailableAccountMessage(config.effectiveModel))
+        } else null
         val provider: AIProvider = when (config.type) {
             ProviderType.ANTHROPIC -> AnthropicAdapter(anthropicApi).also {
                 it.cacheBreakpointsEnabled = config.anthropicCacheBreakpoints
@@ -327,22 +336,30 @@ class ViewImageTool @Inject constructor(
             ProviderType.GEMINI -> GeminiAdapter(geminiApi)
             else -> OpenAIAdapter(openAIApi).also {
                 it.chatCacheKeyEnabled = config.openaiChatCacheKey
+                if (openAIAccountId != null) {
+                    it.chatGptPlanUsage = true
+                    it.chatGptUsageLimitMessage = openAIAccountRepository.usageLimitMessage()
+                }
             }
         }
-        provider.apiKey = config.apiKey
-        provider.baseUrl = config.baseUrl
+        provider.apiKey = if (accountRoute != null) {
+            accountRoute.accessToken
+        } else {
+            config.apiKey
+        }
+        provider.baseUrl = if (accountRoute != null) "https://api.openai.com/" else config.baseUrl
         provider.model = config.effectiveModel
-        provider.useFullUrl = config.useFullUrl
-        provider.useResponseApi = config.useResponseApi
-        provider.providerId = config.id
+        provider.useFullUrl = if (accountRoute != null) false else config.useFullUrl
+        provider.useResponseApi = if (accountRoute != null) true else config.useResponseApi
+        provider.providerId = accountRoute?.providerId ?: config.id
         provider.logSessionId = sessionId
-        provider.customHeaders = config.customHeaders
-        val metadata = modelMetadataService.resolve(config.id, config.type, config.effectiveModel)
+        provider.customHeaders = if (accountRoute != null) emptyMap() else config.customHeaders
+        val metadata = modelMetadataService.resolve(accountRoute?.providerId ?: config.id, config.type, config.effectiveModel)
         provider.maxOutputTokens = metadata.outputTokens
         provider.temperature = if (metadata.supportsCustomTemperature) fixedTemperature(config.effectiveModel) else null
         provider.firstByteTimeoutMs = generalSettingsRepository.firstByteTimeoutMs()
         provider.streamIdleTimeoutMs = generalSettingsRepository.streamIdleTimeoutMs()
-        provider.maxNetworkRetries = generalSettingsRepository.maxNetworkRetries()
+        provider.maxNetworkRetries = if (accountRoute != null) 0 else generalSettingsRepository.maxNetworkRetries()
         return provider
     }
 

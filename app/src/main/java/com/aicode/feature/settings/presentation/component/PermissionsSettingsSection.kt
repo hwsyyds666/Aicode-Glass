@@ -65,8 +65,10 @@ import kotlinx.coroutines.delay
 @Composable
 internal fun PermissionsSection(
     commandAuthLevel: CommandAuthLevel,
+    commandReviewTimeoutSeconds: Int,
     highRiskRules: List<HighRiskRule>,
     onSelectAuthLevel: (CommandAuthLevel) -> Unit,
+    onSelectReviewTimeout: (Int) -> Unit,
     onToggleHighRiskRule: (HighRiskRule, Boolean) -> Unit,
     onSaveHighRiskRule: (HighRiskRule, Boolean) -> Unit,
     onDeleteHighRiskRule: (HighRiskRule) -> Unit,
@@ -120,6 +122,31 @@ internal fun PermissionsSection(
                     }
                 }
             )
+        }
+
+        if (commandAuthLevel == CommandAuthLevel.AUTONOMOUS) {
+            SettingsGroupHeader(text = stringResource(R.string.perm_review_timeout_title))
+            SettingsGroup {
+                Column(
+                    modifier = Modifier.padding(horizontal = Spacing.lg, vertical = Spacing.md),
+                    verticalArrangement = Arrangement.spacedBy(Spacing.sm)
+                ) {
+                    Text(
+                        text = stringResource(R.string.perm_review_timeout_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    SegmentedTabs(
+                        selected = listOf(10, 15, 20).indexOf(commandReviewTimeoutSeconds).coerceAtLeast(0),
+                        labels = listOf(
+                            stringResource(R.string.perm_review_timeout_10s),
+                            stringResource(R.string.perm_review_timeout_15s),
+                            stringResource(R.string.perm_review_timeout_20s)
+                        ),
+                        onSelect = { onSelectReviewTimeout(listOf(10, 15, 20)[it]) }
+                    )
+                }
+            }
         }
 
         // ── 高危拦截规则 ──

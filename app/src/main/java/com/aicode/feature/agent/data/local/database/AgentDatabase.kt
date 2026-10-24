@@ -15,12 +15,14 @@ import com.aicode.feature.agent.data.local.entity.LlmCallRecordEntity
 import com.aicode.feature.agent.data.local.entity.TodoItemEntity
 import com.aicode.feature.settings.data.local.dao.AIProviderDao
 import com.aicode.feature.settings.data.local.entity.AIProviderEntity
+import com.aicode.feature.settings.data.local.dao.OpenAIAccountDao
+import com.aicode.feature.settings.data.local.entity.OpenAIAccountEntity
 import com.aicode.feature.workspace.data.local.dao.RemoteConnectionDao
 import com.aicode.feature.workspace.data.local.entity.RemoteConnectionEntity
 import com.aicode.feature.workspace.data.local.entity.RemoteMountEntity
 
 @Database(
-    entities = [AgentMessageEntity::class, ChatSessionEntity::class, AIProviderEntity::class, RemoteConnectionEntity::class, RemoteMountEntity::class, TodoItemEntity::class, CheckpointEntity::class, CheckpointFileSnapshotEntity::class, LlmCallRecordEntity::class],
+    entities = [AgentMessageEntity::class, ChatSessionEntity::class, AIProviderEntity::class, OpenAIAccountEntity::class, RemoteConnectionEntity::class, RemoteMountEntity::class, TodoItemEntity::class, CheckpointEntity::class, CheckpointFileSnapshotEntity::class, LlmCallRecordEntity::class],
     version = AgentDatabase.SCHEMA_VERSION,
     exportSchema = true
 )
@@ -28,13 +30,14 @@ abstract class AgentDatabase : RoomDatabase() {
     abstract fun agentMessageDao(): AgentMessageDao
     abstract fun chatSessionDao(): ChatSessionDao
     abstract fun aiProviderDao(): AIProviderDao
+    abstract fun openAIAccountDao(): OpenAIAccountDao
     abstract fun remoteConnectionDao(): RemoteConnectionDao
     abstract fun todoItemDao(): TodoItemDao
     abstract fun checkpointDao(): CheckpointDao
     abstract fun llmCallRecordDao(): LlmCallRecordDao
 
     companion object {
-        const val SCHEMA_VERSION = 59
+        const val SCHEMA_VERSION = 66
 
         /** 数据库文件名（落在 `databases/` 下，另有 Room 默认 WAL 模式产生的 `-wal`/`-shm`）。 */
         const val DATABASE_NAME = "aicode_agent_db"

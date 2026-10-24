@@ -443,6 +443,100 @@ class OpenAIAdapterTest {
         assertEquals("length", result.stopReason)
     }
 
+    @Test
+    fun chatGptPlanCompleteUsesNonStoredResponsesStream() = runTest {
+        val api = api()
+        val requestSlot = slot<Any>()
+        every { api.streamResponses(any(), any(), any(), capture(requestSlot)) } returns sseCall(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}"
+        )
+
+        val result = adapter(api).apply {
+            useResponseApi = true
+            chatGptPlanUsage = true
+        }.complete("", listOf(AgentMessage.UserMessage(content = "hello")))
+
+        val request = requestSlot.captured as Map<*, *>
+        assertEquals(false, request["store"])
+        assertEquals(true, request["stream"])
+        assertEquals("ok", result.content)
+        assertEquals(2, result.inputTokens)
+        assertEquals(1, result.outputTokens)
+    }
+
+    @Test
+    fun chatGptPlanStream_doesNotEmitAccountSwitchEvents() = runTest {
+        val api = api()
+        every { api.streamResponses(any(), any(), any(), any()) } returns sseCall(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}}"
+        )
+
+        val chunks = adapter(api).apply {
+            useResponseApi = true
+            chatGptPlanUsage = true
+        }.completeStream("", emptyList()).toList()
+
+        assertEquals("ok", chunks.filterIsInstance<AIStreamChunk.Final>().single().response.content)
+    }
+
+    @Test
+    fun chatGptPlanUsageLimit_doesNotRetryOrSwitchAccounts() = runTest {
+        val api = api()
+        var requests = 0
+        val authorizationHeaders = mutableListOf<String>()
+        every { api.streamResponses(any(), any(), any(), any()) } answers {
+            authorizationHeaders += secondArg<String>()
+            requests++
+            sseCall("data: {\"type\":\"error\",\"code\":\"subscription_sharing_usage_limit_exceeded\",\"request_id\":\"req-1\"}")
+        }
+        val provider = adapter(api).apply {
+            useResponseApi = true
+            chatGptPlanUsage = true
+            maxNetworkRetries = 0
+        }
+
+        try {
+            provider.completeStream("", emptyList()).toList()
+            org.junit.Assert.fail("Expected the official usage-limit response")
+        } catch (error: SubscriptionSharingUsageLimitException) {
+            assertEquals("req-1", error.requestId)
+        }
+        assertEquals(1, requests)
+        assertEquals(listOf("Bearer k"), authorizationHeaders)
+    }
+
+    @Test
+    fun chatGptPlanUsageLimit_doesNotSwitchAfterAnyResponseOutput() = runTest {
+        val api = api()
+        var requests = 0
+        every { api.streamResponses(any(), any(), any(), any()) } answers {
+            requests++
+            sseCall(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}",
+                "data: {\"type\":\"error\",\"code\":\"subscription_sharing_usage_limit_exceeded\",\"request_id\":\"req-2\"}"
+            )
+        }
+        val chunks = mutableListOf<AIStreamChunk>()
+        val provider = adapter(api).apply {
+            useResponseApi = true
+            chatGptPlanUsage = true
+            maxNetworkRetries = 0
+        }
+
+        try {
+            provider.completeStream("", emptyList()).toList(chunks)
+            org.junit.Assert.fail("Expected the usage-limit response after partial output")
+        } catch (_: SubscriptionSharingUsageLimitException) {
+            // Expected: the partial response must not be mixed with another account's response.
+        }
+
+        assertEquals(1, requests)
+        assertTrue(chunks.any { it is AIStreamChunk.TextDelta && it.text == "partial" })
+        assertTrue(chunks.none { it is AIStreamChunk.KeySwitched })
+    }
+
     // ── Chat Completions 流式 ─────────────────────────────────────────
 
     private fun sseCall(vararg lines: String): Call<ResponseBody> {

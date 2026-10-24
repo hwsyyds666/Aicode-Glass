@@ -65,6 +65,7 @@ data class BackupOptions(
 
 data class RestoreStats(
     val providers: Int = 0,
+    val openAIAccounts: Int = 0,
     val remoteConnections: Int = 0,
     val remoteMounts: Int = 0,
     val chatSessions: Int = 0,
@@ -76,6 +77,7 @@ data class RestoreStats(
 ) {
     operator fun plus(other: RestoreStats) = RestoreStats(
         providers = providers + other.providers,
+        openAIAccounts = openAIAccounts + other.openAIAccounts,
         remoteConnections = remoteConnections + other.remoteConnections,
         remoteMounts = remoteMounts + other.remoteMounts,
         chatSessions = chatSessions + other.chatSessions,

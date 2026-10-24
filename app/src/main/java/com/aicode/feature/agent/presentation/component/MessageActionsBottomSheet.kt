@@ -31,6 +31,7 @@ import com.aicode.feature.agent.presentation.hasVisibleContent
 import compose.icons.FeatherIcons
 import compose.icons.feathericons.Copy
 import compose.icons.feathericons.Edit2
+import compose.icons.feathericons.RotateCcw
 import compose.icons.feathericons.Trash2
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -39,6 +40,7 @@ internal fun MessageActionsBottomSheet(
     message: AgentUIMessage,
     onDismiss: () -> Unit,
     onEditClick: () -> Unit,
+    onRegenerateClick: () -> Unit,
     onCopyClick: () -> Unit,
     onDeleteClick: () -> Unit
 ) {
@@ -73,6 +75,19 @@ internal fun MessageActionsBottomSheet(
                     onEditClick()
                 }
             )
+
+            if (message.role == com.aicode.feature.agent.presentation.MessageRole.ASSISTANT &&
+                !message.isBackgroundNotification && !message.isContextSummary
+            ) {
+                MessageActionItem(
+                    icon = FeatherIcons.RotateCcw,
+                    title = stringResource(R.string.chat_action_regenerate),
+                    onClick = {
+                        onDismiss()
+                        onRegenerateClick()
+                    }
+                )
+            }
 
             // 复制文本：纯图片消息没有文字可复制，隐藏该项
             if (message.content.hasVisibleContent()) {

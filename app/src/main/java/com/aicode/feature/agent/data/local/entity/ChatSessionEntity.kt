@@ -3,6 +3,7 @@ package com.aicode.feature.agent.data.local.entity
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import androidx.room.ColumnInfo
 import com.aicode.feature.agent.domain.model.AgentMode
 import com.aicode.feature.agent.domain.model.ChatSession
 import com.aicode.feature.agent.domain.model.ReasoningEffort
@@ -30,7 +31,20 @@ data class ChatSessionEntity(
     /** 子代理会话：父会话 id；null 表示普通根会话。 */
     val parentId: String? = null,
     /** 子代理会话：派生子代理的类型（如 coder / researcher）；null 表示普通根会话。 */
-    val subagentType: String? = null
+    val subagentType: String? = null,
+    /** Persisted lifecycle state for child agents; null for root/legacy sessions. */
+    val subagentStatus: String? = null,
+    /** Newline-separated canonical writable path scopes; null means legacy unrestricted behavior. */
+    val allowedWritePaths: String? = null,
+    /** Newline-separated readable path scopes; null means legacy unrestricted behavior. */
+    val allowedReadPaths: String? = null,
+    /** Lifetime child-agent dispatch counter for enforcing the per-parent cap across restarts/deletions. */
+    @ColumnInfo(defaultValue = "0") val subagentCreatedCount: Int = 0,
+    /** Number of bounded post-completion rework rounds requested for this child. */
+    @ColumnInfo(defaultValue = "0") val subagentReworkCount: Int = 0,
+    @ColumnInfo(defaultValue = "0") val superAgentEnabled: Boolean = false,
+    /** User-message id in the parent chat that dispatched this child; null for root sessions. */
+    val dispatchMessageId: String? = null
 ) {
     fun toDomain(): ChatSession = ChatSession(
         id = id,
@@ -48,7 +62,14 @@ data class ChatSessionEntity(
         lastInputTokens = lastInputTokens,
         isPinned = isPinned,
         parentId = parentId,
-        subagentType = subagentType
+        subagentType = subagentType,
+        subagentStatus = subagentStatus,
+        allowedWritePaths = allowedWritePaths,
+        allowedReadPaths = allowedReadPaths,
+        subagentCreatedCount = subagentCreatedCount,
+        subagentReworkCount = subagentReworkCount,
+        superAgentEnabled = superAgentEnabled,
+        dispatchMessageId = dispatchMessageId
     )
 
     companion object {
@@ -68,7 +89,14 @@ data class ChatSessionEntity(
             lastInputTokens = session.lastInputTokens,
             isPinned = session.isPinned,
             parentId = session.parentId,
-            subagentType = session.subagentType
+            subagentType = session.subagentType,
+            subagentStatus = session.subagentStatus,
+            allowedWritePaths = session.allowedWritePaths,
+            allowedReadPaths = session.allowedReadPaths,
+            subagentCreatedCount = session.subagentCreatedCount,
+            subagentReworkCount = session.subagentReworkCount,
+            superAgentEnabled = session.superAgentEnabled,
+            dispatchMessageId = session.dispatchMessageId
         )
     }
 }

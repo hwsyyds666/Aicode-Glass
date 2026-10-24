@@ -21,6 +21,14 @@ For custom setup, three fields are enough: **Upstream Format**, **API Key** and 
 
 After setup, switch to the "Models" tab to fetch models, then you can head back to the home page and start chatting.
 
+## Official ChatGPT accounts
+
+The "ChatGPT accounts" entry at the top of the vendor page uses [OpenAI's official Sign in with ChatGPT flow](https://developers.openai.com/siwc/token-sharing-open-source/sign-in). OAuth tokens are encrypted on this device in a database protected by Android Keystore, and inference goes directly to `api.openai.com`. The model catalog is refreshed from the selected account's official `/v1/models` endpoint. The chat header shows the model and the OpenAI account used by the current session.
+
+Only one ChatGPT plan-usage profile may be stored on this device. Remove the existing profile before connecting a replacement. OpenAI's [SIWC Terms](https://openai.com/policies/sign-in-with-chatgpt-terms/) prohibit creating multiple accounts, splitting usage, or rotating accounts to bypass limits; do not replace accounts for that purpose. Account cards support enable/disable, model refresh, quota refresh, reauthorization, and deletion with confirmation. Local request and token totals are app statistics, not remaining ChatGPT plan quota. Quota snapshots use an undocumented OpenAI usage endpoint and may change; OpenAI's usage page is authoritative.
+
+A session always stays on the explicitly selected account. The app does not rank accounts by quota, switch to another account, or retry with another account after `subscription_sharing_usage_limit_exceeded`. The usage-limit error is surfaced with its request ID, if available; wait for usage to reset or check OpenAI's usage page. If quota refresh is unavailable, the app does not invent values.
+
 ## Managing the Vendor List
 
 Each row shows the name, upstream format, model count and enabled status.

@@ -4,6 +4,18 @@
 
 右上角的钥匙图标进入「凭据与署名」页，内含署名和凭据两个标签页——**首次使用必须先配好署名，否则无法提交**。
 
+## GitHub 工作区
+
+从聊天工具栏的工作区文件夹入口打开工作区浮窗，点「添加 GitHub 仓库」即可连接账号并克隆仓库。首次使用需要准备一个自己的 GitHub OAuth App Client ID：在 GitHub 的 Settings → Developer settings → OAuth Apps 中注册应用，打开 **Enable Device Flow**，复制 Client ID 粘贴到 AiCode。Device Flow 不使用客户端密钥或回调跳转；如果注册表单要求填写 callback URL，该地址不会参与本流程。可将应用主页和 callback URL 填为项目主页。具体字段以 [GitHub OAuth App 注册说明](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app) 为准。
+
+点「连接 GitHub」后，应用会显示一次性验证码并打开 GitHub 验证页面；完成网页授权后，应用会自动检测授权结果。授权请求包含 `repo` 与 `read:user`：GitHub OAuth App 的 `repo` 权限覆盖你有权访问的公开及私有仓库读写，范围较宽，请确认信任后再授权；应用不会申请 workflow 或管理权限。组织仓库是否可见还受组织授权和 SSO 策略影响。
+
+连接后可按仓库名、说明、组织/所有者筛选，按页加载仓库并查看公开/私有和更新时间。选择仓库后，应用会在当前工作区根目录下创建本地工作区，显示 Git 克隆进度；空仓库也会正常加入。克隆成功后，新工作区会出现在浮窗列表并标记来源。断开账号只会清除授权，不会删除已经克隆的工作区。
+
+需要创建 Pull Request 时，可以明确要求 Agent 创建。它会通过 GitHub API 创建当前工作区对应仓库的 PR，并要求你逐次确认；工具会核对 `origin` 与当前源分支，只接受已推送到该仓库的分支，不会替你推送代码。令牌只在应用侧发起 API 请求，不进入模型上下文。
+
+令牌使用 Android Keystore 加密保存；本地 Git 认证时由应用内凭据助手短暂交给容器，不会写入远程地址或 AI 对话。远程 SSH 模式下不会把本机令牌转发到服务器，因此私有仓库需切换到本地容器克隆。验证码过期或授权被撤销时重新连接；API 限流会显示建议等待时间；网络不可用时可稍后重试。
+
 ## 状态
 
 查看当前仓库的工作区状态。

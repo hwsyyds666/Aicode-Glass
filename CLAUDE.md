@@ -32,6 +32,19 @@
 - release 签名凭据读 `app/keystore.properties`（`storeFile` / `storePassword` / `keyAlias` / `keyPassword`）；本地通常不存放签名文件，CI 从 GitHub secret 还原到 `app/aicode.jks`。
 - **`targetSdk` 锁定 28**（`minSdk = 26`）：PRoot 需在 App 可写目录执行二进制，Android 10+ 的 W^X / SELinux 禁止该行为，别升。
 
+## 性能预算与修改规则
+
+体验保护优先于微基准收益，不得用限帧、静态化或省电降级换指标。目标预算：冷启动 < 2 秒、流式输出期间帧率 > 50 fps、聊天滚动 jank < 5%；这些是待真机测量的目标，不代表当前已达标。性能变更记录测量设备、场景、指标与前后结果；无法在本地证明的项目标为待真机验收。
+
+- **状态订阅就近**：StateFlow 在实际显示该状态的页面/子组件内订阅；新功能状态放自己的 ViewModel 或状态持有者，不往 `AIAgentViewModel` 堆。
+- **惰性列表**：`LazyColumn` / `LazyRow` 项提供稳定 `key`；异构项同时提供 `contentType`，避免状态错位与无谓重组。
+- **绘制期不分配**：`Canvas` / `DrawScope` / `drawWithContent` 中不创建集合、正则、Path 或临时对象；派生值在组合期按真实依赖 `remember`，绘制阶段只读。
+- **流式进度合并**：高频工具输出最多每 60ms 合并一次；完成、失败、取消等终态必须立即冲刷最新缓冲值，不得丢尾部输出。
+- **动画**：保持前台动画的相位、时长、缓动、帧率与视觉反馈；只在证明不改变体验时共享时钟。动画随内容离开组合而停止，并核实切后台/息屏时无意义绘制会暂停、返回前台可正确恢复。
+- **主线程无阻塞 IO**：文件、网络、数据库及 shell 等阻塞操作放到合适的 IO/后台调度器；避免在主线程使用 `runBlocking`。
+- **大小有上限**：读取、解码、复制或打包用户文件前先检查大小/像素/条目数，超限时给出明确错误，不先完整读入内存再判断。
+- **状态归属**：新增跨页面或生命周期较长的功能要有独立状态所有者；只有确实属于 agent 主流程的状态才放进 `AIAgentViewModel`，并在交付报告说明新增状态和行数变化。
+
 ## 架构地图
 
 feature-based 分层 + DDD。入口 `AIEditorApp` 初始化 `FileLogger`、`TerminalKeepaliveService`、`McpManager`。
@@ -47,6 +60,10 @@ feature-based 分层 + DDD。入口 `AIEditorApp` 初始化 `FileLogger`、`Term
 - **工具系统**：`feature/agent/domain/tool/` 下各工具经 `ToolRegistry` 注册，执行权限由 `ToolPermissionManager` 与 `ToolPermissionPolicyEngine` 管控。
 - **MCP**：`feature/agent/domain/mcp/`，连接远端 server 并动态注册其工具。**DI**：Hilt，各 feature 自带 DI 模块。
 
+### OAuth 凭据边界
+
+OpenAI / GitHub 的访问与续期令牌必须用 Android Keystore 保护后仅保存在本机；不得进入日志、提示词、普通供应商配置、导出备份或 URL。OpenAI 官方账号的 provider `apiKey` 是内部标记，不是 bearer token；路由时才短暂解密真实凭据，OAuth 请求强制官方 HTTPS 域名与官方 API 根地址。套餐额度读取依赖未公开、可能变化的接口，界面和用户文档必须明确披露。SIWC 计划用量凭据只允许连接一个账号，禁止按额度排序、切换或自动轮换账号；收到用量限制后原样报告，不以其他账号重试。
+
 ### 数据库与迁移
 
 Room（`feature/agent/data/local/database/AgentDatabase.kt` + 各 DAO），迁移分两套，**一个版本只能二选一**：
@@ -56,7 +73,7 @@ Room（`feature/agent/data/local/database/AgentDatabase.kt` + 各 DAO），迁�
 
 改 schema 三步：
 
-1. 递增 `AgentDatabase.kt` 的 `SCHEMA_VERSION`（当前 55）。
+1. 递增 `AgentDatabase.kt` 的 `SCHEMA_VERSION`（当前 66）。
 2. 文件式：在 `app/src/main/assets/migrations/` 新建 `{VERSION}_description.sql`（如 `46_add_provider_multi_key.sql`），**编号必须连续**；AutoMigration：加注解，保证 `to == SCHEMA_VERSION` 且 `from` 衔接文件式最大版本。
 3. 写入 DDL/SQL，启动时自动执行并记入 `migration_history` 表。
 

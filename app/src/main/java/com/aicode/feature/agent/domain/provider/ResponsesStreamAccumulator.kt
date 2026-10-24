@@ -152,7 +152,9 @@ internal sealed class ResponsesDelta {
  * 终止事件（completed / incomplete）携带完整 response 对象，用于兜底补齐、取 usage 与 status；
  * failed 直接抛 [StreamApiException] 交给重试判定。
  */
-internal class ResponsesStreamAccumulator {
+internal class ResponsesStreamAccumulator(
+    private val usageLimitMessage: String = "ChatGPT app usage limit reached"
+) {
     var receivedContent: Boolean = false
         private set
 
@@ -179,6 +181,9 @@ internal class ResponsesStreamAccumulator {
 
     /** 是否已收到终止事件。未收到就断流说明流被截断，调用方应按异常处理。 */
     var terminated = false
+        private set
+
+    var completedSuccessfully = false
         private set
 
     /** 断流降级标记：正文收到一部分但没等到终止事件，见 [markNetworkTruncated]。 */
@@ -273,6 +278,7 @@ internal class ResponsesStreamAccumulator {
             ResponsesEvent.COMPLETED, ResponsesEvent.INCOMPLETE -> {
                 // 先置位：终止语义不能受 response 对象解析异常影响，否则调用方会继续读到流尾、误报断流。
                 terminated = true
+                completedSuccessfully = event.str("type") == ResponsesEvent.COMPLETED
                 absorbFinalResponse(event.obj("response"))
             }
 
@@ -281,6 +287,14 @@ internal class ResponsesStreamAccumulator {
                 val response = event.obj("response")
                 absorbFinalResponse(response)
                 val error = response?.obj("error") ?: event.obj("error")
+                if (error?.str("code") == "subscription_sharing_usage_limit_exceeded") {
+                    throw SubscriptionSharingUsageLimitException(
+                        statusCode = 429,
+                        requestId = event.str("request_id"),
+                        errorParam = error?.str("param"),
+                        message = usageLimitMessage
+                    )
+                }
                 throw StreamApiException(
                     code = error?.str("code"),
                     message = error?.str("message") ?: "Responses 流以 response.failed 结束"
@@ -288,10 +302,20 @@ internal class ResponsesStreamAccumulator {
             }
 
             // 传输层错误事件：code / message 就在事件自身上（不嵌在 error 对象里）。
-            ResponsesEvent.ERROR, ResponsesEvent.RESPONSE_ERROR -> throw StreamApiException(
-                code = event.str("code"),
-                message = event.str("message") ?: "Responses 流返回 error 事件"
-            )
+            ResponsesEvent.ERROR, ResponsesEvent.RESPONSE_ERROR -> {
+                if (event.str("code") == "subscription_sharing_usage_limit_exceeded") {
+                    throw SubscriptionSharingUsageLimitException(
+                        statusCode = 429,
+                        requestId = event.str("request_id"),
+                        errorParam = event.str("param"),
+                        message = event.str("message") ?: usageLimitMessage
+                    )
+                }
+                throw StreamApiException(
+                    code = event.str("code"),
+                    message = event.str("message") ?: "Responses 流返回 error 事件"
+                )
+            }
         }
         return null
     }

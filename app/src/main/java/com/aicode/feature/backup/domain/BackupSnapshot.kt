@@ -18,6 +18,8 @@ data class BackupSnapshot(
     val appVersion: String = "",
     val createdAt: Long,
     val providers: List<ProviderDto> = emptyList(),
+    /** OpenAI account metadata only; OAuth tokens are never exported. */
+    val openAIAccounts: List<OpenAIAccountBackupDto> = emptyList(),
     val remoteConnections: List<RemoteConnectionDto> = emptyList(),
     val remoteMounts: List<RemoteMountDto> = emptyList(),
     val chatSessions: List<ChatSessionDto> = emptyList(),
@@ -60,6 +62,8 @@ data class BackupMetadata(
     val appVersion: String = "",
     val createdAt: Long,
     val providers: List<ProviderDto> = emptyList(),
+    /** OpenAI account metadata only; OAuth tokens are never exported. */
+    val openAIAccounts: List<OpenAIAccountBackupDto> = emptyList(),
     val remoteConnections: List<RemoteConnectionDto> = emptyList(),
     val remoteMounts: List<RemoteMountDto> = emptyList(),
     val mcpServers: List<McpServerConfig> = emptyList(),
@@ -101,6 +105,7 @@ fun BackupSnapshot.toMetadata() = BackupMetadata(
     appVersion = appVersion,
     createdAt = createdAt,
     providers = providers,
+    openAIAccounts = openAIAccounts,
     remoteConnections = remoteConnections,
     remoteMounts = remoteMounts,
     mcpServers = mcpServers,
@@ -127,6 +132,24 @@ fun BackupSnapshot.toMetadata() = BackupMetadata(
     compactionProviderId = compactionProviderId,
     compactionModel = compactionModel,
     syncSettings = syncSettings
+)
+
+/** Non-secret profile metadata required to reauthorize an account after restore. */
+@Serializable
+data class OpenAIAccountBackupDto(
+    val id: String,
+    val providerId: String,
+    val clientId: String,
+    val email: String,
+    val displayName: String,
+    val hostId: String = "",
+    val modelCatalogJson: String = "[]",
+    val providerName: String = "OpenAI",
+    val models: String = "",
+    val selectedModel: String = "",
+    val providerEnabled: Boolean = true,
+    val sortOrder: Int = -1,
+    val createdAt: Long = 0L
 )
 
 @Serializable

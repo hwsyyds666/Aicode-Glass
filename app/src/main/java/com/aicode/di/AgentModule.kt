@@ -52,6 +52,7 @@ import com.aicode.feature.agent.domain.workflow.AgentWorkflow
 import com.aicode.feature.agent.domain.tool.ToolPermissionManager
 import com.aicode.feature.agent.domain.permission.ToolPermissionPolicyEngine
 import com.aicode.feature.agent.domain.tool.ToolRegistry
+import com.aicode.feature.agent.domain.tool.git.CreatePullRequestTool
 import com.aicode.feature.agent.domain.tool.ToolInvoker
 import com.aicode.feature.settings.data.remote.ModelMetadataService
 import com.aicode.feature.terminal.domain.DelegatingTerminalSessionProvider
@@ -92,7 +93,6 @@ import com.aicode.feature.agent.domain.session.MessagePersistenceUseCase
 import com.aicode.feature.agent.domain.session.SessionUseCase
 import com.aicode.feature.agent.domain.tool.mcp.ManageMcpTool
 import com.aicode.feature.agent.domain.tool.memory.MemoryTool
-import com.aicode.feature.agent.domain.tool.mode.PlanApprovalManager
 import com.aicode.feature.agent.domain.tool.mode.PlanModeTool
 import com.aicode.feature.agent.domain.tool.search.WebFetchTool
 import com.aicode.feature.agent.domain.tool.search.WebSearchTool
@@ -104,6 +104,8 @@ import com.aicode.feature.settings.data.repository.DefaultModelSettingsRepositor
 import com.aicode.feature.settings.data.repository.GeneralSettingsRepository
 import com.aicode.feature.settings.data.repository.LanguageSettingsRepository
 import com.aicode.feature.settings.data.repository.ProviderKeyRotator
+import com.aicode.feature.settings.data.repository.OpenAIAccountRepository
+import com.aicode.feature.settings.data.local.dao.OpenAIAccountDao
 import com.aicode.feature.settings.data.repository.ReviewerModelSettingsRepository
 import com.aicode.feature.settings.data.repository.TitleModelSettingsRepository
 import com.aicode.feature.workspace.data.local.dao.RemoteConnectionDao
@@ -146,6 +148,12 @@ object AgentModule {
     @Singleton
     fun provideAIProviderDao(database: AgentDatabase): AIProviderDao {
         return database.aiProviderDao()
+    }
+
+    @Provides
+    @Singleton
+    fun provideOpenAIAccountDao(database: AgentDatabase): OpenAIAccountDao {
+        return database.openAIAccountDao()
     }
 
     @Provides
@@ -399,7 +407,8 @@ object AgentModule {
         memoryTool: MemoryTool,
         taskTool: TaskTool,
         messageParentTool: MessageParentTool,
-        browserTool: BrowserTool
+        browserTool: BrowserTool,
+        createPullRequestTool: CreatePullRequestTool
     ): ToolRegistry {
         return ToolRegistry().apply {
             register("readFile", readFileTool)
@@ -426,6 +435,7 @@ object AgentModule {
             register("task", taskTool)
             register("messageParent", messageParentTool)
             register("browser", browserTool)
+            register("createPullRequest", createPullRequestTool)
         }
     }
 
@@ -446,7 +456,6 @@ object AgentModule {
         permissionManager: ToolPermissionManager,
         policyEngine: ToolPermissionPolicyEngine,
         contextCompactor: ContextCompactor,
-        planApprovalManager: PlanApprovalManager,
         modelMetadataService: ModelMetadataService,
         compactionModelSettingsRepository: CompactionModelSettingsRepository,
         titleModelSettingsRepository: TitleModelSettingsRepository,
@@ -459,6 +468,7 @@ object AgentModule {
         checkpointManager: CheckpointManager,
         llmCallRecordDao: LlmCallRecordDao,
         keyRotator: ProviderKeyRotator,
+        openAIAccountRepository: OpenAIAccountRepository,
         agentNotificationCenter: AgentNotificationCenter,
         eventInjector: AgentEventInjector,
         fileAccess: FileAccessProvider
@@ -474,7 +484,6 @@ object AgentModule {
             permissionManager,
             policyEngine,
             contextCompactor,
-            planApprovalManager,
             modelMetadataService,
             compactionModelSettingsRepository,
             titleModelSettingsRepository,
@@ -487,6 +496,7 @@ object AgentModule {
             checkpointManager,
             llmCallRecordDao,
             keyRotator,
+            openAIAccountRepository,
             agentNotificationCenter,
             eventInjector,
             fileAccess

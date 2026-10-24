@@ -69,6 +69,8 @@ class DelegatingFileAccess @Inject constructor(
 
     override suspend fun copyToLocal(path: String): File = delegate().copyToLocal(path)
 
+    override suspend fun sha256(path: String, maxBytes: Long): String? = delegate().sha256(path, maxBytes)
+
     override suspend fun delete(path: String) = delegate().delete(path)
 
     override suspend fun deleteRecursively(path: String) = delegate().deleteRecursively(path)

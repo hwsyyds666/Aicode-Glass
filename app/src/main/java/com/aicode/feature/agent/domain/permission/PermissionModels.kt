@@ -20,7 +20,7 @@ enum class PermissionDecision { ALLOW, DENY }
  * - [ONCE]：仅放行本次，不记忆。
  * - [ALWAYS]：放行并记忆为规则（弹窗路径固定写入当前项目 scope）。
  */
-enum class PermissionChoice { REJECT, ONCE, ALWAYS }
+enum class PermissionChoice { REJECT, ONCE, ALWAYS, REVIEW }
 
 /**
  * 一条工具授权规则。

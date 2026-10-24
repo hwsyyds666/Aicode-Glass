@@ -1,6 +1,7 @@
 package com.aicode.feature.workspace.presentation.component
 
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -12,16 +13,22 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.Image
 import androidx.compose.material3.AlertDialog
+import androidx.compose.ui.window.Dialog
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -42,10 +49,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import android.content.Context
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.aicode.core.theme.Radius
@@ -55,6 +64,7 @@ import com.aicode.feature.workspace.domain.model.WorkspaceType
 import com.aicode.feature.workspace.presentation.WorkspaceViewModel
 import compose.icons.FeatherIcons
 import compose.icons.feathericons.Folder
+import compose.icons.feathericons.Github
 import compose.icons.feathericons.HardDrive
 import compose.icons.feathericons.MoreHorizontal
 import compose.icons.feathericons.Plus
@@ -62,6 +72,11 @@ import compose.icons.feathericons.Trash2
 import androidx.compose.ui.res.stringResource
 import android.widget.Toast
 import com.aicode.R
+import java.io.ByteArrayOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -112,6 +127,299 @@ fun WorkspaceChip(
         onSwitchConfirmed = onSwitchConfirmed
     )
 }
+
+@Composable
+private fun GitHubRepositoriesDialog(
+    viewModel: WorkspaceViewModel,
+    onDismiss: () -> Unit,
+    onWorkspaceCreated: (Workspace) -> Unit
+) {
+    val state by viewModel.github.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    var query by remember { mutableStateOf("") }
+    var ownerFilter by remember { mutableStateOf("") }
+    var showPrivate by remember { mutableStateOf(true) }
+    var showPublic by remember { mutableStateOf(true) }
+
+    LaunchedEffect(state.account?.login, state.repositories.size) {
+        if (state.account != null && state.repositories.isEmpty() && !state.loadingRepositories) {
+            viewModel.loadGitHubRepositories(reset = true)
+        }
+    }
+    LaunchedEffect(state.deviceCode?.verificationUri) {
+        state.deviceCode?.verificationUri?.let { uri -> openExternalGitHubUri(context, uri) }
+    }
+
+    val filteredRepos = remember(state.repositories, query, ownerFilter, showPrivate, showPublic) {
+        state.repositories.filter { repo ->
+            (showPrivate || !repo.private) && (showPublic || repo.private) &&
+                (ownerFilter.isBlank() || repo.owner.contains(ownerFilter.trim(), ignoreCase = true)) &&
+                (query.isBlank() || repo.fullName.contains(query.trim(), ignoreCase = true) ||
+                    repo.description.orEmpty().contains(query.trim(), ignoreCase = true))
+        }
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        androidx.compose.material3.Surface(
+            modifier = Modifier.fillMaxWidth().fillMaxHeight(0.88f).widthIn(max = 640.dp),
+            shape = RoundedCornerShape(Radius.lg),
+            color = MaterialTheme.colorScheme.surface
+        ) {
+            Column(Modifier.fillMaxSize().padding(Spacing.lg)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        stringResource(R.string.workspace_github_title),
+                        style = MaterialTheme.typography.titleLarge,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) }
+                }
+
+                val account = state.account
+                if (account == null) {
+                    if (state.clientId.isBlank()) {
+                        // 此版本未内置 GitHub OAuth App：给出注册指引。用户零输入——
+                        // 连接只需要点「连接 GitHub」，client_id 由应用内置（Device Flow 无需 secret）。
+                        Text(
+                            stringResource(R.string.workspace_github_not_configured),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = Spacing.sm)
+                        )
+                    } else {
+                        Text(
+                            stringResource(R.string.workspace_github_scope_warning),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.tertiary,
+                            modifier = Modifier.padding(bottom = Spacing.sm)
+                        )
+                    }
+                    state.deviceCode?.let { code ->
+                        Spacer(Modifier.height(Spacing.md))
+                        Text(stringResource(R.string.workspace_github_user_code, code.userCode), style = MaterialTheme.typography.titleMedium)
+                        TextButton(onClick = { openExternalGitHubUri(context, code.verificationUri) }) {
+                            Text(stringResource(R.string.workspace_github_open_authorization))
+                        }
+                        val remaining = state.authorizationRemainingSeconds
+                        if (remaining != null) {
+                            Text(
+                                stringResource(R.string.workspace_github_waiting, remaining),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    // 一键连接：始终展示按钮。client_id 缺省走内置/已存值，
+                    // 两者都空时由 ViewModel 给出注册指引（不再要求用户手填 ID）。
+                    Spacer(Modifier.height(Spacing.md))
+                    androidx.compose.material3.Button(
+                        onClick = { viewModel.connectGitHub() },
+                        enabled = !state.authorizing,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        if (state.authorizing && state.deviceCode == null) {
+                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(Spacing.sm))
+                        }
+                        Text(stringResource(if (state.authorizing) R.string.workspace_github_authorizing else R.string.workspace_github_connect))
+                    }
+                    if (state.authorizing && state.deviceCode != null) {
+                        TextButton(onClick = viewModel::cancelGitHubAuthorization, modifier = Modifier.align(Alignment.CenterHorizontally)) {
+                            Text(stringResource(R.string.common_cancel))
+                        }
+                    }
+                } else {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        GitHubAccountAvatar(account.avatarUrl)
+                        Spacer(Modifier.width(Spacing.sm))
+                        Column(Modifier.weight(1f)) {
+                            Text(account.login, style = MaterialTheme.typography.titleMedium)
+                            Text(stringResource(R.string.workspace_github_connected), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        TextButton(
+                            enabled = state.cloningRepository == null,
+                            onClick = viewModel::disconnectGitHub
+                        ) { Text(stringResource(R.string.workspace_github_disconnect)) }
+                    }
+                    AppTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        label = stringResource(R.string.workspace_github_search),
+                        singleLine = true,
+                        colors = dialogTextFieldColors()
+                    )
+                    AppTextField(
+                        value = ownerFilter,
+                        onValueChange = { ownerFilter = it },
+                        label = stringResource(R.string.workspace_github_owner_filter),
+                        singleLine = true,
+                        colors = dialogTextFieldColors()
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = showPrivate, onCheckedChange = { showPrivate = it })
+                        Text(stringResource(R.string.workspace_github_private))
+                        Checkbox(checked = showPublic, onCheckedChange = { showPublic = it })
+                        Text(stringResource(R.string.workspace_github_public))
+                        Spacer(Modifier.weight(1f))
+                        if (state.loadingRepositories) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    }
+                    if (state.repositories.isEmpty() && !state.loadingRepositories) {
+                        Text(stringResource(R.string.workspace_github_empty), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(Spacing.xs)
+                        ) {
+                            items(filteredRepos, key = { it.id }) { repo ->
+                                Column(
+                                    Modifier.fillMaxWidth().clip(RoundedCornerShape(Radius.sm))
+                                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+                                        .padding(Spacing.sm)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(repo.fullName, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                                        Text(
+                                            stringResource(if (repo.private) R.string.workspace_github_private else R.string.workspace_github_public),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    repo.description?.let {
+                                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            stringResource(R.string.workspace_github_updated, repo.updatedAt.take(10)),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        TextButton(
+                                            enabled = !repo.archived && state.cloningRepository == null,
+                                            onClick = {
+                                                viewModel.cloneGitHubRepository(repo) { workspace ->
+                                                    if (workspace != null) onWorkspaceCreated(workspace)
+                                                }
+                                            }
+                                        ) {
+                                            Text(stringResource(if (repo.archived) R.string.workspace_github_archived else R.string.workspace_github_clone))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (state.nextPage != null) {
+                        TextButton(
+                            enabled = !state.loadingRepositories,
+                            onClick = { viewModel.loadGitHubRepositories(reset = false) },
+                            modifier = Modifier.align(Alignment.CenterHorizontally)
+                        ) { Text(stringResource(R.string.workspace_github_load_more)) }
+                    }
+                    state.cloningRepository?.let { repo ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(stringResource(R.string.workspace_github_cloning, repo), style = MaterialTheme.typography.bodySmall)
+                                Text(state.cloneProgress.orEmpty(), style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            }
+                            TextButton(onClick = viewModel::cancelGitHubClone) {
+                                Text(stringResource(R.string.workspace_github_cancel_clone))
+                            }
+                        }
+                        androidx.compose.material3.LinearProgressIndicator(
+                            progress = { (state.cloneProgressPercent ?: 0).coerceIn(0, 100) / 100f },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+
+                state.error?.let { error ->
+                    Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = Spacing.sm))
+                }
+            }
+        }
+    }
+}
+
+/** Always hand GitHub authorization to the device browser instead of an in-app URI handler. */
+private fun openExternalGitHubUri(context: Context, value: String) {
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(value)).apply {
+        addCategory(Intent.CATEGORY_BROWSABLE)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    runCatching { context.startActivity(intent) }
+}
+
+@Composable
+private fun GitHubAccountAvatar(avatarUrl: String) {
+    val avatar by androidx.compose.runtime.produceState<androidx.compose.ui.graphics.ImageBitmap?>(
+        initialValue = null,
+        key1 = avatarUrl
+    ) {
+        value = withContext(Dispatchers.IO) { downloadGitHubAvatar(avatarUrl) }
+    }
+    if (avatar != null) {
+        Image(
+            bitmap = avatar!!,
+            contentDescription = null,
+            modifier = Modifier.size(28.dp).clip(RoundedCornerShape(50))
+        )
+    } else {
+        Icon(
+            FeatherIcons.Github,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(22.dp)
+        )
+    }
+}
+
+private fun downloadGitHubAvatar(value: String): androidx.compose.ui.graphics.ImageBitmap? {
+    val url = runCatching { URL(value) }.getOrNull() ?: return null
+    if (url.protocol != "https" || url.host != "avatars.githubusercontent.com") return null
+    val connection = runCatching { url.openConnection() as? HttpURLConnection }.getOrNull() ?: return null
+    return try {
+        connection.connectTimeout = 5_000
+        connection.readTimeout = 5_000
+        connection.instanceFollowRedirects = false
+        connection.setRequestProperty("Accept", "image/*")
+        if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
+        val contentLength = connection.contentLengthLong
+        if (contentLength > MAX_GITHUB_AVATAR_BYTES) return null
+        val bytes = connection.inputStream.use { input ->
+            val output = ByteArrayOutputStream(minOf(contentLength.coerceAtLeast(0).toInt(), 64 * 1024))
+            val buffer = ByteArray(8 * 1024)
+            var total = 0
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                total += read
+                if (total > MAX_GITHUB_AVATAR_BYTES) return null
+                output.write(buffer, 0, read)
+            }
+            output.toByteArray()
+        }
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0 || bounds.outWidth > 4096 || bounds.outHeight > 4096) {
+            return null
+        }
+        val sample = maxOf(1, maxOf(bounds.outWidth, bounds.outHeight) / 256)
+        val bitmap = BitmapFactory.decodeByteArray(
+            bytes,
+            0,
+            bytes.size,
+            BitmapFactory.Options().apply { inSampleSize = sample }
+        ) ?: return null
+        bitmap.asImageBitmap()
+    } catch (_: Exception) {
+        null
+    } finally {
+        connection.disconnect()
+    }
+}
+
+private const val MAX_GITHUB_AVATAR_BYTES = 1_048_576
 
 /**
  * 顶栏的工作区选择图标按钮：点击弹出选择/新建/删除面板。
@@ -178,6 +486,7 @@ private fun WorkspaceSelectionHost(
     val deleteExternalWorkspaceSessions by viewModel.deleteExternalWorkspaceSessions.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var pendingWorkspaceSelect by remember { mutableStateOf<Workspace?>(null) }
+    var showGitHubRepositories by remember { mutableStateOf(false) }
     var showExternalWarning by remember { mutableStateOf(false) }
     var dontShowExternalWarningAgain by remember { mutableStateOf(false) }
 
@@ -237,6 +546,7 @@ private fun WorkspaceSelectionHost(
                 if (externalWarningDismissed) folderLauncher.launch(null)
                 else showExternalWarning = true
             },
+            onAddGitHub = { showGitHubRepositories = true },
             onSelect = ::select,
             onCreate = { name ->
                 viewModel.createWorkspace(name) { created ->
@@ -288,6 +598,14 @@ private fun WorkspaceSelectionHost(
         )
     }
 
+    if (showGitHubRepositories) {
+        GitHubRepositoriesDialog(
+            viewModel = viewModel,
+            onDismiss = { showGitHubRepositories = false },
+            onWorkspaceCreated = ::select
+        )
+    }
+
     pendingWorkspaceSelect?.let { ws ->
         AlertDialog(
             onDismissRequest = { pendingWorkspaceSelect = null },
@@ -315,6 +633,7 @@ private fun WorkspaceSheet(
     current: Workspace?,
     showExternalEntry: Boolean,
     onAddExternal: () -> Unit,
+    onAddGitHub: () -> Unit,
     onSelect: (Workspace) -> Unit,
     onCreate: (String) -> Unit,
     onDelete: (Workspace) -> Unit,
@@ -353,6 +672,11 @@ private fun WorkspaceSheet(
                         Spacer(Modifier.width(Spacing.xs))
                         Text(stringResource(R.string.workspace_add_local_dir))
                     }
+                }
+                TextButton(onClick = onAddGitHub) {
+                    Icon(FeatherIcons.Github, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(Spacing.xs))
+                    Text(stringResource(R.string.workspace_add_github))
                 }
                 TextButton(onClick = { showCreateDialog = true }) {
                     Icon(FeatherIcons.Plus, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -452,7 +776,11 @@ private fun WorkspaceRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
-            if (external) FeatherIcons.HardDrive else FeatherIcons.Folder,
+            when {
+                workspace.sourceRepository != null -> FeatherIcons.Github
+                external -> FeatherIcons.HardDrive
+                else -> FeatherIcons.Folder
+            },
             contentDescription = null,
             tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(20.dp)
@@ -482,6 +810,15 @@ private fun WorkspaceRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            workspace.sourceRepository?.let { repositoryName ->
+                Text(
+                    text = stringResource(R.string.workspace_github_source, repositoryName),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
             if (external && disabled) {
                 Text(
                     text = stringResource(R.string.workspace_external_unavailable_hint),

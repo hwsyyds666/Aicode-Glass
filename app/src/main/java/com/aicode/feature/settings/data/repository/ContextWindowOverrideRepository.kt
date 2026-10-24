@@ -52,28 +52,28 @@ class ContextWindowOverrideRepository @Inject constructor(
         context.contextWindowOverrideDataStore.data.first().toOverride()
 
     /**
-     * 写入配置并决定是否真的置为启用。
+     * 保存配置，但保留当前开关状态；编辑已关闭的设置不会意外启用全局覆盖。
      *
-     * @return 实际落库后的启用状态：必填项（总上下文、输出）任一缺失/非正数时会被强制关闭。
-     *   这样调用方（UI）可以直接拿返回值刷新开关状态，不需要自己再判定一遍。
+     * @return false 表示数值越界或输入/输出预算超过总窗口，原配置不变。
      */
     suspend fun save(contextTokens: Int, inputTokens: Int?, outputTokens: Int?): Boolean {
-        val valid = contextTokens > 0 && (outputTokens ?: 0) > 0
+        if (!ContextWindowOverridePolicy.isValid(contextTokens, inputTokens, outputTokens)) return false
         context.contextWindowOverrideDataStore.edit { prefs ->
-            prefs[Keys.CONTEXT_TOKENS] = contextTokens.coerceAtLeast(0)
-            if (inputTokens != null && inputTokens > 0) {
+            val wasEnabled = prefs[Keys.ENABLED] ?: false
+            prefs[Keys.CONTEXT_TOKENS] = contextTokens
+            if (inputTokens != null) {
                 prefs[Keys.INPUT_TOKENS] = inputTokens
             } else {
                 prefs.remove(Keys.INPUT_TOKENS)
             }
-            if (outputTokens != null && outputTokens > 0) {
+            if (outputTokens != null) {
                 prefs[Keys.OUTPUT_TOKENS] = outputTokens
             } else {
                 prefs.remove(Keys.OUTPUT_TOKENS)
             }
-            prefs[Keys.ENABLED] = valid
+            prefs[Keys.ENABLED] = wasEnabled
         }
-        return valid
+        return true
     }
 
     /** 关闭开关，回到各模型自己的上下文窗口；已填数值保留以便重新开启。 */
@@ -81,7 +81,7 @@ class ContextWindowOverrideRepository @Inject constructor(
         if (enabled) {
             // 重新开启前先自检：必填仍齐备才允许打开
             val current = getOverride()
-            if (current.contextTokens <= 0 || (current.outputTokens ?: 0) <= 0) return
+            if (!ContextWindowOverridePolicy.isValid(current.contextTokens, current.inputTokens, current.outputTokens)) return
         }
         context.contextWindowOverrideDataStore.edit { prefs ->
             prefs[Keys.ENABLED] = enabled
@@ -94,7 +94,7 @@ class ContextWindowOverrideRepository @Inject constructor(
         val inputTokens = this[Keys.INPUT_TOKENS]?.takeIf { it > 0 }
         val outputTokens = this[Keys.OUTPUT_TOKENS]?.takeIf { it > 0 }
         // 存储层兜底：必填不齐时即便 ENABLED 被写成 true 也不生效，避免出现「开着但没值」的状态。
-        val effective = enabled && contextTokens > 0 && (outputTokens ?: 0) > 0
+        val effective = enabled && ContextWindowOverridePolicy.isValid(contextTokens, inputTokens, outputTokens)
         return ContextWindowOverride(effective, contextTokens, inputTokens, outputTokens)
     }
 }
@@ -113,3 +113,15 @@ data class ContextWindowOverride(
     val inputTokens: Int?,
     val outputTokens: Int?
 )
+
+/** Defends persisted values and their cross-field relationship before affecting request budgeting. */
+object ContextWindowOverridePolicy {
+    const val MAX_TOKEN_VALUE = 10_000_000
+
+    fun isValid(contextTokens: Int, inputTokens: Int?, outputTokens: Int?): Boolean {
+        if (contextTokens !in 1..MAX_TOKEN_VALUE) return false
+        if (outputTokens == null || outputTokens !in 1..contextTokens) return false
+        if (inputTokens != null && inputTokens !in 1..contextTokens) return false
+        return inputTokens == null || inputTokens.toLong() + outputTokens.toLong() <= contextTokens.toLong()
+    }
+}

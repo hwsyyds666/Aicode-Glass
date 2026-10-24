@@ -21,6 +21,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.serialization.json.Json
@@ -31,6 +32,7 @@ import com.aicode.feature.agent.data.remote.openai.OpenAIToolDefinition
 import com.aicode.feature.agent.data.remote.openai.OpenAIFunctionDefinition
 import com.aicode.feature.agent.data.remote.openai.OpenAIImagePart
 import com.aicode.feature.agent.data.remote.openai.StreamOptions
+import retrofit2.HttpException
 
 class OpenAIAdapter @Inject constructor(
     private val api: OpenAIApi
@@ -47,6 +49,11 @@ class OpenAIAdapter @Inject constructor(
     override var firstByteTimeoutMs: Long = FIRST_BYTE_TIMEOUT_MS
     override var streamIdleTimeoutMs: Long = 0L
     override var maxNetworkRetries: Int = MAX_NETWORK_RETRIES
+
+    /** True only for OpenAI's official Sign in with ChatGPT plan-usage profile. */
+    var chatGptPlanUsage: Boolean = false
+    /** Localized app-specific limit message supplied by the account repository for official account calls. */
+    var chatGptUsageLimitMessage: String = "ChatGPT app usage limit reached"
 
     /**
      * 是否在 Chat Completion 路径发送 `prompt_cache_key`（缓存 shard 路由）。
@@ -84,7 +91,10 @@ class OpenAIAdapter @Inject constructor(
         tools: List<AgentTool>,
         reasoningEffort: String?
     ): AIResponse {
-        if (useResponseApi) return completeViaResponses(systemPrompt, messages, tools, reasoningEffort)
+        if (useResponseApi) {
+            return if (chatGptPlanUsage) completeViaResponsesStream(systemPrompt, messages, tools, reasoningEffort)
+            else completeViaResponses(systemPrompt, messages, tools, reasoningEffort)
+        }
 
         val openAIMessages = buildList {
             if (systemPrompt.isNotBlank()) {
@@ -198,7 +208,8 @@ class OpenAIAdapter @Inject constructor(
             request["tools"] = it
             request["tool_choice"] = "auto"
         }
-        if (stream) request["stream"] = true
+        if (stream || chatGptPlanUsage) request["stream"] = true
+        if (chatGptPlanUsage) request["store"] = false
         normalizeReasoningEffort(reasoningEffort)?.let { effort ->
             if (isDeepSeek) {
                 request["reasoning"] = mapOf("effort" to effort)
@@ -263,6 +274,20 @@ class OpenAIAdapter @Inject constructor(
             cachedInputTokens = usage.cachedInputTokens,
             images = parsed.images
         )
+    }
+
+    /** ChatGPT plan inference is streaming-only; non-streaming internal callers collect its final event. */
+    private suspend fun completeViaResponsesStream(
+        systemPrompt: String,
+        messages: List<AgentMessage>,
+        tools: List<AgentTool>,
+        reasoningEffort: String?
+    ): AIResponse {
+        var result: AIResponse? = null
+        completeStream(systemPrompt, messages, tools, reasoningEffort).collect { chunk ->
+            if (chunk is AIStreamChunk.Final) result = chunk.response
+        }
+        return result ?: throw IOException("OpenAI ChatGPT plan stream ended without response.completed")
     }
 
     override fun completeStream(
@@ -508,7 +533,7 @@ class OpenAIAdapter @Inject constructor(
         systemPrompt: String,
         messages: List<AgentMessage>,
         tools: List<AgentTool>,
-        reasoningEffort: String?
+        reasoningEffort: String?,
     ) {
         val url = resolveApiUrl()
         val request = buildResponsesRequest(systemPrompt, messages, tools, reasoningEffort, stream = true)
@@ -528,7 +553,7 @@ class OpenAIAdapter @Inject constructor(
                 },
                 attemptOnce = { onContent ->
                     withFirstContentTimeout(firstByteTimeoutMs) { firstContent ->
-                    val acc = ResponsesStreamAccumulator()
+                    val acc = ResponsesStreamAccumulator(chatGptUsageLimitMessage)
 
                     val body = firstContent.awaitBody(api.streamResponses(
                         url = url,
@@ -571,6 +596,14 @@ class OpenAIAdapter @Inject constructor(
                                 obj.get("error")?.takeIf { it.isJsonObject }?.asJsonObject?.let { errObj ->
                                     val code = errObj.get("code")?.takeIf { !it.isJsonNull }?.asString
                                     val msg = errObj.get("message")?.takeIf { !it.isJsonNull }?.asString ?: "未知错误"
+                                    if (code == "subscription_sharing_usage_limit_exceeded") {
+                                        throw SubscriptionSharingUsageLimitException(
+                                            statusCode = 429,
+                                            requestId = obj.get("request_id")?.takeIf { it.isJsonPrimitive }?.asString,
+                                            errorParam = errObj.get("param")?.takeIf { it.isJsonPrimitive && !it.isJsonNull }?.asString,
+                                            message = chatGptUsageLimitMessage
+                                        )
+                                    }
                                     throw StreamApiException(code, msg)
                                 }
                                 // 单个事件的字段类型异常不应废掉整条流，只跳过该事件；
@@ -583,6 +616,8 @@ class OpenAIAdapter @Inject constructor(
                                         }
                                     }
                                 } catch (e: StreamApiException) {
+                                    throw e
+                                } catch (e: SubscriptionSharingUsageLimitException) {
                                     throw e
                                 } catch (e: CancellationException) {
                                     throw e
@@ -617,6 +652,9 @@ class OpenAIAdapter @Inject constructor(
                         }
                     }
 
+                    if (chatGptPlanUsage && !acc.completedSuccessfully) {
+                        throw IOException("OpenAI ChatGPT plan response did not end with response.completed")
+                    }
                     emit(AIStreamChunk.Final(acc.toResponse()))
                     }
                 },
@@ -626,12 +664,42 @@ class OpenAIAdapter @Inject constructor(
             throw e
         } catch (e: Exception) {
             coroutineContext.ensureActive()
-            val enriched = e.enrichWithHttpErrorBody()
+            val enriched = e.enrichOpenAIErrorBody()
             AILogger.logError(logSessionId, "OpenAI", enriched, seq)
             throw enriched
         } finally {
             sseLog.finish()
         }
+    }
+
+    /** Preserve the documented usage-limit code and request ID before wrapping a non-2xx body. */
+    private fun Throwable.enrichOpenAIErrorBody(): Throwable {
+        if (this !is HttpException) return enrichWithHttpErrorBody()
+        val response = response()
+        val requestId = response?.headers()?.get("x-request-id")
+        val raw = runCatching { response?.errorBody()?.string()?.trim() }.getOrNull()
+        val root = raw?.takeIf(String::isNotBlank)?.let {
+            runCatching { JsonParser.parseString(it).asJsonObject }.getOrNull()
+        }
+        val error = root?.get("error")?.takeIf { it.isJsonObject }?.asJsonObject
+        val errorCode = error?.get("code")?.takeIf { it.isJsonPrimitive }?.asString
+        if (errorCode == "subscription_sharing_usage_limit_exceeded") {
+            return SubscriptionSharingUsageLimitException(
+                statusCode = code().takeIf { it > 0 },
+                requestId = requestId,
+                errorParam = error?.get("param")?.takeIf { it.isJsonPrimitive && !it.isJsonNull }?.asString,
+                message = chatGptUsageLimitMessage
+            )
+        }
+        val detail = error?.get("message")?.takeIf { it.isJsonPrimitive }?.asString
+            ?: root?.get("detail")?.takeIf { it.isJsonPrimitive }?.asString
+            ?: root?.get("message")?.takeIf { it.isJsonPrimitive }?.asString
+            ?: raw?.take(500)
+        val suffix = requestId?.let { " (request_id=$it)" }.orEmpty()
+        return IllegalStateException(
+            "HTTP ${code()}${detail?.let { ": $it" }.orEmpty()}$suffix",
+            this
+        )
     }
 
     /** 流式过程中按 index 累积的工具调用状态。 */

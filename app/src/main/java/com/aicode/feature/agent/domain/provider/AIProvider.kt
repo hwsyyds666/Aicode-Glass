@@ -84,6 +84,14 @@ data class AIResponse(
     }
 }
 
+/** Credentials and provider binding for the one explicitly selected Sign in with ChatGPT profile. */
+data class ChatGptAccountTarget(
+    val accountId: String,
+    val providerId: String,
+    val accessToken: String,
+    val email: String
+)
+
 /**
  * 一次 Key 切换的结果：新 Key 与其在候选列表中的序号（1 起），供 adapter 改写凭据并通知 UI。
  */

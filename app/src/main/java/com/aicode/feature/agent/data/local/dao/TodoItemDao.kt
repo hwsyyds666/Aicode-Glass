@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import com.aicode.feature.agent.data.local.entity.TodoItemEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -37,6 +38,13 @@ interface TodoItemDao {
 
     @Query("DELETE FROM todo_items WHERE sessionId = :sessionId")
     suspend fun deleteBySession(sessionId: String)
+
+    /** Replace one session snapshot atomically so a failed insert cannot erase its existing plan. */
+    @Transaction
+    suspend fun replaceForSession(sessionId: String, items: List<TodoItemEntity>) {
+        deleteBySession(sessionId)
+        if (items.isNotEmpty()) upsertAll(items)
+    }
 
     @Query("SELECT MAX(`order`) FROM todo_items WHERE sessionId = :sessionId")
     suspend fun getMaxOrder(sessionId: String): Int?

@@ -24,7 +24,10 @@ data class FileTreeNode(
     /** 展开该目录时读取子项失败（如权限不足）；根读取失败走 [FileBrowseState.Error]。 */
     val hasError: Boolean = false,
     /** 被工作区根 .gitignore 命中：UI 以橙色弱化显示（类 VSCode）。 */
-    val ignored: Boolean = false
+    val ignored: Boolean = false,
+    /** Synthetic row that requests the next page for a large directory. */
+    val isLoadMore: Boolean = false,
+    val loadMoreCount: Int = 0
 )
 
 /** 文件浏览剪切板：一次只能持有一项，复制或剪切后待粘贴。 */
@@ -102,7 +105,7 @@ data class RetryState(val attempt: Int, val maxRetries: Int, val error: RetryErr
  * 只在切换后重发前短暂存在，重新出内容或本轮结束即清除。
  */
 @Immutable
-data class KeySwitchState(val newIndex: Int, val total: Int)
+data class KeySwitchState(val newIndex: Int, val total: Int, val accountName: String? = null)
 
 @Immutable
 data class AgentUIMessage(

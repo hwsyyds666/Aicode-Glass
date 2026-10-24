@@ -155,12 +155,18 @@ fun expandTilde(arg: String, home: String = "/root"): String =
  *  - `--hidden` 为 no-op（grep -r 默认即含隐藏文件）；
  *  - 正则按 POSIX ERE（-E）解释，与 rg 的 Rust 正则不完全一致（如 `\d` 不可用）。
  */
-fun buildFallbackSearchCommand(tokens: List<String>, home: String = "/root"): String? {
+fun buildFallbackSearchCommand(tokens: List<String>, home: String = "/root", minimal: Boolean = false): String? {
     val (searchTokens, pipeSegments) = splitPipes(tokens) ?: return null
-    val grepArgs = mutableListOf(
-        "grep", "-rnI", "-E",
-        "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=.gradle"
-    )
+    val grepArgs = if (minimal) {
+        // 最小形态：个别精简 grep（toybox 的老版本/裁剪版）不认 --exclude-dir，
+        // 用法错误重试时只保留 -rnI -E。
+        mutableListOf("grep", "-rnI", "-E")
+    } else {
+        mutableListOf(
+            "grep", "-rnI", "-E",
+            "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=.gradle"
+        )
+    }
     val positional = mutableListOf<String>()
     var hasRegexpFlag = false
     var afterDashDash = false

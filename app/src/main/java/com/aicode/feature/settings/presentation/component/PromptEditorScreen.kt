@@ -37,7 +37,7 @@ import compose.icons.FeatherIcons
 import compose.icons.feathericons.ArrowLeft
 
 /**
- * 提示词片段新建/编辑页：自带顶栏（返回 + 右上角保存），与 [SubAgentEditorScreen] 一致，
+ * 提示词片段新建/编辑页：自带顶栏（返回 + 右上角保存），与技能编辑页一致，
  * 不能嵌进设置页的 Scaffold。
  *
  * 编号即身份，决定片段在系统提示词里的位置；可改。作用域选项目或全局，决定覆盖写到哪一层。

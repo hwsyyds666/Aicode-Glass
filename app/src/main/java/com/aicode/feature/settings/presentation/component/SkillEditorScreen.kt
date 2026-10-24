@@ -43,7 +43,7 @@ import compose.icons.FeatherIcons
 import compose.icons.feathericons.ArrowLeft
 
 /**
- * 技能新建/编辑页：自带顶栏（与 [SubAgentEditorScreen] 一致，不能嵌进设置页的 Scaffold）。
+ * 技能新建/编辑页：自带顶栏，不能嵌进设置页的 Scaffold。
  *
  * 表单字段对应 `SKILL.md` 的 frontmatter 与正文，保存时由 SkillParser.serialize 写回文件，
  * 所以在 App 内建的技能与手写的技能完全等价，可继续用文本编辑器改。

@@ -4,6 +4,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.PowerManager
+import android.widget.Toast
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -14,7 +15,6 @@ import androidx.lifecycle.viewModelScope
 import com.aicode.MainActivity
 import com.aicode.R
 import com.aicode.core.util.FileLogger
-import com.aicode.core.util.GitIgnoreMatcher
 import com.aicode.core.util.toUserMessage
 import com.aicode.core.util.formatCostUsd
 import com.aicode.feature.agent.data.local.dao.AgentMessageDao
@@ -35,6 +35,9 @@ import com.aicode.feature.settings.data.repository.AgentSoundSettingsRepository
 import com.aicode.feature.settings.data.repository.DefaultModelSettingsRepository
 import com.aicode.feature.settings.data.repository.GeneralSettingsRepository
 import com.aicode.feature.settings.data.repository.KeepaliveSettingsRepository
+import com.aicode.feature.settings.data.repository.SubAgentSettingsRepository
+import com.aicode.feature.settings.data.repository.SubAgentModelSettingsRepository
+import com.aicode.feature.settings.data.repository.SubAgentModelTier
 import com.aicode.feature.settings.data.repository.ModelReasoningEffortRepository
 import com.aicode.feature.settings.data.repository.StartupSessionMode
 import com.aicode.feature.agent.domain.model.AgentContext
@@ -51,30 +54,20 @@ import com.aicode.feature.agent.domain.notification.PendingNotification
 import com.aicode.feature.agent.domain.permission.PermissionChoice
 import com.aicode.feature.agent.domain.mcp.McpManager
 import com.aicode.feature.agent.domain.subagent.AgentDefinition
-import com.aicode.feature.agent.domain.subagent.AgentDefinitionRepository
+import com.aicode.feature.agent.domain.subagent.BuiltInSubAgentCatalog
+import com.aicode.feature.agent.domain.subagent.LegacySubAgentMigration
 import com.aicode.feature.agent.domain.subagent.SubAgentEvent
 import com.aicode.feature.agent.domain.subagent.SubAgentEventBus
-import com.aicode.core.watch.FileChangeBatch
-import com.aicode.core.watch.FileChangeHub
-import com.aicode.core.watch.asDirtySignal
 import com.aicode.feature.agent.domain.subagent.SubAgentEventType
 import com.aicode.feature.agent.domain.workflow.AgentWorkflow
 import com.aicode.feature.terminal.domain.TabFinishedEvent
 import com.aicode.feature.terminal.domain.TerminalKeepaliveService
 import com.aicode.feature.terminal.domain.TerminalSessionManager
 import com.aicode.feature.terminal.domain.takeTailLines
-import com.aicode.feature.workspace.domain.DirectoryListingCache
 import com.aicode.feature.workspace.domain.FileAccessProvider
-import com.aicode.feature.workspace.domain.FileEntry
-import com.aicode.feature.workspace.domain.WorkspacePathMapper
-import com.aicode.feature.workspace.domain.isValidFileEntryName
-import com.aicode.feature.workspace.domain.planBrowseInvalidation
 import com.aicode.feature.agent.domain.workflow.AgentEvent
 import com.aicode.feature.agent.domain.tool.ToolPermissionManager
 import com.aicode.feature.agent.domain.tool.ToolRegistry
-import com.aicode.feature.agent.domain.tool.mode.PlanApprovalChoice
-import com.aicode.feature.agent.domain.tool.mode.PlanApprovalManager
-import com.aicode.feature.agent.domain.tool.mode.PlanApprovalRequest
 import com.aicode.feature.agent.domain.tool.question.AskUserQuestionManager
 import com.aicode.feature.agent.domain.tool.question.UserQuestionAnswer
 import com.aicode.feature.agent.domain.session.SessionUseCase
@@ -99,7 +92,9 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -115,10 +110,10 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlin.coroutines.coroutineContext
 import java.io.OutputStream
 import java.util.Calendar
 import java.util.UUID
@@ -141,7 +136,6 @@ class AIAgentViewModel @Inject constructor(
     private val containerEngine: LinuxContainerEngine,
     private val sessionUseCase: SessionUseCase,
     private val messagePersistenceUseCase: MessagePersistenceUseCase,
-    private val planApprovalManager: PlanApprovalManager,
     private val terminalSessionManager: TerminalSessionManager,
     private val slashCommandRegistry: SlashCommandRegistry,
     private val checkpointManager: CheckpointManager,
@@ -152,16 +146,23 @@ class AIAgentViewModel @Inject constructor(
     private val generalSettingsRepository: GeneralSettingsRepository,
     private val keepaliveSettings: KeepaliveSettingsRepository,
     private val subAgentEventBus: SubAgentEventBus,
+    private val subAgentSettings: SubAgentSettingsRepository,
+    private val subAgentModelSettings: SubAgentModelSettingsRepository,
     private val agentNotificationCenter: AgentNotificationCenter,
-    private val agentDefinitionRepository: AgentDefinitionRepository,
+    private val legacySubAgentMigration: LegacySubAgentMigration,
     private val todoItemDao: TodoItemDao,
     val fileAccess: FileAccessProvider,
-    private val fileChangeHub: FileChangeHub,
     private val rootNetworkGuard: RootNetworkGuard,
     @param:ApplicationContext private val context: Context
 ) : ViewModel(), SlashCommandContext {
 
     private val sessionJobs = mutableMapOf<String, Job>()
+    /** Prevents new requests from racing a rewind/delete after the old workflows have been joined. */
+    private val rewindLock = Any()
+    private val rewindingSessions = mutableSetOf<String>()
+    /** 子代理进入销毁阶段后，拒绝稍后才出队的 SPAWNED 事件重新启动它。 */
+    private val deletingSubAgentIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val stoppingSubAgentIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     /**
      * agent 执行期间持有的 CPU 唤醒锁：熄屏后系统会挂起进程，使流式响应中断、工具调用卡死。
@@ -251,7 +252,12 @@ class AIAgentViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.Eagerly, "")
 
     fun updateInputDraft(text: String) {
-        val id = _currentSessionId.value ?: return
+        updateInputDraft(_currentSessionId.value, text)
+    }
+
+    /** Save a draft for an explicit session so a composable can flush it while it is leaving the screen. */
+    fun updateInputDraft(sessionId: String?, text: String) {
+        val id = sessionId?.takeIf(String::isNotBlank) ?: return
         val editor = draftPrefs.edit()
         if (text.isEmpty()) {
             _inputDrafts.value = _inputDrafts.value - id
@@ -326,11 +332,16 @@ class AIAgentViewModel @Inject constructor(
     fun setWorkspace(path: String) {
         if (path.isBlank() || _currentWorkspace.value == path) return
         _currentWorkspace.value = path
-        // 切到新工作区：容器路径同名但宿主目录不同，目录列举缓存与 gitignore 规则全部作废。
-        dirListingCache.clear()
-        gitignoreCache = null
-        // 恢复该工作区上次持久化的展开状态（无记录则只展开根）。
-        _expandedPaths.value = loadExpansion(path)
+        viewModelScope.launch {
+            val result = legacySubAgentMigration.run(path)
+            if (result.scanComplete && result.hasLegacyDefinitions && subAgentModelSettings.shouldShowLegacyNoticeOnce()) {
+                Toast.makeText(
+                    context,
+                    context.getString(R.string.subagents_legacy_notice, result.files.size),
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
         // 搜索限定当前工作区，切区后旧结果无意义，一并清空。
         _chatSearchQuery.value = ""
     }
@@ -454,372 +465,6 @@ class AIAgentViewModel @Inject constructor(
         }
     }
 
-    /** 侧边栏「文件」Tab 已展开的目录集合（容器路径）。含工作区根：根也可折叠，默认展开；按工作区持久化。 */
-    private val _expandedPaths = MutableStateFlow(setOf(WorkspacePathMapper.CONTAINER_ROOT))
-
-    /** 文件树展开状态按工作区持久化（重启保留）；key 为工作区路径，值为已展开的容器路径集合。 */
-    private val expansionPrefs = context.getSharedPreferences("file_tree_expansion", Context.MODE_PRIVATE)
-
-    /** 读取某工作区持久化的展开集；无记录时默认只展开工作区根。 */
-    private fun loadExpansion(workspace: String): Set<String> =
-        expansionPrefs.getStringSet(workspace, null)?.toSet()
-            ?: setOf(WorkspacePathMapper.CONTAINER_ROOT)
-
-    /** 持久化当前工作区的展开集（传新集合副本，SharedPreferences 禁止复用已存实例）。 */
-    private fun saveExpansion(workspace: String, paths: Set<String>) {
-        if (workspace.isBlank()) return
-        expansionPrefs.edit().putStringSet(workspace, HashSet(paths)).apply()
-    }
-    val expandedPaths: StateFlow<Set<String>> = _expandedPaths.asStateFlow()
-
-    /** 正在展开、等待列目录返回的目录路径（远程 SSH 下 listFiles 可能耗时数秒）；UI 在该行显示等待动画。 */
-    private val _expandingPath = MutableStateFlow<String?>(null)
-    val expandingPath: StateFlow<String?> = _expandingPath.asStateFlow()
-
-    /** 正在执行写操作（新建/重命名/删除/复制/移动）的条目路径集合；UI 在对应行与工具栏显示等待动画。 */
-    private val _fileOpPaths = MutableStateFlow<Set<String>>(emptySet())
-    val fileOpPaths: StateFlow<Set<String>> = _fileOpPaths.asStateFlow()
-
-    /** 手动刷新信号：远程模式无 inotify，只能靠它；本地模式作为兜底。 */
-    private val _browseRefresh = MutableStateFlow(0)
-
-    /**
-     * 目录列举缓存（容器路径 → 条目快照）：让「展开→折叠→再展开」与未受影响的目录零 IO。
-     * 失效完全由变更事件驱动（见 [applyBrowseInvalidation]）；工作区切换与手动刷新时全清。
-     */
-    private val dirListingCache = DirectoryListingCache()
-
-    /** 根 `.gitignore` 解析结果缓存，null 表示未缓存；由 gitignoreTouched 失效与工作区切换清除。 */
-    private var gitignoreCache: List<String>? = null
-
-    /**
-     * 扁平化的可见文件树。listFiles 在本地是阻塞 IO、远程是网络调用，必须跑 IO 调度器。
-     * 监听工作区根与所有已展开目录：任一发生变动（不限 AI，终端与其它 App 同样算）或手动刷新都会重建树。
-     * 只监听展开中的目录、不递归整棵树，避免大仓库开出大量 inotify 句柄。
-     *
-     * 重建不等于重读：树只从 [dirListingCache] 组装，未命中才真的 listFiles；inotify 单层语义
-     * （direct children）正好覆盖「已展开目录列表会变」的全部情形，故这里显式关掉 FileChangeHub 的
-     * 快照轮询兜底（fallbackPoll=false）——每 2 秒对每个已展开目录轮询 listFiles+逐项 stat 是持续的
-     * IO 税，而抽屉树对深层递归变更本来就不敏感。ROOT/SSH 模式下宿主 watch 本就不可用，靠手动刷新兜底。
-     */
-    val browseState: StateFlow<FileBrowseState> = _expandedPaths
-        .flatMapLatest { expanded ->
-            val watched = expanded + WorkspacePathMapper.CONTAINER_ROOT
-            val triggers = merge(
-                watched.map {
-                    fileChangeHub.watchWorkspace(it, fallbackPoll = false)
-                        .onEach { batch -> applyBrowseInvalidation(batch) }
-                        .asDirtySignal()
-                }.merge().debounce(BROWSE_DEBOUNCE_MS),
-                // drop(1) 丢掉 StateFlow 重建时的当前值，否则刚展开就会多读一次
-                _browseRefresh.drop(1).map { }
-            )
-            flow {
-                // 首次产出前由 stateIn 初值 Loading 占位；后续展开/折叠/刷新不再回到 Loading，
-                // StateFlow 保留上一份 Success 直到新树就绪，避免闪加载动画与滚动位置丢失。
-                emit(buildBrowseTree(expanded))
-                triggers.collect { emit(buildBrowseTree(expanded)) }
-            }.flowOn(Dispatchers.IO)
-        }
-        // 新树已就绪：清掉展开等待态（无论成功/出错都清，避免转圈卡死）。
-        .onEach { _expandingPath.value = null }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), FileBrowseState.Loading)
-
-    /**
-     * 按变更批次对 [dirListingCache] 与 gitignore 规则做精准失效。防抖窗口内每批都立即执行，
-     * 保证重建组装时缓存已是失效后的状态（顺序上 onEach 早于下游 collect 的重建）。
-     */
-    private fun applyBrowseInvalidation(batch: FileChangeBatch) {
-        val plan = planBrowseInvalidation(batch, WorkspacePathMapper.CONTAINER_ROOT)
-        if (plan.fullRefresh) {
-            dirListingCache.clear()
-            gitignoreCache = null
-            return
-        }
-        plan.relistDirs.forEach { dirListingCache.invalidate(it) }
-        plan.dropTrees.forEach { dirListingCache.invalidateTree(it) }
-        if (plan.gitignoreTouched) gitignoreCache = null
-    }
-
-    /** 读取工作区根并按 [expanded] 递归展开，产出扁平的可见节点列表；根读取失败则整体报错。 */
-    private suspend fun buildBrowseTree(expanded: Set<String>): FileBrowseState {
-        val startedAt = System.currentTimeMillis()
-        listingCounter.set(0)
-        val root = WorkspacePathMapper.CONTAINER_ROOT
-        val rootEntries = listDirCached(root) ?: run {
-            FileLogger.w(TAG, "列目录失败: $root")
-            return FileBrowseState.Error("无法读取工作区根目录")
-        }
-        val ignorePatterns = cachedRootGitignore(root)
-        val rootExpanded = root in expanded
-        val nodes = mutableListOf<FileTreeNode>()
-        nodes += FileTreeNode(
-            entry = FileEntry(name = "workspace", isDirectory = true, size = 0, lastModified = 0),
-            path = root,
-            depth = 0,
-            isRoot = true,
-            isExpanded = rootExpanded
-        )
-        if (rootExpanded) {
-            appendBrowseChildren(root, rootEntries, depth = 1, expanded = expanded, ignorePatterns = ignorePatterns, relParts = emptyList(), out = nodes)
-        }
-        val listed = listingCounter.get()
-        FileLogger.d(TAG, "文件树重建: 命中缓存目录=${dirListingCache.size()} 实列目录=$listed 节点=${nodes.size} 耗时=${System.currentTimeMillis() - startedAt}ms")
-        return FileBrowseState.Success(nodes)
-    }
-
-    /** 每次重建从 0 计数，仅用于诊断日志（见 [buildBrowseTree]）；按线程隔离，并发重建互不干扰。 */
-    private val listingCounter = ThreadLocal.withInitial { 0 }
-
-    /**
-     * 带缓存的目录列举：命中直接返回快照；未命中才真 listFiles 并回填缓存。
-     * 列举失败返回 null 且**不入缓存**（下次重建自然重试），调用方决定错误如何呈现。
-     */
-    private suspend fun listDirCached(path: String): List<FileEntry>? {
-        dirListingCache.get(path)?.let { return it }
-        val entries = runCatching { fileAccess.listFiles(path) }.getOrNull() ?: return null
-        dirListingCache.put(path, entries)
-        listingCounter.set(listingCounter.get() + 1)
-        return entries
-    }
-
-    /**
-     * 读工作区根 .gitignore（本地/远程均可）；去空行/注释/否定行，读不到则空。仅根 .gitignore，不处理嵌套。
-     * 结果按失效缓存：变更批次触及根 .gitignore（[applyBrowseInvalidation]）、切换工作区、
-     * 手动刷新时清除；避免每次重建都 exists+readFile 一遍（ROOT 模式下这是两次 su fork）。
-     */
-    private suspend fun cachedRootGitignore(root: String): List<String> {
-        gitignoreCache?.let { return it }
-        val patterns = runCatching {
-            val path = "$root/.gitignore"
-            if (!fileAccess.exists(path)) return emptyList()
-            fileAccess.readFile(path).lineSequence()
-                .map { it.trim() }
-                .filter { it.isNotEmpty() && !it.startsWith("#") && !it.startsWith("!") }
-                .map { it.removeSuffix("/") }
-                .toList()
-        }.getOrDefault(emptyList())
-        gitignoreCache = patterns
-        return patterns
-    }
-
-    private suspend fun appendBrowseChildren(
-        parent: String,
-        entries: List<FileEntry>,
-        depth: Int,
-        expanded: Set<String>,
-        ignorePatterns: List<String>,
-        relParts: List<String>,
-        out: MutableList<FileTreeNode>
-    ) {
-        // 按名字去重：文件系统的 readdir 在 FUSE 存储（外部工作区/模拟存储）上可能重复返回同一条目，
-        // AOSP 的 ReaddirHelper 亦做同样处理。同名条目会产生重复的节点 path，撞坏 LazyColumn 的 key。
-        for (entry in entries.distinctBy { it.name }.sortedWith(BROWSE_ORDER)) {
-            val path = "$parent/${entry.name}"
-            val parts = relParts + entry.name
-            val ignored = ignorePatterns.isNotEmpty() &&
-                GitIgnoreMatcher.isIgnored(ignorePatterns, parts)
-            val open = entry.isDirectory && path in expanded
-            if (!open) {
-                out += FileTreeNode(entry, path, depth, isRoot = false, isExpanded = false, ignored = ignored)
-                continue
-            }
-            val children = listDirCached(path)
-            out += FileTreeNode(entry, path, depth, isRoot = false, isExpanded = true, hasError = children == null, ignored = ignored)
-            if (children != null) appendBrowseChildren(path, children, depth + 1, expanded, ignorePatterns, parts, out)
-        }
-    }
-
-    /** 手动全量刷新：清目录缓存后触发重建，保证展示与磁盘一致（远程模式唯一的事实来源）。 */
-    fun refreshBrowse() {
-        dirListingCache.clear()
-        gitignoreCache = null
-        _browseRefresh.value++
-    }
-
-    /** 触发一次重建但不清缓存（供写操作后精准失效场景；用户可见的全量刷新走 [refreshBrowse]）。 */
-    private fun rebuildBrowseAfterWrite() {
-        _browseRefresh.value++
-    }
-
-    /** 展开/折叠目录；折叠时连同其所有后代一并移出展开集，避免残留监听与再展开时意外深开。改变后按工作区持久化。
-     *  展开需等列目录返回，期间标记 [expandingPath] 让 UI 显示等待动画，并忽略对同一目录的重复点击（否则会把它折回去）。 */
-    fun toggleExpand(path: String) {
-        if (path == _expandingPath.value) return
-        val current = _expandedPaths.value
-        val updated = if (path in current) {
-            current.filterNot { it == path || it.startsWith("$path/") }.toSet()
-        } else {
-            _expandingPath.value = path
-            current + path
-        }
-        _expandedPaths.value = updated
-        saveExpansion(_currentWorkspace.value, updated)
-    }
-
-    /**
-     * 文件浏览的写操作共用包装：跑 IO 调度器，成功后主动重读目录（远程模式无 inotify）。
-     * [busyPaths] 为本次操作涉及的条目路径，操作期间加入 [fileOpPaths] 让 UI 显示等待动画。
-     * [block] 返回 false 表示名称非法或同名已存在，抛异常表示 IO 失败，两者均回报失败。
-     */
-    private fun mutateBrowse(
-        busyPaths: Set<String> = emptySet(),
-        onResult: (Boolean) -> Unit,
-        block: suspend () -> Boolean
-    ) = viewModelScope.launch {
-        if (busyPaths.isNotEmpty()) _fileOpPaths.value = _fileOpPaths.value + busyPaths
-        try {
-            val success = withContext(Dispatchers.IO) {
-                // block 是 suspend 的，不能用 runCatching（其 lambda 非 suspend）；语义保持一致：
-                // 失败仅记录并回报 false，取消必须继续向上传播。
-                try {
-                    block()
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    FileLogger.w(TAG, "文件操作失败", e)
-                    false
-                }
-            }
-            if (success) {
-                // 精准失效：只让本次操作涉及的目录重读（ROOT/SSH 没有 inotify 兜底时尤其重要），
-                // 其余缓存原样保留——一次小操作不再引发整树重列。
-                busyPaths.forEach { path ->
-                    dirListingCache.invalidate(path.substringBeforeLast('/', ""))
-                    dirListingCache.invalidateTree(path)
-                }
-                rebuildBrowseAfterWrite()
-            }
-            onResult(success)
-        } finally {
-            if (busyPaths.isNotEmpty()) _fileOpPaths.value = _fileOpPaths.value - busyPaths
-        }
-    }
-
-    /** [parent] 目录下的子路径；名称非法时返回 null。 */
-    private fun browseChildPath(parent: String, name: String): String? =
-        if (isValidFileEntryName(name)) "$parent/${name.trim()}" else null
-
-    /** 在 [parent] 目录新建空文件。 */
-    fun createBrowseFile(parent: String, name: String, onResult: (Boolean) -> Unit) {
-        val target = browseChildPath(parent, name)
-        mutateBrowse(busyPaths = target?.let { setOf(it) } ?: emptySet(), onResult = onResult) {
-            if (target == null || fileAccess.exists(target)) {
-                false
-            } else {
-                fileAccess.writeFile(target, "", overwrite = false)
-                true
-            }
-        }
-    }
-
-    /** 在 [parent] 目录新建文件夹。 */
-    fun createBrowseFolder(parent: String, name: String, onResult: (Boolean) -> Unit) {
-        val target = browseChildPath(parent, name)
-        mutateBrowse(busyPaths = target?.let { setOf(it) } ?: emptySet(), onResult = onResult) {
-            if (target == null || fileAccess.exists(target)) {
-                false
-            } else {
-                fileAccess.mkdirs(target)
-                fileAccess.isDirectory(target)
-            }
-        }
-    }
-
-    /** 重命名条目（仅同目录内改名，不跨目录移动）。 */
-    fun renameBrowseEntry(path: String, newName: String, onResult: (Boolean) -> Unit) =
-        mutateBrowse(busyPaths = setOf(path), onResult = onResult) {
-            val parent = path.substringBeforeLast('/', "")
-            if (parent.isEmpty() || !isValidFileEntryName(newName)) {
-                false
-            } else {
-                fileAccess.rename(path, "$parent/${newName.trim()}")
-                true
-            }
-        }
-
-    /** 删除条目；目录连同内容递归删除。 */
-    fun deleteBrowseEntry(path: String, onResult: (Boolean) -> Unit) =
-        mutateBrowse(busyPaths = setOf(path), onResult = onResult) {
-            fileAccess.deleteRecursively(path)
-            true
-        }
-
-    // region 文件复制 / 剪切 / 粘贴
-
-    /** 文件浏览剪切板：复制或剪切后暂存源条目，供粘贴到其它目录。 */
-    private val _browseClipboard = MutableStateFlow<BrowseClipboard?>(null)
-    val browseClipboard: StateFlow<BrowseClipboard?> = _browseClipboard.asStateFlow()
-
-    /** 复制条目进剪切板（剪切板只能存一项，直接覆盖旧的）。 */
-    fun copyBrowseEntry(path: String, name: String) {
-        _browseClipboard.value = BrowseClipboard(path, name, isCut = false)
-    }
-
-    /** 剪切条目进剪切板（粘贴成功后删除源，且只允许粘贴一次）。 */
-    fun cutBrowseEntry(path: String, name: String) {
-        _browseClipboard.value = BrowseClipboard(path, name, isCut = true)
-    }
-
-    /** 清空剪切板。 */
-    fun clearBrowseClipboard() {
-        _browseClipboard.value = null
-    }
-
-    /** 粘贴冲突（目标已存在同名项）待用户确认覆盖。持有源路径与目标目录，确认后调 [pasteBrowseEntryOverwrite]。 */
-    private val _pasteConflict = MutableStateFlow<Pair<String, String>?>(null)
-    val pasteConflict: StateFlow<Pair<String, String>?> = _pasteConflict.asStateFlow()
-
-    /** 把剪切板内容粘贴到 [targetDir]。目标已存在同名项时，发 [pasteConflict] 让 UI 弹窗询问是否覆盖，
-     *  不执行粘贴；否则直接粘贴。粘贴成功即清空剪切板（无论复制/剪切，一次粘贴后失效），失败保留供重试。 */
-    fun pasteBrowseEntry(targetDir: String, onResult: (Boolean) -> Unit) = viewModelScope.launch {
-        val clip = _browseClipboard.value ?: return@launch onResult(false)
-        if (clip.sourcePath == targetDir) return@launch onResult(false)
-        val name = clip.sourceName
-        if (!isValidFileEntryName(name)) return@launch onResult(false)
-        val target = "$targetDir/$name"
-        if (target == clip.sourcePath || target.startsWith("${clip.sourcePath.trimEnd('/')}/")) {
-            return@launch onResult(false)
-        }
-        if (withContext(Dispatchers.IO) { fileAccess.exists(target) }) {
-            _pasteConflict.value = clip.sourcePath to target
-            return@launch
-        }
-        performPaste(clip, target, overwrite = false, onResult)
-    }
-
-    /** 用户确认覆盖后强制粘贴（目标已存在同名项也会覆盖）。 */
-    fun pasteBrowseEntryOverwrite() {
-        val conflict = _pasteConflict.value ?: return
-        val clip = _browseClipboard.value ?: return
-        _pasteConflict.value = null
-        performPaste(clip, conflict.second, overwrite = true) {}
-    }
-
-    /** 清空粘贴冲突待确认状态（用户点了「取消」时）。 */
-    fun clearPasteConflict() {
-        _pasteConflict.value = null
-    }
-
-    private fun performPaste(clip: BrowseClipboard, target: String, overwrite: Boolean, onResult: (Boolean) -> Unit) {
-        val busyPaths = if (clip.isCut) setOf(clip.sourcePath, target) else setOf(target)
-        mutateBrowse(busyPaths = busyPaths, onResult = { success ->
-            // 无论复制还是剪切，粘贴成功即清空剪切板，避免重复粘贴；失败保留，允许重试。
-            if (success) _browseClipboard.value = null
-            onResult(success)
-        }) {
-            if (clip.isCut) {
-                fileAccess.move(clip.sourcePath, target, overwrite)
-                true
-            } else {
-                fileAccess.copy(clip.sourcePath, target, overwrite)
-                true
-            }
-        }
-    }
-
-    // endregion
-
     /** 当前会话完整信息（根会话与子会话通用；null 表示尚未解析出会话）。 */
     val currentSessionState: StateFlow<ChatSession?> = _currentSessionId
         .flatMapLatest { id ->
@@ -878,6 +523,11 @@ class AIAgentViewModel @Inject constructor(
 
     private val _runningTools = MutableStateFlow<Map<String, Map<String, RunningToolOutput>>>(emptyMap())
     private val runningToolSelector = RunningToolFlowSelector(_currentSessionId, _runningTools)
+    private data class ToolProgressKey(val sessionId: String, val messageId: String)
+    private val toolProgressLock = Any()
+    private val pendingToolProgress = mutableMapOf<ToolProgressKey, RunningToolOutput>()
+    private val toolProgressJobs = mutableMapOf<ToolProgressKey, Job>()
+    private val lastToolProgressAtMs = mutableMapOf<ToolProgressKey, Long>()
 
     /** 顶栏只订阅工具名称；同一工具的高频输出不会令整个聊天页重组。 */
     val activeRunningToolName = runningToolSelector.activeToolName
@@ -890,18 +540,70 @@ class AIAgentViewModel @Inject constructor(
 
     /** 添加/更新一个运行中工具（按 msgId 定位，支持多个工具并行）。 */
     private fun setRunningTool(sessionId: String, msgId: String, tool: RunningToolOutput) {
-        val sessionTools = _runningTools.value[sessionId] ?: emptyMap()
-        _runningTools.value = _runningTools.value + (sessionId to (sessionTools + (msgId to tool)))
+        synchronized(toolProgressLock) {
+            val sessionTools = _runningTools.value[sessionId] ?: emptyMap()
+            _runningTools.value = _runningTools.value + (sessionId to (sessionTools + (msgId to tool)))
+        }
     }
 
     /** 移除一个运行中工具；会话无剩余运行工具时清除该会话条目。 */
     private fun removeRunningTool(sessionId: String, msgId: String) {
-        val sessionTools = _runningTools.value[sessionId] ?: return
-        val updated = sessionTools - msgId
-        _runningTools.value = if (updated.isEmpty()) {
-            _runningTools.value - sessionId
-        } else {
-            _runningTools.value + (sessionId to updated)
+        synchronized(toolProgressLock) {
+            cancelPendingToolProgressLocked(ToolProgressKey(sessionId, msgId), clearLast = true)
+            val sessionTools = _runningTools.value[sessionId] ?: return
+            val updated = sessionTools - msgId
+            _runningTools.value = if (updated.isEmpty()) {
+                _runningTools.value - sessionId
+            } else {
+                _runningTools.value + (sessionId to updated)
+            }
+        }
+    }
+
+    /** 合并高频工具进度，最多每 60ms 更新一次卡片；窗口末尾冲刷最新文本，终态会取消待发旧值。 */
+    private fun publishToolProgress(sessionId: String, messageId: String, output: RunningToolOutput) {
+        val key = ToolProgressKey(sessionId, messageId)
+        val now = System.nanoTime() / NANOS_PER_MILLISECOND
+        synchronized(toolProgressLock) {
+            pendingToolProgress[key] = output
+            val elapsed = now - (lastToolProgressAtMs[key] ?: Long.MIN_VALUE / 2)
+            if (elapsed >= TOOL_PROGRESS_INTERVAL_MS) {
+                cancelPendingToolProgressLocked(key, clearLast = false)
+                pendingToolProgress.remove(key)
+                lastToolProgressAtMs[key] = now
+                val sessionTools = _runningTools.value[sessionId] ?: emptyMap()
+                _runningTools.value = _runningTools.value + (sessionId to (sessionTools + (messageId to output)))
+            } else if (toolProgressJobs[key] == null) {
+                val remaining = (TOOL_PROGRESS_INTERVAL_MS - elapsed).coerceAtLeast(1L)
+                toolProgressJobs[key] = viewModelScope.launch {
+                    delay(remaining)
+                    synchronized(toolProgressLock) {
+                        val latest = pendingToolProgress.remove(key)
+                        toolProgressJobs.remove(key)
+                        if (latest != null) {
+                            lastToolProgressAtMs[key] = System.nanoTime() / NANOS_PER_MILLISECOND
+                            val sessionTools = _runningTools.value[sessionId] ?: emptyMap()
+                            _runningTools.value = _runningTools.value + (sessionId to (sessionTools + (messageId to latest)))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** Must be called while [toolProgressLock] is held. */
+    private fun cancelPendingToolProgressLocked(key: ToolProgressKey, clearLast: Boolean) {
+        toolProgressJobs.remove(key)?.cancel()
+        pendingToolProgress.remove(key)
+        if (clearLast) lastToolProgressAtMs.remove(key)
+    }
+
+    private fun clearPendingToolProgress(sessionId: String) {
+        synchronized(toolProgressLock) {
+            (toolProgressJobs.keys + pendingToolProgress.keys + lastToolProgressAtMs.keys)
+                .filter { it.sessionId == sessionId }
+                .distinct()
+                .forEach { cancelPendingToolProgressLocked(it, clearLast = true) }
         }
     }
 
@@ -1042,8 +744,6 @@ class AIAgentViewModel @Inject constructor(
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
-    val pendingPlanApproval: StateFlow<PlanApprovalRequest?> = planApprovalManager.pendingApproval
-
     // 工具调用传入参数（argsPreview）按落库消息 id 暂存：ToolCallStarted 落库后，
     // ToolCallFinished / 用户停止会用同 id REPLACE 整行，需在此把参数带到后续落库。
     private val toolArgsByMsgId = mutableMapOf<String, String>()
@@ -1145,19 +845,18 @@ class AIAgentViewModel @Inject constructor(
 
     private companion object {
         const val TAG = "AIAgentViewModel"
+        const val TOOL_PROGRESS_INTERVAL_MS = 60L
+        const val NANOS_PER_MILLISECOND = 1_000_000L
+        const val MAX_REWIND_FAILURES_IN_DIALOG = 30
+        const val MAX_REGENERATED_IMAGE_BYTES = 20L * 1024 * 1024
+        const val REWIND_CANCEL_TIMEOUT_MS = 15_000L
+        const val MAX_DELETE_CASCADE_STABILIZATION_ATTEMPTS = 3
         const val AGENT_COMPLETE_CHANNEL = "agent_complete"
         const val AGENT_COMPLETE_NOTIFICATION_ID = 100
         /** wakeLock 超时保险：构建、装依赖类工具动辄十几分钟，给足 60 分钟；任务正常结束会主动释放。 */
         const val KEEPALIVE_TIMEOUT_MS = 60 * 60 * 1000L
         /** 从后台任务通知文本中提取 <title> 内容，供系统通知正文展示。 */
         val TASK_NOTIFICATION_TITLE_REGEX = Regex("<title>([^<]+)</title>")
-        /** 文件浏览排序：目录在前，同类按名称不区分大小写。 */
-        val BROWSE_ORDER: Comparator<FileEntry> =
-            compareByDescending<FileEntry> { it.isDirectory }
-                .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }
-
-        /** 写文件会连珠触发多个 inotify 事件，合并后再重读目录。 */
-        const val BROWSE_DEBOUNCE_MS = 300L
     }
 
     init {
@@ -1209,14 +908,19 @@ class AIAgentViewModel @Inject constructor(
 
         // 订阅子代理生命周期事件（类比 terminal 的 notify=true 异步回调）：
         // - SPAWNED：task 工具已创建子会话并替用户发消息，这里在子会话上自动启动 AI 工作流；
-        // - STOPPED：task(action="stop") 请求停止子代理，取消对应会话的 AI 任务；
-        // - COMPLETED/FAILED：由子会话工作流结束时发出（见 handleSubAgentFinished），注入父会话通知。
+        // - STOP_REQUESTED：task(action="stop") 请求停止；并发/写入范围槽位保留到协程真正结束；
+        // - STOPPED：取消完成后的终态；COMPLETED/FAILED/TIMED_OUT 同样注入父会话通知。
         viewModelScope.launch {
             subAgentEventBus.events.collect { event ->
                 when (event.type) {
                     SubAgentEventType.SPAWNED -> spawnSubAgentWorkflow(event)
-                    SubAgentEventType.STOPPED -> stopAgentSession(event.subSessionId)
-                    SubAgentEventType.COMPLETED, SubAgentEventType.FAILED -> {
+                    SubAgentEventType.STOP_REQUESTED -> stopAgentSession(event.subSessionId)
+                    SubAgentEventType.STOPPED -> {
+                        stoppingSubAgentIds.remove(event.subSessionId)
+                        enqueueSubAgentNotification(event)
+                    }
+                    SubAgentEventType.DELETE_REQUESTED -> deleteSubAgentAfterStop(event)
+                    SubAgentEventType.COMPLETED, SubAgentEventType.FAILED, SubAgentEventType.TIMED_OUT -> {
                         enqueueSubAgentNotification(event)
                     }
                     SubAgentEventType.MESSAGE_FROM_PARENT -> deliverMessageToSubAgent(event)
@@ -1232,25 +936,100 @@ class AIAgentViewModel @Inject constructor(
      * 标题保留 task 传入的 description（skipTitleUpdate）。
      */
     private suspend fun spawnSubAgentWorkflow(event: SubAgentEvent) {
+        // 事件总线是有缓冲的：父工作流可能在 SPAWNED 已入队、尚未消费时就请求删除。
+        // 此时不启动新工作流，已创建的行仍由删除级联一起清掉。
+        if (event.subSessionId in deletingSubAgentIds || event.parentSessionId in deletingSubAgentIds) {
+            subAgentEventBus.release(event.subSessionId)
+            return
+        }
         val parentSession = sessionUseCase.getSessionById(event.parentSessionId)
         if (parentSession == null) {
             FileLogger.w(TAG, "子代理父会话不存在: ${event.parentSessionId}")
+            sessionUseCase.updateSubagentStatus(event.subSessionId, "FAILED")
+            subAgentEventBus.release(event.subSessionId)
             return
         }
         // 子会话可能已被用户删除，跳过
         if (sessionUseCase.getSessionById(event.subSessionId) == null) {
             FileLogger.w(TAG, "子代理会话已被删除，跳过启动: ${event.subSessionId}")
+            subAgentEventBus.release(event.subSessionId)
             return
         }
         // 子代理运行中不允许重复启动（同一会话已有活跃 job）
         if (sessionJobs[event.subSessionId]?.isActive == true) return
 
-        executeAgentRequestStream(
+        sessionUseCase.updateSubagentStatus(event.subSessionId, "RUNNING")
+        val childJob = executeAgentRequestStream(
             request = event.detail,
             projectRoot = parentSession.workspacePath,
             targetSessionId = event.subSessionId,
             skipTitleUpdate = true
         )
+        val timeoutMillis = subAgentSettings.timeoutMillis()
+        viewModelScope.launch {
+            val finished = withTimeoutOrNull(timeoutMillis) {
+                childJob.join()
+                true
+            } == true
+            if (!finished && childJob.isActive) {
+                childJob.cancelAndJoin()
+                sessionUseCase.updateSubagentStatus(event.subSessionId, "TIMED_OUT")
+                subAgentEventBus.emit(
+                    SubAgentEvent(
+                        subSessionId = event.subSessionId,
+                        parentSessionId = event.parentSessionId,
+                        type = SubAgentEventType.TIMED_OUT,
+                        detail = "子代理运行超过配置的 ${timeoutMillis / 60_000} 分钟上限，已取消。"
+                    )
+                )
+            }
+        }
+    }
+
+    /** Deletion is serialized through the workflow owner: never remove a running child row before its job has joined. */
+    private fun deleteSubAgentAfterStop(event: SubAgentEvent) {
+        deletingSubAgentIds += event.subSessionId
+        viewModelScope.launch {
+            try {
+                val child = sessionUseCase.getSessionById(event.subSessionId) ?: return@launch
+                if (child.parentId != event.parentSessionId) return@launch
+
+                // Stop/join before the final traversal. The root can have emitted a child-dispatch event
+                // just before cancellation; repeat until the post-order tree is stable, then delete it.
+                var cascade = sessionUseCase.getSessionCascadeIds(event.subSessionId)
+                var stable = false
+                for (attempt in 0 until MAX_DELETE_CASCADE_STABILIZATION_ATTEMPTS) {
+                    if (!cancelSessionsAndAwait(cascade)) return@launch
+                    val refreshed = sessionUseCase.getSessionCascadeIds(event.subSessionId)
+                    if (refreshed.toSet() == cascade.toSet()) {
+                        cascade = refreshed
+                        stable = true
+                        break
+                    }
+                    cascade = refreshed
+                }
+                if (!stable) {
+                    showRewindNotice("子代理仍有新任务正在登记；为避免留下孤儿会话，本次删除已取消，请稍后重试。")
+                    return@launch
+                }
+                cascade.forEach { sid ->
+                    checkpointManager.clearSessionCheckpoints(sid)
+                    todoItemDao.deleteBySession(sid)
+                }
+                val deletedIds = sessionUseCase.deleteSession(event.subSessionId).toSet()
+                deletedIds.forEach { sid ->
+                    deletingSubAgentIds.remove(sid)
+                    clearSessionTransientState(sid)
+                }
+                if (_currentSessionId.value in deletedIds) {
+                    _currentSessionId.value = event.parentSessionId.takeIf { sessionUseCase.getSessionById(it) != null }
+                        ?: createAndUpsertSession(child.workspacePath)
+                }
+                showRewindNotice("子代理会话、消息、待办和检查点已删除；用量统计保留。")
+            } finally {
+                deletingSubAgentIds.remove(event.subSessionId)
+            }
+        }
     }
 
     /**
@@ -1260,17 +1039,24 @@ class AIAgentViewModel @Inject constructor(
      */
     private fun enqueueSubAgentNotification(event: SubAgentEvent) {
         viewModelScope.launch {
+            val state = when (event.type) {
+                SubAgentEventType.COMPLETED -> "COMPLETED"
+                SubAgentEventType.TIMED_OUT -> "TIMED_OUT"
+                SubAgentEventType.STOPPED -> "CANCELLED"
+                else -> "FAILED"
+            }
+            sessionUseCase.updateSubagentStatus(event.subSessionId, state)
             val title = sessionUseCase.getSessionById(event.subSessionId)?.title ?: "子代理"
             notifyParentSubAgentFinished(
                 parentSessionId = event.parentSessionId,
                 subSessionId = event.subSessionId,
                 title = title,
-                outcome = if (event.type == SubAgentEventType.FAILED) {
-                    NotificationOutcome.FAILED
-                } else {
-                    NotificationOutcome.COMPLETED
+                outcome = when (event.type) {
+                    SubAgentEventType.COMPLETED -> NotificationOutcome.COMPLETED
+                    SubAgentEventType.STOPPED -> NotificationOutcome.STOPPED
+                    else -> NotificationOutcome.FAILED
                 },
-                detail = event.detail.takeIf { it.isNotBlank() && event.type == SubAgentEventType.FAILED }
+                detail = event.detail.takeIf { it.isNotBlank() && event.type != SubAgentEventType.COMPLETED }
             )
         }
     }
@@ -1431,6 +1217,10 @@ class AIAgentViewModel @Inject constructor(
         targetSessionId: String? = null
     ) {
         val sid = targetSessionId ?: _currentSessionId.value
+        if (sid != null && isSessionRewinding(sid)) {
+            showRewindNotice("此会话正在回退或删除；操作完成后再发送新消息。")
+            return
+        }
         val isCurrentRunning = sid != null &&
             (sessionJobs[sid]?.isActive == true || sid in _runningCommandSessions.value)
         if (isCurrentRunning) {
@@ -1527,6 +1317,7 @@ class AIAgentViewModel @Inject constructor(
     }
 
     private fun processNextInQueue(sessionId: String) {
+        if (isSessionRewinding(sessionId)) return
         // 已有活跃 job（可能是本次收尾前由通知合并/flush 等入口启动的）时不消费，
         // 避免队列被多个收尾入口重复消费、同一会话并发跑两个 job。
         if (sessionJobs[sessionId]?.isActive == true) return
@@ -1586,6 +1377,10 @@ class AIAgentViewModel @Inject constructor(
             FileLogger.w(TAG, "工作区未就绪，跳过请求")
             return@launch
         }
+        if (isSessionRewinding(sessionId)) {
+            FileLogger.i(TAG, "跳过回退/删除期间到达的请求: session=$sessionId")
+            return@launch
+        }
         // 命令分流：命中斜杠命令（内置命令或技能）时，不走 agent workflow，直接执行命令操作
         // （命令文本已作为用户消息落库，进入对话上下文）。不注册 sessionJobs，
         // 因此 isRunning 保持 false，/compress 等命令内部的自检可以正常工作。
@@ -1597,6 +1392,11 @@ class AIAgentViewModel @Inject constructor(
         }
         // 兼容历史会话：若会话尚未持久化绑定 providerId/model，发消息时将其固化，避免后续默认模型变动影响已有会话
         val currentSession = sessionUseCase.getSessionById(sessionId)
+        if (currentSession?.parentId != null && currentSession.subagentStatus == "STARTING") {
+            // A bounded post-completion rework wakes a terminal child through the normal message
+            // queue. Move its persisted lifecycle back to RUNNING when that queued request starts.
+            sessionUseCase.updateSubagentStatus(sessionId, "RUNNING")
+        }
         if (currentSession != null && (currentSession.providerId.isNullOrBlank() || currentSession.model.isNullOrBlank())) {
             val defaultProviderId = defaultModelSettingsRepository.getDefaultProviderId().takeIf { it.isNotBlank() }
             val defaultModel = defaultModelSettingsRepository.getDefaultModel().takeIf { it.isNotBlank() }
@@ -1619,7 +1419,15 @@ class AIAgentViewModel @Inject constructor(
             val userMsgId = UUID.randomUUID().toString()
             if (!isAutoTrigger) {
                 messagePersistenceUseCase.persist(sessionId, MessageRole.USER, request, id = userMsgId, attachments = inputAttachments)
-                checkpointManager.createCheckpoint(sessionId, userMsgId, request)
+                val checkpoint = checkpointManager.createCheckpoint(sessionId, userMsgId, request)
+                val gitSnapshot = checkpointManager.captureGitTreeBeforeChanges(
+                    sessionId = sessionId,
+                    checkpointId = checkpoint.id,
+                    workspacePath = currentSession?.workspacePath ?: projectRoot
+                )
+                if (gitSnapshot.warning != null) {
+                    FileLogger.w(TAG, "Git 工作区快照不可用: session=$sessionId checkpoint=${checkpoint.id}: ${gitSnapshot.warning}")
+                }
                 if (isFirst && !skipTitleUpdate) {
                     sessionUseCase.updateTitle(sessionId, sessionUseCase.deriveTitle(request))
                     // 后台异步用 LLM 生成更贴切的标题替换临时标题；失败/取不到时保留临时标题
@@ -1637,10 +1445,19 @@ class AIAgentViewModel @Inject constructor(
             val sessionEntity = sessionUseCase.getSessionById(sessionId)
             val sessionDomain = sessionEntity?.toDomain()
             val mode = sessionDomain?.mode ?: AgentMode.BUILD
-            // 子会话的 subagentType 存的是自定义 agent 名；能查到定义时提示词与工具集都按它组装。
-            val agentDefinition = sessionEntity?.takeIf { it.parentId != null }
-                ?.subagentType
-                ?.let { agentDefinitionRepository.findIncludingDisabled(it) }
+            val isSub = sessionEntity?.parentId != null
+            val checkpointSessionId = sessionEntity?.parentId ?: sessionId
+            val childCheckpointId = if (isSub) {
+                sessionEntity?.dispatchMessageId
+                    ?.let { checkpointDao.getCheckpointBySessionAndMessage(checkpointSessionId, it)?.id }
+                    .orEmpty()
+            } else null
+            // 旧版自定义 agent 类型无法再恢复其文件配置；未知/历史类型安全降级为只读 explore，
+            // 避免旧会话在定义缺失时意外获得完整工具集。
+            val agentDefinition = if (isSub) {
+                sessionEntity?.subagentType?.let { BuiltInSubAgentCatalog.find(it) }
+                    ?: BuiltInSubAgentCatalog.find("explore")
+            } else null
 
             val agentContext = AgentContext(
                 currentFile = currentFile,
@@ -1655,11 +1472,21 @@ class AIAgentViewModel @Inject constructor(
                 mode = mode,
                 modeBeforePlan = sessionDomain?.modeBeforePlan,
                 reasoningEffort = sessionDomain?.reasoningEffort?.apiValue,
-                agentDefinition = agentDefinition
+                agentDefinition = agentDefinition,
+                sourceLabel = sessionEntity?.takeIf { it.parentId != null }?.let {
+                    "子代理「${agentDefinition?.name ?: it.subagentType ?: "子代理"}」"
+                },
+                allowedWritePaths = sessionEntity?.takeIf { it.parentId != null }?.allowedWritePaths?.split('\n'),
+                allowedReadPaths = sessionEntity?.takeIf { it.parentId != null }?.allowedReadPaths?.split('\n'),
+                explicitSubAgentRequest = request.contains(
+                    Regex("(?:明确|请|让|安排|派发|委派).{0,12}(?:子代理|子 agent|subagent|并行)|(?:使用|启动|派发|委派).{0,12}(?:子代理|子 agent|subagent)", RegexOption.IGNORE_CASE)
+                ),
+                superAgentEnabled = sessionEntity?.superAgentEnabled == true,
+                checkpointSessionId = checkpointSessionId,
+                checkpointId = childCheckpointId
             )
 
             val allTools = toolRegistry.getAvailableTools()
-            val isSub = sessionEntity?.parentId != null
             val tools = when {
                 agentDefinition != null -> {
                     val allowed = agentDefinition.filterToolNames(allTools.map { it.name }).toSet()
@@ -1820,7 +1647,7 @@ class AIAgentViewModel @Inject constructor(
                     }
                     is AgentEvent.ToolCallProgress -> {
                         val msgId = "tool_${event.id}"
-                        setRunningTool(sessionId, msgId, RunningToolOutput(
+                        publishToolProgress(sessionId, msgId, RunningToolOutput(
                             msgId,
                             event.accumulated,
                             event.toolName,
@@ -1886,8 +1713,7 @@ class AIAgentViewModel @Inject constructor(
                         }
                     }
                     is AgentEvent.ModeChanged -> {
-                        // 模式切换事件：PlanApprovalManager 已在 workflow 层面挂起等待用户批准
-                        // 这里只更新 streamingText 显示
+                        // 模式切换通知会随工具结果写入聊天记录；此处由上层状态观察器更新模式显示。
                     }
                 }
             }
@@ -1918,6 +1744,7 @@ class AIAgentViewModel @Inject constructor(
              setAgentState(sessionId, AgentUIState.Error(e.toUserMessage()))
              _completedSessions.value = _completedSessions.value - sessionId
         } finally {
+            clearPendingToolProgress(sessionId)
             val isOwnJob = sessionJobs[sessionId] == coroutineContext[Job]
             FileLogger.d(TAG, "stream finally: sid=$sessionId isOwnJob=$isOwnJob state=${_agentStates.value[sessionId]}")
             if (isOwnJob) {
@@ -2002,32 +1829,47 @@ class AIAgentViewModel @Inject constructor(
      * 取消 job 并把未完成的流式内容落库为「已停止」；队列下一条照常执行。
      */
     fun stopAgentSession(sessionId: String) {
-        val job = sessionJobs[sessionId] ?: return
-        if (!job.isActive) return
-        // 用户在界面上手动停止运行中的子代理：交回并发槽位并告知父代理，否则槽位泄漏到进程重启，
-        // 且父代理会一直等一条永不到达的完成通知。TaskTool 的 stop/del 已在 emit(STOPPED) 时释放过，
-        // 那条路径下 release 返回 false，不会重复通知。
-        if (subAgentEventBus.release(sessionId)) {
-            viewModelScope.launch {
-                val sub = sessionUseCase.getSessionById(sessionId)
-                val parentId = sub?.parentId
-                if (parentId != null) {
-                    notifyParentSubAgentFinished(
-                        parentSessionId = parentId,
-                        subSessionId = sessionId,
-                        title = sub.title,
-                        outcome = NotificationOutcome.STOPPED,
-                        detail = "用户在界面上手动停止了这个子代理，任务未完成。"
-                    )
-                }
-            }
-        }
+        val job = sessionJobs[sessionId]
+        val isActiveSubAgent = sessionId in subAgentEventBus.activeSubSessionIds.value
+        if (isActiveSubAgent && !stoppingSubAgentIds.add(sessionId)) return
+        // Snapshot before cancellation: the child may finish synchronously on Main.immediate.
         val runningTools = _runningTools.value[sessionId]?.values?.toList() ?: emptyList()
         val streamingText = _streamingTexts.value[sessionId]
         val streamingReasoning = _streamingReasonings.value[sessionId]
         val pendingPermission = toolPermissionManager.pendingForSession(sessionId)
         val stoppedText = context.getString(R.string.agent_stopped_by_user)
         val pendingNotifs = agentNotificationCenter.pendingCount(sessionId)
+        // Stopping a parent is a cancellation boundary: cancel every child immediately and persist
+        // terminal states even when the parent workflow itself has already returned.
+        viewModelScope.launch {
+            val session = sessionUseCase.getSessionById(sessionId) ?: return@launch
+            if (session.parentId == null) {
+                chatSessionDao.getSubSessionsByParentOnce(sessionId)
+                    .filter { it.id in subAgentEventBus.activeSubSessionIds.value }
+                    .forEach { child ->
+                        val accepted = subAgentEventBus.emit(
+                            SubAgentEvent(child.id, sessionId, SubAgentEventType.STOP_REQUESTED, "父任务已停止")
+                        )
+                        if (!accepted) stopAgentSession(child.id)
+                    }
+            } else if (sessionId in subAgentEventBus.activeSubSessionIds.value) {
+                // Keep the reservation and write scope until the child coroutine has actually stopped.
+                // Releasing before join allows a second worker to overlap while the old tool is still unwinding.
+                _queuedRequests.value = _queuedRequests.value - sessionId
+                agentNotificationCenter.clear(sessionId)
+                job?.cancelAndJoin()
+                sessionUseCase.updateSubagentStatus(sessionId, "CANCELLED")
+                subAgentEventBus.emit(
+                    SubAgentEvent(
+                        subSessionId = sessionId,
+                        parentSessionId = session.parentId,
+                        type = SubAgentEventType.STOPPED,
+                        detail = "子代理已停止；当前任务未完成。"
+                    )
+                )
+            }
+        }
+        if (job == null || !job.isActive) return
         FileLogger.d(TAG, "stopAgent: sid=$sessionId runningTools=${runningTools.size} pendingPerm=${pendingPermission?.id} pendingNotifs=$pendingNotifs state=${_agentStates.value[sessionId]}")
         // cancel() 在 Dispatchers.Main.immediate 上可能立即恢复挂起协程
         // （如 awaitApproval 的 CompletableDeferred.await），旧 job 的 finally →
@@ -2140,6 +1982,20 @@ class AIAgentViewModel @Inject constructor(
                 )
             }
         }
+    }
+
+    /** Session-level Super Agent toggle. The current request keeps its captured AgentContext; the next request sees this value. */
+    fun setSuperAgentEnabled(enabled: Boolean) {
+        val sid = _currentSessionId.value ?: return
+        viewModelScope.launch {
+            val session = sessionUseCase.getSessionById(sid) ?: return@launch
+            if (session.parentId != null) return@launch
+            sessionUseCase.updateSuperAgentEnabled(sid, enabled)
+        }
+    }
+
+    fun showSuperAgentExplanation() {
+        Toast.makeText(context, R.string.chat_super_agent_explanation, Toast.LENGTH_LONG).show()
     }
 
     fun setSessionReasoningEffort(effort: ReasoningEffort) {
@@ -2311,16 +2167,6 @@ class AIAgentViewModel @Inject constructor(
         sessionJobs[sid] = job
     }
 
-    /** 用户批准计划，唤醒 workflow 继续在 BUILD 模式执行。 */
-    fun approvePlanAndBuild() {
-        planApprovalManager.resolve(PlanApprovalChoice.APPROVE)
-    }
-
-    /** 用户选择继续反馈，唤醒 workflow 回滚到 PLAN 模式。 */
-    fun refinePlan() {
-        planApprovalManager.resolve(PlanApprovalChoice.REFINE)
-    }
-
     fun selectSession(id: String) {
         if (_currentSessionId.value == id) return
         _currentSessionId.value = id
@@ -2328,30 +2174,25 @@ class AIAgentViewModel @Inject constructor(
 
     fun deleteSessions(ids: Set<String>) = viewModelScope.launch {
         if (ids.isEmpty()) return@launch
+        val cascadeIds = ids.flatMap { sessionUseCase.getSessionCascadeIds(it) }.distinct()
+        if (!acquireRewindLocks(cascadeIds)) return@launch
+        if (!cancelSessionsAndAwait(cascadeIds)) return@launch
+        cascadeIds.forEach { sid ->
+            checkpointManager.clearSessionCheckpoints(sid)
+            todoItemDao.deleteBySession(sid)
+        }
         val allDeletedIds = mutableSetOf<String>()
         ids.forEach { id ->
             val deletedSession = sessionUseCase.getSessionById(id)
             if (deletedSession?.parentId != null) {
                 subAgentEventBus.release(id)
             }
-            checkpointManager.clearSessionCheckpoints(id)
             val deleted = sessionUseCase.deleteSession(id)
             allDeletedIds.addAll(deleted)
         }
 
         allDeletedIds.forEach { sid ->
-            subAgentEventBus.release(sid)
-            sessionJobs[sid]?.cancel()
-            sessionJobs.remove(sid)
-            _agentStates.value = _agentStates.value - sid
-            _streamingTexts.value = _streamingTexts.value - sid
-            setStreamingReasoning(sid, null)
-            _runningTools.value = _runningTools.value - sid
-            _retryStates.value = _retryStates.value - sid
-            _queuedRequests.value = _queuedRequests.value - sid
-            _inputDrafts.value = _inputDrafts.value - sid
-            draftPrefs.edit().remove(sid).apply()
-            agentNotificationCenter.clear(sid)
+            clearSessionTransientState(sid)
         }
 
         if (_currentSessionId.value in allDeletedIds) {
@@ -2373,24 +2214,21 @@ class AIAgentViewModel @Inject constructor(
         // 删掉运行中的子代理时先取它的父会话与标题（删库后就取不到了），稍后告知父代理。
         // 删的是父会话时无需通知（父会话本身也没了），但级联删掉的子会话仍要交回并发槽位。
         val deletedSession = sessionUseCase.getSessionById(id)
-        val stoppedSubAgent = deletedSession?.takeIf { it.parentId != null && subAgentEventBus.release(id) }
+        val wasActiveSubAgent = deletedSession?.takeIf {
+            it.parentId != null && id in subAgentEventBus.activeSubSessionIds.value
+        }
+        val cascadeIds = sessionUseCase.getSessionCascadeIds(id)
+        if (!acquireRewindLocks(cascadeIds)) return@launch
+        if (!cancelSessionsAndAwait(cascadeIds)) return@launch
 
-        checkpointManager.clearSessionCheckpoints(id)
+        cascadeIds.forEach { sid ->
+            checkpointManager.clearSessionCheckpoints(sid)
+            todoItemDao.deleteBySession(sid)
+        }
         val deletedIds = sessionUseCase.deleteSession(id)
 
         deletedIds.forEach { sid ->
-            subAgentEventBus.release(sid)
-            sessionJobs[sid]?.cancel()
-            sessionJobs.remove(sid)
-            _agentStates.value = _agentStates.value - sid
-            _streamingTexts.value = _streamingTexts.value - sid
-            setStreamingReasoning(sid, null)
-            _runningTools.value = _runningTools.value - sid
-            _retryStates.value = _retryStates.value - sid
-            _queuedRequests.value = _queuedRequests.value - sid
-            _inputDrafts.value = _inputDrafts.value - sid
-            draftPrefs.edit().remove(sid).apply()
-            agentNotificationCenter.clear(sid)
+            clearSessionTransientState(sid)
         }
 
         if (_currentSessionId.value in deletedIds) {
@@ -2407,7 +2245,7 @@ class AIAgentViewModel @Inject constructor(
             }
         }
 
-        stoppedSubAgent?.let { sub ->
+        wasActiveSubAgent?.let { sub ->
             notifyParentSubAgentFinished(
                 parentSessionId = sub.parentId!!,
                 subSessionId = sub.id,
@@ -2421,6 +2259,48 @@ class AIAgentViewModel @Inject constructor(
     // Checkpoint Rewind 选中的目标消息 id
     private val _targetRewindMessageId = MutableStateFlow<String?>(null)
     val targetRewindMessageId: StateFlow<String?> = _targetRewindMessageId.asStateFlow()
+
+    private val _rewindConfirmation = MutableStateFlow<RewindConfirmation?>(null)
+    val rewindConfirmation: StateFlow<RewindConfirmation?> = _rewindConfirmation.asStateFlow()
+
+    private val _rewindNotice = MutableStateFlow<String?>(null)
+    val rewindNotice: StateFlow<String?> = _rewindNotice.asStateFlow()
+
+    fun requestRewindConfirmation(messageId: String, option: RewindOption) = viewModelScope.launch {
+        val message = agentMessageDao.getMessageById(messageId) ?: return@launch
+        val sessionId = _currentSessionId.value ?: return@launch
+        if (message.sessionId != sessionId) return@launch
+        val checkpoint = checkpointDao.getCheckpointBySessionAndMessage(sessionId, messageId)
+        val allChildren = sessionUseCase.getSessionCascadeIds(sessionId).filter { it != sessionId }
+        val removesConversation = option != RewindOption.RESTORE_CODE
+        val removedChildren = if (removesConversation) descendantsDerivedAtOrAfter(sessionId, message.timestamp) else emptyList()
+        val affectedMessages = if (removesConversation) {
+            agentMessageDao.countMessagesFromTimestamp(sessionId, message.timestamp)
+        } else 0
+        val snapshots = checkpoint?.let { checkpointDao.countFileSnapshotsFrom(sessionId, it.createdAt) } ?: 0
+        val unverifiableSnapshots = checkpoint?.let {
+            checkpointDao.countUnverifiableFileSnapshotsFrom(sessionId, it.createdAt)
+        } ?: 0
+        val gitSnapshot = checkpoint?.let { checkpointManager.hasGitSnapshot(sessionId, it.id) } ?: false
+        _rewindConfirmation.value = RewindConfirmation(
+            messageId = messageId,
+            option = option,
+            removedMessageCount = affectedMessages,
+            removedSubagentCount = removedChildren.size,
+            stoppedSubagentCount = allChildren.count { it in subAgentEventBus.activeSubSessionIds.value },
+            fileSnapshotCount = snapshots,
+            unverifiableFileSnapshotCount = unverifiableSnapshots,
+            hasGitSnapshot = gitSnapshot
+        )
+    }
+
+    fun dismissRewindConfirmation() {
+        _rewindConfirmation.value = null
+    }
+
+    fun dismissRewindNotice() {
+        _rewindNotice.value = null
+    }
 
     fun openRewindMenu(messageId: String) {
         _targetRewindMessageId.value = messageId
@@ -2438,44 +2318,57 @@ class AIAgentViewModel @Inject constructor(
         val sessionId = _currentSessionId.value ?: return@launch
         dismissRewindMenu()
 
-        // 1. 停止当前正在运行的 Agent 任务及后续排队
-        _queuedRequests.value = _queuedRequests.value + (sessionId to emptyList())
-        agentNotificationCenter.clear(sessionId)
-        val runningJob = sessionJobs[sessionId]
-        if (runningJob != null && runningJob.isActive) {
-            runningJob.cancelAndJoin()
+        val targetMsgEntity = agentMessageDao.getMessageById(messageId) ?: return@launch
+        if (targetMsgEntity.sessionId != sessionId) {
+            FileLogger.w(TAG, "拒绝跨会话回退: message=$messageId session=$sessionId")
+            return@launch
         }
-        sessionJobs.remove(sessionId)
+        val checkpoint = checkpointDao.getCheckpointBySessionAndMessage(sessionId, messageId)
+        val workspacePath = sessionUseCase.getSessionById(sessionId)?.workspacePath
 
-        // 2. 重置会话运行、流式与检查点状态
-        setAgentState(sessionId, AgentUIState.Idle)
-        _runningTools.value = _runningTools.value - sessionId
-        setStreamingText(sessionId, null)
-        setStreamingReasoning(sessionId, null)
-        setCompacting(sessionId, false)
-        _contextUsages.value = _contextUsages.value - sessionId
-        setRetryState(sessionId, null)
+        // 1. 回退前先停掉整个派生分支，并使所有待审批恢复为拒绝。
+        // 子代理不能嵌套派生，但对旧数据仍按 parentId 递归收集，避免遗留孤儿任务。
+        val allChildren = sessionUseCase.getSessionCascadeIds(sessionId).filter { it != sessionId }
+        val descendantsToDelete = descendantsDerivedAtOrAfter(sessionId, targetMsgEntity.timestamp)
+        if (!acquireRewindLocks(listOf(sessionId) + allChildren)) return@launch
+        if (!cancelSessionsAndAwait(listOf(sessionId) + allChildren)) return@launch
+
+        // 2. 重置检查点游标；已取消的旧工作流不会在还原之后继续写入。
         checkpointManager.setActiveCheckpointId(sessionId, null)
 
-        val checkpoint = checkpointDao.getCheckpointBySessionAndMessage(sessionId, messageId)
-        val targetMsgEntity = agentMessageDao.getMessageById(messageId) ?: return@launch
         val attachments = targetMsgEntity.toUIMessage().attachments
 
         when (option) {
             RewindOption.RESTORE_CODE_AND_CONVERSATION -> {
+                var restoreResult: com.aicode.feature.agent.domain.checkpoint.CheckpointRestoreResult? = null
                 if (checkpoint != null) {
-                    checkpointManager.restoreCodeToCheckpoint(sessionId, checkpoint.id)
+                    restoreResult = checkpointManager.restoreCodeToCheckpointDetailed(
+                        sessionId,
+                        checkpoint.id,
+                        workspacePath
+                    )
+                } else {
+                    showRewindNotice("找不到该消息对应的检查点；代码未还原。")
                 }
-                messagePersistenceUseCase.rewindConversation(sessionId, targetMsgEntity.timestamp)
+                finishRewindConversation(sessionId, targetMsgEntity.timestamp, descendantsToDelete)
+                restoreResult?.let(::showRestoreResult)
                 withContext(Dispatchers.Main) { onFillPrompt(targetMsgEntity.content, attachments) }
             }
             RewindOption.RESTORE_CONVERSATION -> {
-                messagePersistenceUseCase.rewindConversation(sessionId, targetMsgEntity.timestamp)
+                finishRewindConversation(sessionId, targetMsgEntity.timestamp, descendantsToDelete)
+                showRewindNotice("仅回退对话记录；工作区文件未还原。")
                 withContext(Dispatchers.Main) { onFillPrompt(targetMsgEntity.content, attachments) }
             }
             RewindOption.RESTORE_CODE -> {
                 if (checkpoint != null) {
-                    checkpointManager.restoreCodeToCheckpoint(sessionId, checkpoint.id)
+                    val result = checkpointManager.restoreCodeToCheckpointDetailed(
+                        sessionId,
+                        checkpoint.id,
+                        workspacePath
+                    )
+                    showRestoreResult(result)
+                } else {
+                    showRewindNotice("找不到该消息对应的检查点；代码未还原。")
                 }
             }
         }
@@ -2553,16 +2446,280 @@ class AIAgentViewModel @Inject constructor(
         }
     }
 
+    /** Editing a user turn rewinds dependent output and fills the composer; it never leaves stale descendants. */
+    fun editUserMessageAndResend(
+        messageId: String,
+        editedText: String,
+        onFillPrompt: (String, List<AgentAttachment>) -> Unit
+    ) = viewModelScope.launch {
+        val message = agentMessageDao.getMessageById(messageId) ?: return@launch
+        if (message.role != MessageRole.USER.name || editedText.isBlank()) return@launch
+        val session = sessionUseCase.getSessionById(message.sessionId) ?: return@launch
+        val checkpoint = checkpointDao.getCheckpointBySessionAndMessage(message.sessionId, messageId)
+        val children = descendantsDerivedAtOrAfter(message.sessionId, message.timestamp)
+        val cascade = sessionUseCase.getSessionCascadeIds(message.sessionId)
+        if (!acquireRewindLocks(cascade)) return@launch
+        if (!cancelSessionsAndAwait(cascade)) return@launch
+        if (checkpoint != null) {
+            showRestoreResult(
+                checkpointManager.restoreCodeToCheckpointDetailed(message.sessionId, checkpoint.id, session.workspacePath)
+            )
+        } else {
+            showRewindNotice("找不到对应的文件检查点；旧轮对话将移除，但工作区文件不会自动还原。")
+        }
+        finishRewindConversation(message.sessionId, message.timestamp, children)
+        withContext(Dispatchers.Main) { onFillPrompt(editedText, message.toUIMessage().attachments) }
+    }
+
+    /** Re-run an assistant turn from its source user message after reverting files and derived subagents. */
+    fun regenerateAssistantMessage(messageId: String) = viewModelScope.launch {
+        val assistant = agentMessageDao.getMessageById(messageId) ?: return@launch
+        if (assistant.role != MessageRole.ASSISTANT.name) return@launch
+        val messages = agentMessageDao.getMessagesBySessionOnce(assistant.sessionId)
+        val source = messages.lastOrNull {
+            it.role == MessageRole.USER.name && it.timestamp < assistant.timestamp
+        } ?: run {
+            showRewindNotice("找不到这条回复对应的用户消息，无法重新生成。")
+            return@launch
+        }
+        val session = sessionUseCase.getSessionById(assistant.sessionId) ?: return@launch
+        val checkpoint = checkpointDao.getCheckpointBySessionAndMessage(assistant.sessionId, source.id)
+        val attachments = source.toUIMessage().attachments
+        val children = descendantsDerivedAtOrAfter(assistant.sessionId, source.timestamp)
+        val cascade = sessionUseCase.getSessionCascadeIds(assistant.sessionId)
+        if (!acquireRewindLocks(cascade)) return@launch
+        if (!cancelSessionsAndAwait(cascade)) return@launch
+        if (checkpoint != null) {
+            showRestoreResult(
+                checkpointManager.restoreCodeToCheckpointDetailed(assistant.sessionId, checkpoint.id, session.workspacePath)
+            )
+        } else {
+            showRewindNotice("找不到原始文件检查点；对话会重新生成，但之前的工作区文件改动不会自动还原。")
+        }
+        finishRewindConversation(assistant.sessionId, source.timestamp, children)
+        val images = withContext(Dispatchers.IO) { attachments.toAgentImagesForRegeneration() }
+        enqueueAgentRequest(
+            request = source.content,
+            modelRequest = source.content,
+            projectRoot = session.workspacePath,
+            inputImages = images,
+            inputAttachments = attachments,
+            targetSessionId = assistant.sessionId
+        )
+    }
+
+    private suspend fun List<AgentAttachment>.toAgentImagesForRegeneration(): List<AgentImage> {
+        val result = mutableListOf<AgentImage>()
+        for (attachment in this) {
+            if (!attachment.isImage || attachment.sizeBytes <= 0 || attachment.sizeBytes > MAX_REGENERATED_IMAGE_BYTES) continue
+            runCatching {
+                val local = attachment.localPath.takeIf { it.isNotBlank() && java.io.File(it).isFile }
+                    ?.let { java.io.File(it) }
+                    ?: fileAccess.copyToLocal(attachment.containerPath)
+                if (!local.isFile || local.length() <= 0 || local.length() > MAX_REGENERATED_IMAGE_BYTES) return@runCatching
+                result += AgentImage(
+                    mimeType = attachment.mimeType.ifBlank { "image/jpeg" },
+                    base64Data = java.util.Base64.getEncoder().encodeToString(local.readBytes()),
+                    path = attachment.containerPath
+                )
+            }.onFailure { error ->
+                FileLogger.w(TAG, "重新生成时读取图片附件失败: ${attachment.fileName}", error)
+            }
+        }
+        return result
+    }
+
     fun deleteMessage(messageId: String) = viewModelScope.launch {
         try {
             val msg = agentMessageDao.getMessageById(messageId)
-            if (msg != null && msg.role == MessageRole.USER.name) {
-                agentMessageDao.deleteMessagesAfterTimestamp(msg.sessionId, msg.timestamp)
+            if (msg == null) return@launch
+            val session = sessionUseCase.getSessionById(msg.sessionId) ?: return@launch
+            // 删除任一轮内消息时按整轮回退，防止助手/tool 结果及子代理输出失去来源。
+            val turnStart = if (msg.role == MessageRole.USER.name) {
+                msg
+            } else {
+                agentMessageDao.getMessagesBySessionOnce(msg.sessionId)
+                    .lastOrNull { it.role == MessageRole.USER.name && it.timestamp <= msg.timestamp }
             }
-            agentMessageDao.deleteMessageById(messageId)
+            if (turnStart != null) {
+                val checkpoint = checkpointDao.getCheckpointBySessionAndMessage(msg.sessionId, turnStart.id)
+                val children = descendantsDerivedAtOrAfter(msg.sessionId, turnStart.timestamp)
+                val cascade = sessionUseCase.getSessionCascadeIds(msg.sessionId)
+                if (!acquireRewindLocks(cascade)) return@launch
+                if (!cancelSessionsAndAwait(cascade)) return@launch
+                if (checkpoint != null) {
+                    val restore = checkpointManager.restoreCodeToCheckpointDetailed(
+                        msg.sessionId,
+                        checkpoint.id,
+                        session.workspacePath
+                    )
+                    showRestoreResult(restore)
+                } else {
+                    showRewindNotice("找不到对应的文件检查点；删除了对话，但没有自动修改工作区文件。")
+                }
+                finishRewindConversation(msg.sessionId, turnStart.timestamp, children)
+            } else {
+                agentMessageDao.deleteMessageById(messageId)
+            }
         } catch (e: Exception) {
             FileLogger.e(TAG, "删除消息失败", e)
         }
+    }
+
+    /** Cancels all jobs before destructive conversation/session operations and drains pending approvals. */
+    private suspend fun cancelSessionsAndAwait(sessionIds: List<String>): Boolean {
+        val ids = sessionIds.distinct()
+        val activeSubagents = subAgentEventBus.activeSubSessionIds.value
+        val activeJobs = ids.filterTo(linkedSetOf()) { sessionJobs[it]?.isActive == true }
+        val activeIds = activeJobs + activeSubagents.intersect(ids.toSet())
+        ids.forEach { sid ->
+            toolPermissionManager.cancelPendingForSession(sid)
+            _queuedRequests.value = _queuedRequests.value + (sid to emptyList())
+            if (sid in activeIds) {
+                agentNotificationCenter.clear(sid)
+                sessionJobs[sid]?.cancel()
+            }
+        }
+        val stopped = withTimeoutOrNull(REWIND_CANCEL_TIMEOUT_MS) {
+            activeJobs.forEach { sid -> sessionJobs[sid]?.cancelAndJoin() }
+            true
+        } ?: false
+        if (!stopped) {
+            showRewindNotice("仍有工作流未能在 ${REWIND_CANCEL_TIMEOUT_MS / 1000} 秒内停止；为避免继续写入，未执行回退或删除。")
+            return false
+        }
+        activeIds.forEach { sid ->
+            sessionJobs.remove(sid)
+            setAgentState(sid, AgentUIState.Idle)
+            _runningTools.value = _runningTools.value - sid
+            _streamingTexts.value = _streamingTexts.value - sid
+            setStreamingReasoning(sid, null)
+            setCompacting(sid, false)
+            setRetryState(sid, null)
+            _contextUsages.value = _contextUsages.value - sid
+            _queuedRequests.value = _queuedRequests.value - sid
+            subAgentEventBus.release(sid)
+            if (sid in activeSubagents && sessionUseCase.getSessionById(sid)?.parentId != null) {
+                sessionUseCase.updateSubagentStatus(sid, "CANCELLED")
+            }
+        }
+        return true
+    }
+
+    /** Removes per-session transient state after the session's persistent rows have been deleted. */
+    private fun clearSessionTransientState(sessionId: String) {
+        sessionJobs.remove(sessionId)
+        subAgentEventBus.release(sessionId)
+        agentNotificationCenter.clear(sessionId)
+        deletingSubAgentIds.remove(sessionId)
+        _agentStates.value = _agentStates.value - sessionId
+        _completedSessions.value = _completedSessions.value - sessionId
+        _messageLimit.value = _messageLimit.value - sessionId
+        _streamingTexts.value = _streamingTexts.value - sessionId
+        _streamingReasonings.value = _streamingReasonings.value - sessionId
+        _reasoningTimings.value = _reasoningTimings.value - sessionId
+        _runningTools.value = _runningTools.value - sessionId
+        _preparingTools.value = _preparingTools.value - sessionId
+        _compactingSessions.value = _compactingSessions.value - sessionId
+        _contextUsages.value = _contextUsages.value - sessionId
+        _retryStates.value = _retryStates.value - sessionId
+        _keySwitchStates.value = _keySwitchStates.value - sessionId
+        _queuedRequests.value = _queuedRequests.value - sessionId
+        _inputDrafts.value = _inputDrafts.value - sessionId
+        _runningCommandSessions.value = _runningCommandSessions.value - sessionId
+        if (_pendingScrollMessage.value?.first == sessionId) _pendingScrollMessage.value = null
+        draftPrefs.edit().remove(sessionId).apply()
+    }
+
+    /** Atomically reserves a full session cascade until the calling coroutine completes or is cancelled. */
+    private suspend fun acquireRewindLocks(sessionIds: Collection<String>): Boolean {
+        val ids = sessionIds.filter(String::isNotBlank).toSet()
+        if (ids.isEmpty()) return true
+        synchronized(rewindLock) {
+            if (ids.any { it in rewindingSessions }) {
+                showRewindNotice("此会话正在执行另一个回退或删除操作，请稍后重试。")
+                return false
+            }
+            rewindingSessions.addAll(ids)
+        }
+        val owner = coroutineContext[Job]
+        if (owner == null) {
+            synchronized(rewindLock) { rewindingSessions.removeAll(ids) }
+            return false
+        }
+        owner.invokeOnCompletion {
+            synchronized(rewindLock) { rewindingSessions.removeAll(ids) }
+        }
+        return true
+    }
+
+    private fun isSessionRewinding(sessionId: String): Boolean = synchronized(rewindLock) {
+        sessionId in rewindingSessions
+    }
+
+    private suspend fun descendantsDerivedAtOrAfter(parentSessionId: String, cutoff: Long): List<String> {
+        val candidates = sessionUseCase.getSessionCascadeIds(parentSessionId).filter { it != parentSessionId }
+        val messageIds = agentMessageDao.getMessagesBySessionOnce(parentSessionId)
+            .asSequence()
+            .filter { it.timestamp >= cutoff }
+            .map { it.id }
+            .toSet()
+        return candidates.filter { childId ->
+            val child = sessionUseCase.getSessionById(childId) ?: return@filter false
+            child.dispatchMessageId in messageIds || (child.dispatchMessageId == null && child.createdAt >= cutoff)
+        }
+    }
+
+    private suspend fun finishRewindConversation(sessionId: String, cutoff: Long, childIds: List<String>) {
+        // Child artifacts are removed first; usage rows are intentionally retained for /usage.
+        val handled = mutableSetOf<String>()
+        childIds.forEach { childId ->
+            if (childId in handled) return@forEach
+            val descendants = sessionUseCase.getSessionCascadeIds(childId)
+            handled += descendants
+            descendants.forEach { sid ->
+                checkpointManager.clearSessionCheckpoints(sid)
+                todoItemDao.deleteBySession(sid)
+            }
+            sessionUseCase.deleteSession(childId)
+            descendants.forEach { sid ->
+                clearSessionTransientState(sid)
+            }
+        }
+        messagePersistenceUseCase.rewindConversation(sessionId, cutoff)
+        todoItemDao.deleteBySession(sessionId)
+        checkpointManager.clearCheckpointsFrom(sessionId, cutoff)
+        checkpointManager.setActiveCheckpointId(sessionId, null)
+        val remaining = agentMessageDao.getMessagesBySessionOnce(sessionId)
+        val lastTokenCount = remaining.lastOrNull { it.role == MessageRole.ASSISTANT.name }?.inputTokens ?: 0
+        chatSessionDao.updateLastInputTokens(sessionId, lastTokenCount)
+    }
+
+    private fun showRestoreResult(result: com.aicode.feature.agent.domain.checkpoint.CheckpointRestoreResult) {
+        // A successful restore is self evident in the workspace. Keep the UI quiet and reserve the
+        // notice dialog for skipped files or actual failures that require the user's attention.
+        if (result.failures.isEmpty() && result.limitations.isEmpty()) return
+        val message = buildList {
+            if (result.restoredWorkspaceFileCount > 0) {
+                add(context.getString(R.string.checkpoint_rewind_workspace_restored, result.restoredWorkspaceFileCount))
+            }
+            if (result.restoredGitFileCount > 0) {
+                add(context.getString(R.string.checkpoint_rewind_git_restored, result.restoredGitFileCount))
+            }
+            addAll(result.limitations)
+            if (result.failures.isNotEmpty()) {
+                val visibleFailures = result.failures.take(MAX_REWIND_FAILURES_IN_DIALOG)
+                add("未还原项：\n${visibleFailures.joinToString("\n")}")
+                if (result.failures.size > visibleFailures.size) {
+                    add("另有 ${result.failures.size - visibleFailures.size} 项未展开")
+                }
+            }
+        }.joinToString("\n")
+        showRewindNotice(message)
+    }
+
+    private fun showRewindNotice(message: String) {
+        _rewindNotice.value = message
     }
 
     private fun detectLanguage(filePath: String): String {
@@ -2580,4 +2737,16 @@ class AIAgentViewModel @Inject constructor(
             else -> "text"
         }
     }
+
 }
+
+data class RewindConfirmation(
+    val messageId: String,
+    val option: RewindOption,
+    val removedMessageCount: Int,
+    val removedSubagentCount: Int,
+    val stoppedSubagentCount: Int,
+    val fileSnapshotCount: Int,
+    val unverifiableFileSnapshotCount: Int,
+    val hasGitSnapshot: Boolean
+)

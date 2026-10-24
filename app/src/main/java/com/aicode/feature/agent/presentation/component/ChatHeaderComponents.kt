@@ -75,6 +75,7 @@ internal const val CHAT_TODO_BAR_RESERVE_DP = 48
 internal fun ChatHeader(
     sessionTitle: String,
     modelName: String?,
+    providerAccountName: String? = null,
     inputTokens: Int,
     outputTokens: Int,
     onOpenDrawer: () -> Unit,
@@ -159,6 +160,16 @@ internal fun ChatHeader(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
                         )
+                        providerAccountName?.takeIf(String::isNotBlank)?.let { accountName ->
+                            Text(
+                                text = stringResource(R.string.chat_openai_account_identity, accountName),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = subtitleColor.copy(alpha = 0.8f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                        }
                     }
                 }
                 IconButton(onClick = onNewChat) {

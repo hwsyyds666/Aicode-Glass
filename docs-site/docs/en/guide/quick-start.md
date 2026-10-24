@@ -70,7 +70,7 @@ The first-time container preparation (extracting the system, installing base too
 
 ## 6. Start a Conversation
 
-Type in the input box and hit send. The mode button on the left of the input box switches between BUILD, PLAN and AUTO — see the full documentation on the three modes for the differences.
+Type in the input box and hit send. The mode button on the left of the input box switches between BUILD, PLAN and ASK — see the full documentation on the three modes for the differences.
 
 ## Useful Tips
 

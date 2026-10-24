@@ -145,9 +145,33 @@ class SearchCodeTool @Inject constructor(
                 "RG_UNAVAILABLE"
             )
         FileLogger.w(TAG, "rg 不可用，search 回退 grep 兜底: reason=$reason")
-        val result = runSearch(fallbackCommand)
+        var result = runSearch(fallbackCommand)
             ?: return ToolResult.Error("容器未就绪，无法执行搜索", "CONTAINER_NOT_READY")
+        // 退出码 2 且无输出 = 用法错误（个别精简 grep 不认 --exclude-dir 等旗标）：
+        // 用最小命令（仅 -rnI -E）重试一次，避免整条兜底链失效。
+        if (result.exitCode == 2 && result.output.isBlank()) {
+            val minimalCommand = buildFallbackSearchCommand(tokens, pathHomeResolver.home(), minimal = true)
+            if (minimalCommand != null) {
+                FileLogger.w(TAG, "grep 兜底用法错误，重试最小命令: $minimalCommand")
+                result = runSearch(minimalCommand)
+                    ?: return ToolResult.Error("容器未就绪，无法执行搜索", "CONTAINER_NOT_READY")
+            }
+        }
         if (result.exitCode != null && result.exitCode > 1) {
+            // 退出码 2 也可能是「部分文件读不了」（真机 /sdcard 权限拒绝常见）——
+            // 此时 stdout 里已有命中，整体丢弃对外表现就是"搜索结果不可靠"。
+            // 有输出一律按成功返回并标注可能不完整；完全无输出才报错。
+            if (result.output.isNotBlank()) {
+                FileLogger.w(TAG, "grep 兜底退出码 ${result.exitCode} 但有 ${result.output.length} 字符输出，按部分结果返回")
+                return ToolResult.Success(JsonObject(mapOf(
+                    "content" to JsonPrimitive(result.output),
+                    "matches" to JsonPrimitive(result.output.lineSequence().count { it.isNotBlank() }),
+                    "truncated" to JsonPrimitive(false),
+                    "elapsed_ms" to JsonPrimitive(System.currentTimeMillis() - startedAt),
+                    "backend" to JsonPrimitive("grep"),
+                    "warning" to JsonPrimitive("部分文件无法读取（权限或不存在），结果可能不完整")
+                )))
+            }
             return ToolResult.Error(result.output.ifBlank { "grep 兜底搜索失败" }, "SEARCH_ERROR")
         }
         val lines = result.output.lineSequence().filter { it.isNotBlank() }.toList()
@@ -161,7 +185,12 @@ class SearchCodeTool @Inject constructor(
     }
 
     private fun isRgMissing(output: String): Boolean {
-        return output.contains("command not found", ignoreCase = true) ||
+        // toybox（Android 真机 device 环境）找不到命令时的报错是
+        // 「rg: inaccessible or not found」——既不含 "command not found"
+        // 也不含 "rg: not found"，只靠这两句会漏检（仓库 GitCommandEngine
+        // 的注释早已记录该格式）。加一条精确匹配，避免误伤内容里的 "not found"。
+        return output.contains("inaccessible or not found", ignoreCase = true) ||
+            output.contains("command not found", ignoreCase = true) ||
             output.contains("rg: not found", ignoreCase = true)
     }
 }

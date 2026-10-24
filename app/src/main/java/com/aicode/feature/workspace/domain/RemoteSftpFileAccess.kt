@@ -6,14 +6,9 @@ import com.aicode.feature.agent.domain.container.RemoteSshConnection
 import com.aicode.feature.agent.domain.container.friendlySshError
 import com.aicode.feature.workspace.data.repository.WorkspaceRepository
 import com.aicode.feature.workspace.domain.WorkspacePathMapper.Companion.CONTAINER_ROOT
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
 import net.schmizz.sshj.sftp.FileMode
 import net.schmizz.sshj.sftp.OpenMode
 import net.schmizz.sshj.sftp.RemoteFile
@@ -29,6 +24,7 @@ import java.nio.charset.Charset
 import java.nio.file.Paths
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.NoSuchFileException
+import java.security.MessageDigest
 import java.util.EnumSet
 import javax.inject.Inject
 
@@ -68,7 +64,7 @@ class RemoteSftpFileAccess @Inject constructor(
     private val workspaceRepository: WorkspaceRepository
 ) : FileAccessProvider {
 
-    private val sftpMutex = Mutex()
+    private val operationGate = SftpOperationGate()
 
     /** 当前选中工作区在远程服务器上的真实路径（如 /data/.../test/111）。 */
     private fun currentWorkspaceRoot(): String {
@@ -94,22 +90,15 @@ class RemoteSftpFileAccess @Inject constructor(
      * [DEFAULT_SFTP_TIMEOUT_MS]，大块传输按数据量放宽），超时抛明确错误而不是无限挂起。
      */
     private suspend fun <T> withSftp(timeoutMs: Long = DEFAULT_SFTP_TIMEOUT_MS, block: (SFTPClient) -> T): T =
-        withContext(Dispatchers.IO) {
-            sftpMutex.withLock {
-                val sftp = try {
-                    connection.sftp()
-                } catch (e: Exception) {
-                    throw IOException(friendlySshError(e), e)
-                }
-                try {
-                    withTimeout(timeoutMs) { guarded { block(sftp) } }
-                } catch (e: TimeoutCancellationException) {
-                    // 只有真超时才会到这里（父协程取消时抛出的是取消异常，不会匹配本分支）：
-                    // 通道状态未知，丢弃待下次重建，给调用方明确错误。
-                    runCatching { connection.invalidateSftp() }
-                    throw IOException("SFTP 操作超时（${timeoutMs}ms 无响应），请检查网络后重试", e)
-                }
+        operationGate.execute(timeoutMs, onOperationTimeout = { connection.invalidateSftp() }) {
+            val sftp = try {
+                connection.sftp()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                throw IOException(friendlySshError(e), e)
             }
+            guarded { block(sftp) }
         }
 
     /**
@@ -117,20 +106,15 @@ class RemoteSftpFileAccess @Inject constructor(
      * 一次读取，`emit` 在锁外，调用方中途取消收集时不会把 [sftpMutex] 永久占住。
      */
     private suspend fun <T> onSftp(timeoutMs: Long = DEFAULT_SFTP_TIMEOUT_MS, block: () -> T): T =
-        withContext(Dispatchers.IO) {
-            sftpMutex.withLock {
-                try {
-                    withTimeout(timeoutMs) { guarded(block) }
-                } catch (e: TimeoutCancellationException) {
-                    runCatching { connection.invalidateSftp() }
-                    throw IOException("SFTP 操作超时（${timeoutMs}ms 无响应），请检查网络后重试", e)
-                }
-            }
+        operationGate.execute(timeoutMs, onOperationTimeout = { connection.invalidateSftp() }) {
+            guarded(block)
         }
 
     /** 传输层异常时丢弃 SFTP 通道（下次调用自动重建）后原样抛出；业务错误不重建。 */
     private suspend fun <T> guarded(block: () -> T): T = try {
         block()
+    } catch (e: CancellationException) {
+        throw e
     } catch (e: Exception) {
         if (e !is SFTPException && e !is NoSuchFileException && e !is FileAlreadyExistsException) {
             runCatching { connection.invalidateSftp() }
@@ -280,6 +264,29 @@ class RemoteSftpFileAccess @Inject constructor(
             if (e is NoSuchFileException) throw e
             FileLogger.e(TAG, "copyToLocal 失败: $remote", e)
             throw NoSuchFileException(File(remote))
+        }
+    }
+
+    override suspend fun sha256(path: String, maxBytes: Long): String? {
+        val remote = toRemotePath(path)
+        val size = fileSize(path)
+        if (size < 0L || size > maxBytes || !isFile(path)) return null
+        return withSftp(timeoutFor(size)) { sftp ->
+            val attrs = sftp.statExistence(remote) ?: return@withSftp null
+            if (attrs.type == FileMode.Type.DIRECTORY || attrs.size > maxBytes) return@withSftp null
+            val digest = MessageDigest.getInstance("SHA-256")
+            val buffer = ByteArray(IO_CHUNK)
+            var offset = 0L
+            sftp.open(remote).use { file ->
+                while (true) {
+                    val count = file.read(offset, buffer, 0, buffer.size)
+                    if (count <= 0) break
+                    offset += count
+                    if (offset > maxBytes) return@withSftp null
+                    digest.update(buffer, 0, count)
+                }
+            }
+            digest.sha256Result()
         }
     }
 

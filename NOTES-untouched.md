@@ -1,35 +1,41 @@
-# NOTES-untouched：本轮实施中顺带发现、未处理的问题
+# 遗留与真机验收清单
 
-> 按实施手册第 2 章 (25) 建立：随时记录顺带发现的问题。本文件不并入功能 commit
-> （单独 docs commit 或留存本地）。
+更新：2026-10-24（第二轮）。旧版中“任务 18 派发前快照未实现”等条目已过时，按当前代码删除；本轮已修复 Bash stdout 被 warning 吞、search grep 兜底漏结果、terminal send 必填 tab_id、独立 reviewer 设置、GitHub 手填 Client ID、步骤失败横幅、ChatGPT 账号页改版。这里仅保留不能由本机静态检查/单测替代的验证，以及明确延期项。
 
-## 数据库与检索
+## 用户拿到 Release 包后重点验收
 
-- **agent_messages 全文搜索未上 FTS**：`searchInWorkspace` 的 `content LIKE` 仍是全表扫。
-  本轮仅加 (sessionId, timestamp) 复合索引（迁移 59）。现有 debounce + LIMIT + IO
-  调度缓解可接受，10 万条级实测留待真机（见测试清单 17·P1-4）。
+- Bash 修复验证：非 Git 仓库工作区连续执行多条命令，stdout/stderr 必须完整可见（曾经的 bug：只返回 warning）。
+- search 修复验证：容器无 rg 时用 alternation 模式（如 `pstore|ramoops`）搜索，结果应与 rg 一致（曾经的 bug：BRE 把 `|` 当字面量）。
+- terminal 验证：不传 tab_id 的 send 在只有一个运行中标签时自动命中；多标签时报错带候选清单。
+- 超级 Agent 设置区：快速/主力的模型与思考强度（底部弹层）、派发限制三项（底部弹层）；确认无「独立 reviewer / 大改动阈值」残留。
+- ChatGPT 账号页：计划徽章配色、5h/每周额度迷你条与重置时间、模型选择弹层、图标动作行；深浅色主题下均清晰。
+- GitHub 连接：点「连接 GitHub」直接走 Device Flow（此版本未内置 OAuth App 时会显示注册指引，而非要求手填 ID；内置后零操作）。
+- 压缩长对话、超长最新消息、执行中触发压缩后继续提问；确认最新用户消息仍在上下文。
+- 工具卡片六种结束路径（成功、失败、取消、断网、切会话、进程回收）折叠/展开状态正确。
+- PLAN 多步骤任务及三种权限档位；确认 ASK 仍拒绝写操作。
+- 超过 2MB 的文件编辑直接拒绝；创建文件、编辑文件及子代理修改均可回退；人工外部改动不被覆盖。
+- 终态子代理返工两轮后第三次被拒；超级 Agent 关闭时不主动派发；开启时执行 6 文件/3 独立任务，检查并行状态、范围拒绝、返工。
+- 命令审查危险/模糊用例，断网/超时回退询问；删除家目录、工作区根、系统路径等均不能被“完全权限”或提权绕过。
+- 新目录缓存快速连续展开、SFTP 慢目录并发浏览、Agent 修改后精准刷新；观察滚动流畅度及切换目录时旧请求不覆盖新结果。
+- ripgrep 初次安装/缺失自愈；远程 SSH 无 rg 时 grep 兜底；测试 toybox grep 的实际选项兼容性。
+- GitHub OAuth Device Flow 真实登录、分页、克隆取消、限流/拒绝/过期；确认 token 不进入日志。
+- OpenAI 登录、凭据加密存储、退出/恢复授权及额度展示。不要将多账号轮换作为避开套餐/速率限制的测试目标。
+- sendFile 从容器/远程路径映射到本地，图片/大文件/重复文件/不存在路径，以及纯问答不应误发文件。
+- 斜杠菜单：100+ 技能，竖/横屏、软键盘、分屏、外接键盘与窄屏。
+- 设置各 Section、两档子代理模型/reviewer（命令审查器）设置、窄屏和横屏；确认设置页改动没有 UI 语义回归。
+- 背景图最大尺寸/面积约束；工具大量 stderr 时远程命令不死锁且错误可见。
+- 无限动画后台暂停/恢复，切换系统“移除动画”；真实帧率/CPU/GPU 仍需设备测量。
 
-## 检查点 / 回退（任务 18 的依赖项）
+## 依赖设备/网络的尚未验证项
 
-- **17·P0-2.4「派发前快照」钩子未实现**：`CheckpointManager.beforeFileModified`
-  已按可复用设计（sessionId 维度 + `SnapshotOutcome`），但「工作区级 / git write-tree
-  派发前快照」API 未加——按手册该能力在任务 18 实现，本条仅保证接口届时可复用。
-- **shell 命令的文件改动仍无快照**（现状，任务 18 处理）。
-- **快照空间预检用 `snapshotDir.usableSpace`**：本地存储准确；远程模式下该目录是
-  应用本地目录，预检的是「本机磁盘」而非远程剩余空间——远程大文件快照前不检查远程
-  磁盘。影响面小（快照下载到本机），记录待评估。
+- 当前 ADB 无设备连接。本机最终单测与构建完成不代表真机功能已验收。
+- Android 容器安装 `ripgrep` 的 DNS/镜像源/IPv6/代理、SSH `sudo -n` 三种情形、toybox grep 兼容性。
+- 远程 SFTP 大文件检查点仍把快照下载到应用本地目录；空间预检因此是本机剩余空间，不代表远端磁盘余量。
+- WebView Markdown 预览采用管道传输；超大远程文件和用户中途关闭 WebView 时的 broken-pipe 行为需真机确认。
+- 迁移 60–66 的脚本编号/版本对账可本机验证；Room/Robolectric 真实开库升级用例因当前 Windows ARM JDK 缺少 Conscrypt native 而被环境条件跳过。实际用户数据库升级仍需要在兼容 Linux/CI 或 Android 环境补测。
+- FTS 全文索引未增加：目前搜索仍以 `LIKE` 为主；10 万条量级性能数据需真实设备基准后决定是否引入。
 
-## 任务 10（rg 保障）未验证点
+## 有意延期
 
-- proot 下 `apk add ripgrep` 真机耗时与网络依赖（DNS/镜像源/代理/IPv6）。
-- 远程 SSH 的 `sudo -n` 三种形态（无 sudo / 需密码 / 免密）成功率。
-- 真机 ROOT 的 toybox grep 对 `-E` / `--exclude-dir` / `-I` 的支持度。
-- Hilt `Provider<RipgrepProvisioner>` 破环依赖图（javax.inject Provider 破环无先例，
-  编译已过，运行期实例化待真机验证）。
-
-## 其他
-
-- `MarkdownPreviewViewModel` 的 WebView `PathHandler` 管道方案（PipedInputStream +
-  IO 协程异步写）：远程大文件、WebView 中途断连（broken pipe）行为需真机验证。
-- 任务 16 同类弹层检查（模型选择器 / 文件夹浮窗 / @ 提及列表）：结论见任务 16 报告，
-  需要真机复核滚动与外接键盘行为。
+- 17·P3-d 已新增 Macrobenchmark 模块，含冷启动与对话流式输出/滚动两个基准场景。当前无连接设备，基准代码尚未在实体设备运行；不要把模拟器结果当成性能结论。
+- OpenAI 多账号配额轮换未实现；已交付安全的账号/凭据管理与额度显示。遵守 Sign in with ChatGPT 的官方授权边界，不为规避订阅套餐或速率限制而在账号间自动切换。

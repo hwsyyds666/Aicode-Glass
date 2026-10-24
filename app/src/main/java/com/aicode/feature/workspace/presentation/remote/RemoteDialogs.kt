@@ -693,7 +693,11 @@ fun RemoteDirectoryBrowserDialog(
                                 }
                             }
                         }
-                        items(directories) { dir ->
+                        items(
+                            items = directories,
+                            key = { dir -> "$currentPath/$dir" },
+                            contentType = { "remote-directory" }
+                        ) { dir ->
                             TextButton(onClick = {
                                 currentPath = if (currentPath == "/") "/$dir/" else "$currentPath$dir/"
                             }) {

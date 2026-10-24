@@ -235,6 +235,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
         // UserService 走 AIDL 跨进程接口（app/src/main/aidl），显式开启以免依赖 AGP 默认值。
         aidl = true
     }
@@ -439,6 +440,8 @@ dependencies {
 
     // Core Android
     implementation("androidx.core:core:1.16.0")
+    // AndroidX Macrobenchmark 需要 ProfilerInstaller 启用 profile capture/reset 与 shader cache clearing。
+    implementation("androidx.profileinstaller:profileinstaller:1.4.1")
 
     // Testing
     testImplementation("junit:junit:4.13.2")

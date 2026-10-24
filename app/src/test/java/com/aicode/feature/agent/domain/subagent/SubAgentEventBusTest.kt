@@ -30,6 +30,7 @@ class SubAgentEventBusTest {
         listOf(
             SubAgentEventType.COMPLETED,
             SubAgentEventType.FAILED,
+            SubAgentEventType.TIMED_OUT,
             SubAgentEventType.STOPPED
         ).forEach { type ->
             val bus = SubAgentEventBus()
@@ -38,6 +39,29 @@ class SubAgentEventBusTest {
 
             assertEquals("$type 应交回槽位", emptySet<String>(), bus.activeSubSessionIds.value)
         }
+    }
+
+    @Test
+    fun stopRequestKeepsConcurrencyAndWriteScopeReservedUntilTerminalEvent() {
+        val bus = SubAgentEventBus()
+        assertEquals(
+            SubAgentEventBus.Reservation.Reserved,
+            bus.reserve("parent", "worker-a", 0, 3, 12, listOf("/workspace/src"))
+        )
+        bus.emit(SubAgentEvent("worker-a", "parent", SubAgentEventType.STOP_REQUESTED))
+
+        assertEquals(setOf("worker-a"), bus.activeSubSessionIds.value)
+        assertEquals(
+            SubAgentEventBus.Reservation.OverlappingWriteScope,
+            bus.reserve("parent", "worker-b", 1, 3, 12, listOf("/workspace/src/main"))
+        )
+
+        bus.emit(SubAgentEvent("worker-a", "parent", SubAgentEventType.STOPPED))
+        assertEquals(emptySet<String>(), bus.activeSubSessionIds.value)
+        assertEquals(
+            SubAgentEventBus.Reservation.Reserved,
+            bus.reserve("parent", "worker-b", 1, 3, 12, listOf("/workspace/src/main"))
+        )
     }
 
     @Test
@@ -51,7 +75,7 @@ class SubAgentEventBusTest {
         assertFalse("腾出一个后应能再派发", bus.isFull)
     }
 
-    /** 用户手动停止走 release：必须真的交回槽位，否则上限被永久占用。 */
+    /** 用户手动停止在协程终止后走 release：必须真的交回槽位，否则上限会被永久占用。 */
     @Test
     fun release_freesSlotAndReportsWhetherItWasActive() {
         val bus = SubAgentEventBus()
@@ -84,5 +108,64 @@ class SubAgentEventBusTest {
         bus.release("sub-1")
 
         assertEquals(setOf("sub-2"), bus.activeSubSessionIds.value)
+    }
+
+    @Test
+    fun reservationEnforcesConcurrencyAndLifetimeLimitPerParent() {
+        val bus = SubAgentEventBus()
+        assertEquals(SubAgentEventBus.Reservation.Reserved, bus.reserve("p1", "a", 0, 1, 2))
+        assertEquals(SubAgentEventBus.Reservation.ConcurrentLimit, bus.reserve("p1", "b", 1, 1, 2))
+        bus.emit(SubAgentEvent("a", "p1", SubAgentEventType.COMPLETED))
+        assertEquals(SubAgentEventBus.Reservation.Reserved, bus.reserve("p1", "b", 1, 1, 2))
+        bus.emit(SubAgentEvent("b", "p1", SubAgentEventType.COMPLETED))
+        assertEquals(SubAgentEventBus.Reservation.TotalLimit, bus.reserve("p1", "c", 2, 1, 2))
+        assertEquals(SubAgentEventBus.Reservation.Reserved, bus.reserve("p2", "d", 0, 1, 2))
+    }
+
+    @Test
+    fun rollbackRestoresLifetimeAndConcurrencySlots() {
+        val bus = SubAgentEventBus()
+        assertEquals(SubAgentEventBus.Reservation.Reserved, bus.reserve("p", "a", 0, 1, 1))
+        bus.rollbackReservation("a")
+        assertEquals(SubAgentEventBus.Reservation.Reserved, bus.reserve("p", "b", 0, 1, 1))
+    }
+
+    @Test
+    fun reservationAtomicallyRejectsOverlappingWorkerScopes() {
+        val bus = SubAgentEventBus()
+        assertEquals(
+            SubAgentEventBus.Reservation.Reserved,
+            bus.reserve("p", "a", 0, 3, 12, listOf("/workspace/app/src"))
+        )
+        assertEquals(
+            SubAgentEventBus.Reservation.OverlappingWriteScope,
+            bus.reserve("p", "b", 1, 3, 12, listOf("/workspace/app/src/main"))
+        )
+        assertEquals(
+            SubAgentEventBus.Reservation.Reserved,
+            bus.reserve("p", "c", 1, 3, 12, listOf("/workspace/app/docs"))
+        )
+        bus.release("a")
+        assertEquals(
+            SubAgentEventBus.Reservation.Reserved,
+            bus.reserve("p", "d", 2, 3, 12, listOf("/workspace/app/src"))
+        )
+    }
+
+    @Test
+    fun reservationRejectsOverlappingScopesAcrossParentSessions() {
+        val bus = SubAgentEventBus()
+        assertEquals(
+            SubAgentEventBus.Reservation.Reserved,
+            bus.reserve("parent-a", "worker-a", 0, 3, 12, listOf("/workspace/app/src"))
+        )
+        assertEquals(
+            SubAgentEventBus.Reservation.OverlappingWriteScope,
+            bus.reserve("parent-b", "worker-b", 0, 3, 12, listOf("/workspace/app/src/main"))
+        )
+        assertEquals(
+            SubAgentEventBus.Reservation.Reserved,
+            bus.reserve("parent-b", "worker-c", 0, 3, 12, listOf("/workspace/other"))
+        )
     }
 }

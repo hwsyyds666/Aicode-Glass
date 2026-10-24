@@ -24,6 +24,9 @@
         android:usesCleartextTraffic="true"
         android:localeConfig="@xml/locales_config">
 
+        <!-- 供 AndroidX Macrobenchmark 在实体设备上采集 release 性能轨迹；只允许 shell profile，应用仍不可调试。 -->
+        <profileable android:shell="true" />
+
         <!-- configChanges 自行接管旋转与窗口尺寸变化：Compose 会跟着新 Configuration 重组，
              不重建 Activity 才能保住终端 TerminalView、编辑器未保存内容与聊天列表位置。
              故意不含 locale —— 语言切换仍走 MainActivity 里的 recreate 路径。 -->

@@ -21,6 +21,8 @@ import com.aicode.feature.agent.domain.session.MessagePersistenceUseCase
 import com.aicode.feature.agent.domain.checkpoint.CheckpointManager
 import com.aicode.feature.agent.domain.permission.PermissionChoice
 import com.aicode.feature.agent.domain.permission.PermissionScope
+import com.aicode.feature.agent.domain.permission.CommandDeletionAnalyzer
+import com.aicode.feature.agent.domain.permission.CommandReviewProtocol
 import com.aicode.feature.agent.domain.permission.ToolPermissionPolicyEngine
 import com.aicode.feature.agent.domain.prompt.SystemPromptProvider
 import com.aicode.feature.agent.domain.provider.AIProvider
@@ -29,24 +31,25 @@ import com.aicode.feature.agent.domain.provider.AIStreamChunk
 import com.aicode.feature.agent.domain.tool.AgentTool
 import com.aicode.feature.agent.domain.tool.StreamingAgentTool
 import com.aicode.feature.agent.domain.tool.ToolCall
-import com.aicode.feature.agent.domain.tool.mode.PlanApprovalChoice
-import com.aicode.feature.agent.domain.tool.mode.PlanApprovalManager
 import com.aicode.feature.agent.domain.tool.ToolPermissionManager
 import com.aicode.feature.agent.domain.tool.ToolPermissionPolicy
 import com.aicode.feature.agent.domain.tool.ToolRegistry
 import com.aicode.feature.agent.domain.tool.ToolResult
 import com.aicode.feature.agent.domain.tool.ToolInvoker
 import com.aicode.feature.agent.domain.tool.ToolRunResult
+import com.aicode.feature.agent.domain.tool.ToolCapability
 
 import com.aicode.feature.agent.domain.tool.modelToolResultText
 import com.aicode.feature.agent.domain.tool.toTransportString
 import com.aicode.feature.agent.presentation.AgentAttachment
 import com.aicode.feature.settings.data.remote.ModelMetadataService
 import com.aicode.feature.settings.data.repository.CompactionModelSettingsRepository
+import com.aicode.feature.settings.data.repository.CommandAuthLevel
 import com.aicode.feature.settings.data.repository.DefaultModelSettingsRepository
 import com.aicode.feature.settings.data.repository.GeneralSettingsRepository
 import com.aicode.feature.settings.data.repository.LanguageSettingsRepository
 import com.aicode.feature.settings.data.repository.ProviderKeyRotator
+import com.aicode.feature.settings.data.repository.OpenAIAccountRepository
 import com.aicode.feature.settings.data.repository.ReviewerModelSettingsRepository
 import com.aicode.feature.settings.data.repository.TitleModelSettingsRepository
 import com.aicode.feature.settings.domain.model.AIProviderConfig
@@ -67,7 +70,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -85,6 +91,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 
 /**
@@ -103,7 +110,6 @@ class StatefulAgentWorkflow @Inject constructor(
     private val permissionManager: ToolPermissionManager,
     private val policyEngine: ToolPermissionPolicyEngine,
     private val contextCompactor: ContextCompactor,
-    private val planApprovalManager: PlanApprovalManager,
     private val modelMetadataService: ModelMetadataService,
     private val compactionModelSettingsRepository: CompactionModelSettingsRepository,
     private val titleModelSettingsRepository: TitleModelSettingsRepository,
@@ -116,6 +122,7 @@ class StatefulAgentWorkflow @Inject constructor(
     private val checkpointManager: CheckpointManager,
     private val llmCallRecordDao: LlmCallRecordDao,
     private val keyRotator: ProviderKeyRotator,
+    private val openAIAccountRepository: OpenAIAccountRepository,
     private val agentNotificationCenter: AgentNotificationCenter,
     private val eventInjector: AgentEventInjector,
     private val fileAccess: FileAccessProvider
@@ -134,12 +141,14 @@ class StatefulAgentWorkflow @Inject constructor(
 
     private companion object {
         const val TAG = "StatefulAgentWorkflow"
+        const val OPENAI_ACCOUNT_BASE_URL = "https://api.openai.com/"
         const val USER_REJECTED_CODE = "USER_REJECTED"
         const val TITLE_GENERATOR_FILE = "agent/title-generator.md"
         const val TITLE_MAX_CHARS = 50
         const val COMMIT_GENERATOR_FILE = "agent/commit-generator.md"
         /** AI 命令审查器提示词：「自主执行」挡位下逐条评审 shell 命令。 */
         const val COMMAND_REVIEWER_FILE = "agent/command-reviewer.md"
+        const val COMMAND_REVIEW_CACHE_LIMIT = 128
         /** 模式提醒提示词：复用 prompts 目录文件（用户可自定义覆盖），切换时随消息注入而非进 system。 */
         const val MODE_REMINDER_PLAN_FILE = "agent/plan-mode.md"
         const val MODE_REMINDER_ASK_FILE = "agent/ask-mode.md"
@@ -155,6 +164,9 @@ class StatefulAgentWorkflow @Inject constructor(
      * 会白白丢掉一段前缀缓存。进程内缓存，重启后首轮再注入一次（无害）。
      */
     private val lastInjectedMode = java.util.concurrent.ConcurrentHashMap<String, AgentMode>()
+
+    /** 会话内命令审查缓存；只缓存审查结论，人工授权选择仍逐次生效。 */
+    private val commandReviewCache = CommandReviewCache<AiReviewResult>(COMMAND_REVIEW_CACHE_LIMIT)
 
     /** 不可变状态树 */
     data class AgentSessionState(
@@ -194,7 +206,8 @@ class StatefulAgentWorkflow @Inject constructor(
     private data class PermissionCheckResult(
         val approved: Boolean,
         val denyReason: String = "用户拒绝执行该工具",
-        val errorCode: String = "USER_REJECTED"
+        val errorCode: String = "USER_REJECTED",
+        val reviewRecord: String? = null
     )
 
     /** 批量工具执行结果：携带 toolCall 元信息，供最后按原始顺序组装 ToolResultMessage。 */
@@ -238,10 +251,11 @@ class StatefulAgentWorkflow @Inject constructor(
             val boundModel = session?.model
             if (!boundProviderId.isNullOrBlank()) {
                 val config = aiProviderRepository.getProviderById(boundProviderId)
-                if (config != null && config.isEnabled && config.hasUsableApiKey) {
+                val isOAuthAccount = config?.let(OpenAIAccountRepository::isAccountProvider) == true
+                if (config != null && (config.isEnabled || isOAuthAccount) && config.hasUsableApiKey) {
                     // 绑定的模型可能已被移出该 provider 的模型列表，此时绑定失效、继续往下回退默认模型
                     if (boundModel.isNullOrBlank()) return config
-                    if (boundModel in config.models) return config.copy(selectedModel = boundModel)
+                    if (boundModel in config.models || isOAuthAccount) return config.copy(selectedModel = boundModel)
                 }
             }
         }
@@ -250,7 +264,10 @@ class StatefulAgentWorkflow @Inject constructor(
         val defaultModel = defaultModelSettingsRepository.getDefaultModel()
         if (defaultProviderId.isNotBlank() && defaultModel.isNotBlank()) {
             val config = aiProviderRepository.getProviderById(defaultProviderId)
-            if (config != null && config.isEnabled && config.hasUsableApiKey && defaultModel in config.models) {
+            val isOAuthAccount = config?.let(OpenAIAccountRepository::isAccountProvider) == true
+            if (config != null && (config.isEnabled || isOAuthAccount) && config.hasUsableApiKey &&
+                (defaultModel in config.models || isOAuthAccount)
+            ) {
                 return config.copy(selectedModel = defaultModel)
             }
         }
@@ -278,18 +295,32 @@ class StatefulAgentWorkflow @Inject constructor(
      * 同时把提供商级 LLM 缓存开关（Anthropic 断点 / OpenAI cache key）应用到实例。
      */
     private suspend fun createStandaloneProvider(config: AIProviderConfig, sessionId: String?): AIProvider {
+        val openAIAccountId = OpenAIAccountRepository.accountIdFromProviderMarker(config.apiKey)
+        val isOpenAIAccount = openAIAccountId != null
+        if (isOpenAIAccount && config.type != ProviderType.OPENAI) {
+            throw IllegalStateException(openAIAccountRepository.invalidProviderTypeMessage())
+        }
+        val accountRoute = if (isOpenAIAccount) {
+            openAIAccountRepository.routeForModel(openAIAccountId!!, config.effectiveModel)
+                ?: throw IllegalStateException(openAIAccountRepository.noAvailableAccountMessage(config.effectiveModel))
+        } else null
         val provider: AIProvider = when (config.type) {
             ProviderType.ANTHROPIC -> AnthropicAdapter(anthropicApi).also {
                 it.cacheBreakpointsEnabled = config.anthropicCacheBreakpoints
             }
             ProviderType.GEMINI -> GeminiAdapter(geminiApi)
             else -> OpenAIAdapter(openAIApi).also {
-                it.chatCacheKeyEnabled = config.openaiChatCacheKey
+                it.chatCacheKeyEnabled = config.openaiChatCacheKey && !isOpenAIAccount
+                if (isOpenAIAccount) {
+                    it.chatGptPlanUsage = true
+                    it.chatGptUsageLimitMessage = openAIAccountRepository.usageLimitMessage()
+                }
             }
         }
         // 多 Key 模式下由轮换器决定本次用哪个 Key（会话内粘住，Key 不可用时切下一个并重发）。
-        val activeKeys = config.effectiveApiKeys
-        provider.apiKey = keyRotator.activeKey(config, sessionId)
+        val activeKeys = if (isOpenAIAccount) emptyList() else config.effectiveApiKeys
+        val accountToken = accountRoute?.accessToken
+        provider.apiKey = accountToken ?: keyRotator.activeKey(config, sessionId)
             ?: throw IllegalStateException("「${config.name}」的 Key 均在冷却中，请稍后重试")
         // 只有真正的多 Key 才需要自动切换：单 Key 冷却后没有可切换目标，只会把用户锁死一段时间。
         val keySwitcher: (suspend (Throwable, String, Set<String>) -> KeySwitchOutcome?)? =
@@ -312,21 +343,21 @@ class StatefulAgentWorkflow @Inject constructor(
                 null
             }
         provider.keySwitcher = keySwitcher
-        provider.baseUrl = config.baseUrl
+        provider.baseUrl = if (isOpenAIAccount) OPENAI_ACCOUNT_BASE_URL else config.baseUrl
         provider.model = config.effectiveModel
-        provider.useFullUrl = config.useFullUrl
-        provider.useResponseApi = config.useResponseApi
-        provider.providerId = config.id
+        provider.useFullUrl = if (isOpenAIAccount) false else config.useFullUrl
+        provider.useResponseApi = if (isOpenAIAccount) true else config.useResponseApi
+        provider.providerId = accountRoute?.providerId ?: config.id
         provider.logSessionId = sessionId
-        provider.customHeaders = config.customHeaders
-        val metadata = modelMetadataService.resolve(config.id, config.type, config.effectiveModel)
+        provider.customHeaders = if (isOpenAIAccount) emptyMap() else config.customHeaders
+        val metadata = modelMetadataService.resolve(accountRoute?.providerId ?: config.id, config.type, config.effectiveModel)
         // 模型元数据的输出上限（models.dev limit.output）：不传时 Anthropic 会把输出卡在 adapter 兜底值上。
         provider.maxOutputTokens = metadata.outputTokens
         // 元数据说不接受自定义温度就不发该字段（kimi-k3、gpt-5 系带了直接 400）；允许的只发官方固定值。
         provider.temperature = if (metadata.supportsCustomTemperature) fixedTemperature(config.effectiveModel) else null
         provider.firstByteTimeoutMs = generalSettingsRepository.firstByteTimeoutMs()
         provider.streamIdleTimeoutMs = generalSettingsRepository.streamIdleTimeoutMs()
-        provider.maxNetworkRetries = generalSettingsRepository.maxNetworkRetries()
+        provider.maxNetworkRetries = if (isOpenAIAccount) 0 else generalSettingsRepository.maxNetworkRetries()
         return provider
     }
 
@@ -436,7 +467,7 @@ class StatefulAgentWorkflow @Inject constructor(
                         }
                         return newState to effects
                     }
-                    // 策略/系统拒绝（如 PLAN 模式禁止执行）：记录拒绝结果，继续收集后续权限。
+                    // 策略/系统拒绝（如 ASK 模式禁止写入）：记录拒绝结果，继续收集后续权限。
                     val remaining = newState.pendingPermissionCalls.filterNot { it.id == action.toolCall.id }
                     newState = newState.copy(
                         pendingPermissionCalls = remaining,
@@ -493,11 +524,18 @@ class StatefulAgentWorkflow @Inject constructor(
         tools: List<AgentTool>
     ): Flow<AgentEvent> = channelFlow {
         var currentContext = context
+        // Each user request in PLAN mode must establish a visible plan before any write-like tool runs.
+        var planSubmittedForRequest = false
         var state = AgentSessionState()
         var currentTools = tools
         val actionQueue = ArrayDeque<AgentAction>()
-        // 模式提醒仅在模式变化时随最新用户消息注入一次（不进 system，避免切换时 system 前缀变化打断缓存）。
-        val modeReminder = takeModeReminderIfChanged(currentContext.sessionId, currentContext.mode)
+        // 模式提醒放在最新用户消息尾部，不改 system 前缀。PLAN 每个新请求都重申“本轮先提交计划”，
+        // 因为计划门禁按用户请求重置；ASK/BUILD 仍只在模式变化时注入，避免无意义重复。
+        val modeReminder = if (currentContext.mode == AgentMode.PLAN) {
+            buildModeReminder(AgentMode.PLAN)
+        } else {
+            takeModeReminderIfChanged(currentContext.sessionId, currentContext.mode)
+        }
         actionQueue.addLast(
             AgentAction.InitRequest(
                 currentContext.history + AgentMessage.UserMessage(
@@ -801,15 +839,27 @@ class StatefulAgentWorkflow @Inject constructor(
                     is AgentSideEffect.RequestPermission -> {
                         val tool = toolRegistry.getTool(effect.toolCall.name)
                         val argsPreview = JsonObject(effect.toolCall.arguments).toString().take(500)
-                        val checkResult = requestPermissionIfNeeded(tool, effect.toolCall.id, effect.toolCall.arguments, argsPreview, currentContext.mode, currentContext.sessionId)
+                        val checkResult = requestPermissionIfNeeded(
+                            tool = tool,
+                            callId = effect.toolCall.id,
+                            arguments = effect.toolCall.arguments,
+                            argsPreview = argsPreview,
+                            mode = currentContext.mode,
+                            sessionId = currentContext.sessionId,
+                            userRequest = userRequest,
+                            context = currentContext
+                        )
+                        val displayArgsPreview = if (checkResult.approved && checkResult.reviewRecord != null) {
+                            withCommandReviewRecord(argsPreview, checkResult.reviewRecord)
+                        } else argsPreview
 
                         if (!checkResult.approved) {
                             val rawResult = ToolResult.Error(checkResult.denyReason, checkResult.errorCode).toTransportString()
                             send(AgentEvent.ToolCallFinished(effect.toolCall.id, effect.toolCall.name, rawResult, true, argsPreview))
                         } else {
-                            send(AgentEvent.ToolCallStarted(effect.toolCall.id, effect.toolCall.name, argsPreview))
+                            send(AgentEvent.ToolCallStarted(effect.toolCall.id, effect.toolCall.name, displayArgsPreview))
                         }
-                        actionQueue.addLast(AgentAction.PermissionEvaluated(effect.toolCall, checkResult.approved, argsPreview, checkResult.denyReason, checkResult.errorCode))
+                        actionQueue.addLast(AgentAction.PermissionEvaluated(effect.toolCall, checkResult.approved, displayArgsPreview, checkResult.denyReason, checkResult.errorCode))
                     }
                     is AgentSideEffect.CancelToolBatch -> {
                         // 整批取消：已批准未执行的工具补发完成事件（内容为未执行），
@@ -830,46 +880,123 @@ class StatefulAgentWorkflow @Inject constructor(
                     }
                     is AgentSideEffect.ExecuteToolBatch -> {
                         // 并行执行本批已批准的工具。先统一记录 checkpoint（editFile/writeFile 修改前快照），
-                        // 再并行执行；mode 切换检查在结果收集后于主协程串行处理（planApproval 单例）。
+                        // 再并行执行；mode 切换检查在结果收集后于主协程串行处理。
                         val toolCalls = effect.toolCalls
-                        // 快照被体积/空间限制跳过时，原因按 callId 收集，稍后注入该工具的结果里，
-                        // 让模型与界面都看到「未创建快照，无法回滚」，绝不静默跳过。
-                        val snapshotSkipReasons = mutableMapOf<String, String>()
-                        toolCalls.forEach { toolCall ->
-                            if (toolCall.name == "editFile" || toolCall.name == "writeFile") {
-                                (toolCall.arguments["path"] as? JsonPrimitive)?.contentOrNull?.let { path ->
-                                    currentContext.sessionId?.let { sid ->
-                                        val outcome = checkpointManager.beforeFileModified(sid, path)
-                                        outcome.skipReason?.let { reason ->
-                                            FileLogger.w(TAG, "快照跳过(将注入工具结果): callId=${toolCall.id} path=$path reason=$reason")
-                                            snapshotSkipReasons[toolCall.id] = reason
-                                        }
-                                    }
-                                }
+                        val runResultsById = mutableMapOf<String, ToolRunResult>()
+
+                        // A PLAN batch can contain a plan update and edits in the same model response.
+                        // Execute the todo snapshot first; otherwise edits could race ahead. Clearing
+                        // the plan also clears this request's execution gate.
+                        val planEnforcedForBatch = currentContext.mode == AgentMode.PLAN || toolCalls.any { call ->
+                            call.name == "planMode" &&
+                                (call.arguments["action"] as? JsonPrimitive)?.contentOrNull.equals("enter", ignoreCase = true)
+                        }
+                        val enteringPlanThisBatch = currentContext.mode != AgentMode.PLAN && planEnforcedForBatch
+                        if (enteringPlanThisBatch) planSubmittedForRequest = false
+                        var planSubmittedInCurrentBatch = false
+                        val planCalls = if (planEnforcedForBatch) {
+                            toolCalls.filter { it.name == "todo" }
+                        } else emptyList()
+                        planCalls.forEach { toolCall ->
+                            val planContext = if (currentContext.mode == AgentMode.PLAN) currentContext
+                            else currentContext.copy(mode = AgentMode.PLAN)
+                            val runResult = toolInvoker.runSync(toolRegistry.getTool(toolCall.name), toolCall, planContext)
+                            runResultsById[toolCall.id] = runResult
+                            if (!runResult.isError) {
+                                planSubmittedForRequest = PlanModeExecutionGuard.isPlanSubmission(toolCall)
+                                planSubmittedInCurrentBatch = planSubmittedForRequest
                             }
                         }
 
-                        val runResults = if (toolCalls.isEmpty()) {
-                            emptyList()
-                        } else {
+                        val pendingCalls = toolCalls.filterNot { it.id in runResultsById }
+                        pendingCalls.forEach { toolCall ->
+                            if (planEnforcedForBatch && !planSubmittedForRequest &&
+                                PlanModeExecutionGuard.requiresPlan(toolRegistry.getTool(toolCall.name), toolCall.arguments)
+                            ) {
+                                runResultsById[toolCall.id] = ToolRunResult(
+                                    ToolResult.Error(
+                                        "PLAN 模式要求先成功提交本轮可见计划（todo 非空 items），再执行写入或命令操作。请先提交/更新计划后重试。",
+                                        "PLAN_REQUIRED"
+                                    ).toTransportString(),
+                                    true
+                                )
+                            }
+                        }
+                        val executableCalls = pendingCalls.filterNot { it.id in runResultsById }
+
+                        // 快照被体积/空间限制跳过时，原因按 callId 收集，稍后注入该工具的结果里，
+                        // 让模型与界面都看到「未创建快照，无法回滚」，绝不静默跳过。
+                        val snapshotSkipReasons = ConcurrentHashMap<String, String>()
+
+                        if (executableCalls.isNotEmpty()) {
                             coroutineScope {
-                                toolCalls.map { toolCall ->
+                                executableCalls.map { toolCall ->
                                     async {
                                         val tool = toolRegistry.getTool(toolCall.name)
-                                        if (tool is StreamingAgentTool) {
+                                        suspend fun invokeTool(): ToolRunResult = if (tool is StreamingAgentTool) {
                                             toolInvoker.runStream(tool, toolCall, currentContext) { send(it) }
                                         } else {
                                             toolInvoker.runSync(tool, toolCall, currentContext)
                                         }
+
+                                        val path = if (toolCall.name == "editFile" || toolCall.name == "writeFile") {
+                                            (toolCall.arguments["path"] as? JsonPrimitive)?.contentOrNull
+                                        } else null
+                                        val checkpointSessionId = currentContext.checkpointSessionId ?: currentContext.sessionId
+                                        if (path != null && checkpointSessionId != null) {
+                                            checkpointManager.withFileModificationLock(path, currentContext.projectRoot) {
+                                                val outcome = checkpointManager.beforeFileModified(
+                                                    checkpointSessionId,
+                                                    path,
+                                                    currentContext.checkpointId
+                                                )
+                                                outcome.skipReason?.let { reason ->
+                                                    FileLogger.w(TAG, "快照跳过(将注入工具结果): callId=${toolCall.id} path=$path reason=$reason")
+                                                    snapshotSkipReasons[toolCall.id] = reason
+                                                }
+                                                invokeTool().also { result ->
+                                                    if (!result.isError) {
+                                                        checkpointManager.recordFileVersion(
+                                                            checkpointSessionId,
+                                                            path,
+                                                            currentContext.checkpointId
+                                                        )?.let { warning ->
+                                                            snapshotSkipReasons[toolCall.id] = warning
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        } else if (
+                                            tool?.effectiveCapabilities(toolCall.arguments).orEmpty()
+                                                .contains(ToolCapability.EXECUTE_COMMANDS)
+                                        ) {
+                                            // A shell can touch arbitrary paths, so serialize it with file tools
+                                            // on the workspace lock and record versions before releasing the lock.
+                                            checkpointManager.withWorkspaceModificationLock(currentContext.projectRoot) {
+                                                invokeTool().also {
+                                                    checkpointSessionId?.let { sessionId ->
+                                                        checkpointManager.recordWorkspaceVersions(
+                                                            currentContext.checkpointSessionId ?: sessionId,
+                                                            currentContext.projectRoot,
+                                                            currentContext.checkpointId
+                                                        )?.let { warning -> snapshotSkipReasons[toolCall.id] = warning }
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            invokeTool()
+                                        }
                                     }
-                                }.awaitAll()
+                                }.awaitAll().forEachIndexed { index, result ->
+                                    runResultsById[executableCalls[index].id] = result
+                                }
                             }
                         }
 
                         // 串行处理 mode 切换并组装批量结果。
                         val batchResults = mutableListOf<ToolBatchResult>()
                         toolCalls.forEachIndexed { index, toolCall ->
-                            val runResult = runResults.getOrNull(index)
+                            val runResult = runResultsById[toolCall.id]
                                 ?: ToolRunResult(ToolResult.Error("工具未执行", "TOOL_NOT_EXECUTED").toTransportString(), true)
                             var rawResult = runResult.raw
                             snapshotSkipReasons[toolCall.id]?.let { reason ->
@@ -883,27 +1010,13 @@ class StatefulAgentWorkflow @Inject constructor(
                                     ?: ""
                                 send(AgentEvent.ModeChanged(newCtx.mode, reason))
 
-                                // 退出 PLAN 时挂起 workflow，等待用户在计划审查面板批准后才继续
-                                if (currentContext.mode == AgentMode.PLAN && newCtx.mode != AgentMode.PLAN) {
-                                    val choice = planApprovalManager.awaitApproval(reason, currentContext.sessionId)
-                                    if (choice == PlanApprovalChoice.APPROVE) {
-                                        currentContext = newCtx
-                                        // system 与 mode 已解耦（SystemPromptProvider 不再注入模式提示词），
-                                        // 切换不重建 systemPrompt，避免 system 前缀变化打断缓存；模式状态通过工具结果与下轮消息提醒告知。
-                                        rawResult += buildModeSwitchNotice(newCtx.mode)
-                                    } else {
-                                        // 用户选择继续反馈，回滚到 PLAN 模式，修正工具结果让 AI 知道切换被取消并等待用户反馈
-                                        currentContext = currentContext.copy(mode = AgentMode.PLAN)
-                                        rawResult = ToolResult.Error(
-                                            "用户希望补充说明或调整方案，当前保持在 PLAN 模式。请等待用户输入具体的补充或修改意见，不要自行臆测修改，待用户明确反馈后再继续。",
-                                            "MODE_SWITCH_REJECTED"
-                                        ).toTransportString()
-                                        isError = true
-                                    }
-                                } else {
-                                    currentContext = newCtx
-                                    rawResult += buildModeSwitchNotice(newCtx.mode)
+                                // PLAN 退出只恢复进入前的模式；执行是否需要授权仍由当前权限挡位决定，
+                                // 不再额外挂起等待「批准计划」面板。
+                                currentContext = newCtx
+                                if (newCtx.mode == AgentMode.PLAN && !planSubmittedInCurrentBatch) {
+                                    planSubmittedForRequest = false
                                 }
+                                rawResult += buildModeSwitchNotice(newCtx.mode)
                             }
                             batchResults.add(ToolBatchResult(toolCall.id, toolCall.name, rawResult, isError, runResult.attachments, runResult.images))
                         }
@@ -931,6 +1044,9 @@ class StatefulAgentWorkflow @Inject constructor(
                                     )
                                 } else {
                                     currentContext.copy(mode = newMode, modeBeforePlan = null)
+                                }
+                                if (newMode == AgentMode.PLAN && prevMode != AgentMode.PLAN) {
+                                    planSubmittedForRequest = false
                                 }
                             }
                             val last = batchResults.last()
@@ -1070,36 +1186,153 @@ class StatefulAgentWorkflow @Inject constructor(
         return createStandaloneProvider(config.copy(selectedModel = model), sessionId)
     }
 
-    /** AI 命令审查结论：[Allow] 直接放行；[Escalate] 回退人工弹窗（附审查器的危险说明，可为空）。 */
+    /** AI 命令审查结论：允许、拒绝或交给人工确认。 */
     private sealed interface AiReviewResult {
-        data object Allow : AiReviewResult
-        data class Escalate(val reason: String?) : AiReviewResult
+        data class Allow(val reason: String) : AiReviewResult
+        data class Deny(val reason: String) : AiReviewResult
+        data class Ask(val reason: String) : AiReviewResult
     }
 
     /**
      * 「自主执行」挡位下的命令独立评审：默认跟随当前聊天模型，配置了审查器专用模型则用之。
      * 提示词来自 [SystemPromptProvider] 的 `agent/command-reviewer.md`。
-     * 调用失败/解析失败/UNSURE 一律返回 [AiReviewResult.Escalate] 回退人工（安全兜底）。
+     * DENY 返回结构化拒绝给 agent；UNSURE、超时和异常回退人工确认。
      */
-    private suspend fun reviewCommandWithAi(command: String, sessionId: String?): AiReviewResult {
-        return try {
-            val provider = resolveReviewerFallbackProvider(sessionId) ?: getEffectiveProvider(sessionId)
+    private suspend fun reviewCommandWithAi(
+        command: String,
+        intent: String?,
+        userRequest: String,
+        history: List<AgentMessage>,
+        requestId: String,
+        workingDirectory: String,
+        authLevel: CommandAuthLevel,
+        toolName: String,
+        environment: String,
+        sessionId: String?
+    ): AiReviewResult {
+        if (intent.isNullOrBlank()) {
+            return AiReviewResult.Ask("Agent 未提供执行意图，无法核实该命令与当前任务是否一致。请补充原因后再审查。")
+        }
+        val reviewerProvider = try {
+            resolveReviewerFallbackProvider(sessionId) ?: getEffectiveProvider(sessionId)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            FileLogger.w(TAG, "无法准备 AI 命令审查模型，回退人工确认", error)
+            return AiReviewResult.Ask("AI 命令审查模型暂时不可用，已转为人工确认。")
+        }
+        val promptAndContext = try {
             val prompt = promptProvider.resolvePrompt(COMMAND_REVIEWER_FILE)
                 .replace(LEADING_COMMENT, "") + reviewerLanguageInstruction()
+            prompt to reviewerHistoryContext(history)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            FileLogger.w(TAG, "无法准备 AI 命令审查上下文，回退人工确认", error)
+            return AiReviewResult.Ask("AI 命令审查上下文暂时不可用，已转为人工确认。")
+        }
+        val (reviewerPrompt, recentBackground) = promptAndContext
+        val cacheKey = CommandReviewCacheKey(
+            sessionId = sessionId.orEmpty(),
+            requestId = requestId,
+            toolName = toolName,
+            normalizedCommand = normalizeCommandForReview(command).take(5_000),
+            declaredIntent = intent.trim().take(600),
+            latestUserRequest = userRequest.trim().take(3_000),
+            workingDirectory = workingDirectory.trim().replace('\\', '/').trimEnd('/'),
+            authLevel = authLevel,
+            environment = environment,
+            reviewerProviderId = reviewerProvider.providerId,
+            reviewerModel = reviewerProvider.model,
+            contextFingerprint = commandReviewContextFingerprint(reviewerPrompt, recentBackground)
+        )
+        val cached = commandReviewCache[cacheKey]
+        if (cached != null) return cached
+
+        val timeoutMs = try {
+            policyEngine.commandReviewTimeoutMillis()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            FileLogger.w(TAG, "无法读取 AI 命令审查超时设置，回退人工确认", error)
+            return AiReviewResult.Ask("AI 命令审查设置暂时不可用，已转为人工确认。")
+        }
+        val result = reviewCommandWithAiUncached(
+            command = command,
+            intent = intent,
+            userRequest = userRequest,
+            workingDirectory = workingDirectory,
+            authLevel = authLevel,
+            toolName = toolName,
+            environment = environment,
+            sessionId = sessionId,
+            reviewerProvider = reviewerProvider,
+            reviewerPrompt = reviewerPrompt,
+            recentBackground = recentBackground,
+            timeoutMs = timeoutMs
+        )
+        if (result is AiReviewResult.Allow || result is AiReviewResult.Deny) {
+            commandReviewCache[cacheKey] = result
+        }
+        return result
+    }
+
+    private suspend fun reviewCommandWithAiUncached(
+        command: String,
+        intent: String?,
+        userRequest: String,
+        workingDirectory: String,
+        authLevel: CommandAuthLevel,
+        toolName: String,
+        environment: String,
+        sessionId: String?,
+        reviewerProvider: AIProvider,
+        reviewerPrompt: String,
+        recentBackground: String,
+        timeoutMs: Long
+    ): AiReviewResult {
+        return try {
+            val pathContext = reviewPathContext(command, workingDirectory)
+            val reversibility = when {
+                Regex("\\b(?:rm|rmdir|del|unlink|clean|reset|push|upload|delete)\\b", RegexOption.IGNORE_CASE).containsMatchIn(command) ->
+                    "可能删除数据、改写历史或向外部发送数据；需要结合具体目标判断可逆性。"
+                Regex("\\b(?:build|test|check|lint|vet)\\b", RegexOption.IGNORE_CASE).containsMatchIn(command) ->
+                    "看起来像可重复的验证/构建操作，但仍需核对脚本和输出路径。"
+                else -> "由命令和上下文判断；无法确认时选择 UNSURE。"
+            }
+            val reviewInput = JsonObject(
+                mapOf(
+                    "latest_user_request" to JsonPrimitive(userRequest.take(3000)),
+                    "recent_conversation_background" to JsonPrimitive(recentBackground),
+                    "agent_declared_intent" to JsonPrimitive(intent?.trim()?.take(600).orEmpty()),
+                    "command" to JsonPrimitive(command.take(5000)),
+                    "working_directory" to JsonPrimitive(workingDirectory.take(1200)),
+                    "path_context" to JsonPrimitive(pathContext),
+                    "reversibility_assessment" to JsonPrimitive(reversibility),
+                    "authorization_level" to JsonPrimitive(authLevel.name),
+                    "tool" to JsonPrimitive(toolName),
+                    "execution_environment" to JsonPrimitive(environment)
+                )
+            ).toString()
             val callStartWall = System.currentTimeMillis()
             val callStartElapsed = SystemClock.elapsedRealtime()
             var callCompleted = false
             var callError: String? = null
             var usage: AIResponse? = null
             val response = try {
-                val resp = provider.complete(
-                    systemPrompt = prompt,
-                    messages = listOf(AgentMessage.UserMessage(content = "Command under review:\n```sh\n$command\n```")),
-                    tools = emptyList()
-                )
+                val resp = withTimeout(timeoutMs) {
+                    reviewerProvider.complete(
+                        systemPrompt = reviewerPrompt,
+                        messages = listOf(AgentMessage.UserMessage(content = reviewInput)),
+                        tools = emptyList()
+                    )
+                }
                 usage = resp
                 callCompleted = true
                 resp
+            } catch (e: TimeoutCancellationException) {
+                callError = "command reviewer timeout after ${timeoutMs}ms"
+                throw e
             } catch (e: CancellationException) {
                 callError = "cancelled"
                 throw e
@@ -1111,8 +1344,8 @@ class StatefulAgentWorkflow @Inject constructor(
                 // 同 executeEvents：取消展开期间不调 suspend，派发到不可取消 scope 落库。
                 val record = LlmCallRecordEntity(
                     sessionId = sessionId,
-                    providerId = provider.providerId.ifBlank { null },
-                    model = provider.model,
+                    providerId = reviewerProvider.providerId.ifBlank { null },
+                    model = reviewerProvider.model,
                     kind = "command_review",
                     inputTokens = usage?.inputTokens ?: 0,
                     outputTokens = usage?.outputTokens ?: 0,
@@ -1128,12 +1361,108 @@ class StatefulAgentWorkflow @Inject constructor(
                 recordScope.launch { runCatching { llmCallRecordDao.insert(record) } }
             }
             parseReviewVerdict(response.content)
+        } catch (e: TimeoutCancellationException) {
+            FileLogger.w(TAG, "AI 命令审查超时，回退人工确认")
+            AiReviewResult.Ask("AI 命令审查超过 ${timeoutMs / 1000} 秒，已转为人工确认。")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             FileLogger.w(TAG, "AI 命令审查失败，回退人工确认", e)
-            AiReviewResult.Escalate(null)
+            AiReviewResult.Ask("AI 命令审查暂时不可用，已转为人工确认。")
         }
+    }
+
+    private fun reviewerHistoryContext(history: List<AgentMessage>): String =
+        history.takeLast(6).asSequence().mapNotNull { message ->
+            when (message) {
+                is AgentMessage.UserMessage -> "user: ${message.content.take(1200)}"
+                is AgentMessage.AssistantMessage -> message.content.takeIf { it.isNotBlank() }
+                    ?.let { "assistant: ${it.take(1200)}" }
+                is AgentMessage.ToolResultMessage -> {
+                    val result = (message.modelResult ?: message.result).take(1200)
+                    "tool(${message.toolName}): $result"
+                }
+            }
+        }.joinToString("\n").take(5_000)
+
+    /** Cache identity includes the actual review instructions and relevant history without retaining either. */
+    private fun commandReviewContextFingerprint(prompt: String, background: String): String {
+        val bytes = java.security.MessageDigest.getInstance("SHA-256")
+            .digest("$prompt\u0000$background".toByteArray(Charsets.UTF_8))
+        return bytes.joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+    }
+
+    /** 只折叠引号外的空白，避免不同引号内参数因缓存归一化而被误认为同一命令。 */
+    private fun normalizeCommandForReview(command: String): String {
+        val normalized = StringBuilder(command.length)
+        var quote: Char? = null
+        var escaped = false
+        var pendingWhitespace = false
+        for (char in command.trim()) {
+            if (escaped) {
+                if (pendingWhitespace) normalized.append(' ')
+                pendingWhitespace = false
+                normalized.append(char)
+                escaped = false
+                continue
+            }
+            if (char == '\\' && quote != '\'') {
+                if (pendingWhitespace) normalized.append(' ')
+                pendingWhitespace = false
+                normalized.append(char)
+                escaped = true
+                continue
+            }
+            if (quote != null) {
+                normalized.append(char)
+                if (char == quote) quote = null
+                continue
+            }
+            if (char == '\'' || char == '"') {
+                if (pendingWhitespace) normalized.append(' ')
+                pendingWhitespace = false
+                quote = char
+                normalized.append(char)
+            } else if (char.isWhitespace()) {
+                pendingWhitespace = true
+            } else {
+                if (pendingWhitespace) normalized.append(' ')
+                pendingWhitespace = false
+                normalized.append(char)
+            }
+        }
+        return normalized.toString()
+    }
+
+    private fun reviewPathContext(command: String, workingDirectory: String): String {
+        val candidates = com.aicode.feature.agent.domain.permission.ShellCommandParser
+            .analyze(command).segments.flatten()
+            .filter { token -> token.startsWith('/') || token.startsWith("~/") || token.startsWith("../") || token.contains('/') }
+            .distinct()
+            .take(20)
+        if (candidates.isEmpty()) return "No explicit path token found; relative paths use the stated working directory."
+        val workspace = normalizeReviewPath(workingDirectory)
+        return candidates.joinToString("\n") { path ->
+            val resolved = when {
+                path.startsWith("~/") -> normalizeReviewPath("/root/${path.drop(2)}")
+                path.startsWith('/') -> normalizeReviewPath(path)
+                else -> normalizeReviewPath("$workingDirectory/$path")
+            }
+            val relation = if (resolved == workspace || resolved.startsWith("$workspace/")) "inside workspace" else "outside/uncertain"
+            "$path -> $relation"
+        }
+    }
+
+    private fun normalizeReviewPath(path: String): String {
+        val parts = ArrayDeque<String>()
+        path.replace('\\', '/').split('/').forEach { part ->
+            when (part) {
+                "", "." -> Unit
+                ".." -> if (parts.isNotEmpty()) parts.removeLast()
+                else -> parts.addLast(part)
+            }
+        }
+        return "/" + parts.joinToString("/")
     }
 
     /**
@@ -1160,17 +1489,14 @@ class StatefulAgentWorkflow @Inject constructor(
             "Keep the literal keywords \"VERDICT:\", \"ALLOW\", \"DENY\", \"UNSURE\", \"REASON:\" in English exactly as specified.\n</language>"
     }
 
-    /** 解析审查器输出：首行 `VERDICT: ALLOW|DENY|UNSURE`，DENY/UNSURE 可带 `REASON:` 行。 */
-    private fun parseReviewVerdict(content: String): AiReviewResult {        val lines = content.lines()
-        val verdictLine = lines.firstOrNull { it.trim().startsWith("VERDICT:", ignoreCase = true) }
-            ?: return AiReviewResult.Escalate(null)
-        val verdict = verdictLine.substringAfter(':').trim().uppercase()
-        val reason = lines.firstOrNull { it.trim().startsWith("REASON:", ignoreCase = true) }
-            ?.substringAfter(':')?.trim()?.takeIf { it.isNotEmpty() }
-        return when (verdict) {
-            "ALLOW" -> AiReviewResult.Allow
-            "DENY" -> AiReviewResult.Escalate(reason ?: "AI 审查器判定该命令存在风险")
-            else -> AiReviewResult.Escalate(reason)
+    /** 严格解析审查器输出；多余前后文、缺少理由或未知结论一律转人工确认。 */
+    private fun parseReviewVerdict(content: String): AiReviewResult {
+        val decision = CommandReviewProtocol.parse(content)
+            ?: return AiReviewResult.Ask("AI 审查器返回格式无效或缺少理由，已转为人工确认。")
+        return when (decision.verdict) {
+            CommandReviewProtocol.Verdict.ALLOW -> AiReviewResult.Allow(decision.reason)
+            CommandReviewProtocol.Verdict.DENY -> AiReviewResult.Deny(decision.reason)
+            CommandReviewProtocol.Verdict.UNSURE -> AiReviewResult.Ask(decision.reason)
         }
     }
 
@@ -1345,8 +1671,8 @@ class StatefulAgentWorkflow @Inject constructor(
         AgentMode.PLAN -> "\n\n" + promptProvider.resolvePrompt(MODE_REMINDER_PLAN_FILE)
             .replace(LEADING_COMMENT, "")
             .trim()
-        AgentMode.BUILD -> "\n\n【模式切换】计划已获用户批准，你已切换到 BUILD（构建）模式，可以开始执行计划。"
-        AgentMode.ASK -> "\n\n【模式切换】计划已获用户批准，你已恢复到 ASK（提问）模式：保持只读，仅围绕用户后续提问作答，不要实施变更。"
+        AgentMode.BUILD -> "\n\n【模式切换】你已切换到 BUILD（构建）模式，可以继续处理用户请求。"
+        AgentMode.ASK -> "\n\n【模式切换】你已恢复到 ASK（提问）模式：保持只读，仅围绕用户后续提问作答，不要实施变更。"
     }
 
     /** 用户在外部（界面）手动切换模式时拼进工具结果的提示；与 AI 自切的 [buildModeSwitchNotice] 区分，避免误称「计划已获批准」。 */
@@ -1364,55 +1690,92 @@ class StatefulAgentWorkflow @Inject constructor(
         arguments: Map<String, JsonElement>,
         argsPreview: String,
         mode: AgentMode,
-        sessionId: String?
+        sessionId: String?,
+        userRequest: String,
+        context: AgentContext
     ): PermissionCheckResult {
         if (tool == null) {
             return PermissionCheckResult(true)
         }
 
-        // planMode 退出 PLAN 时，后续会有计划审查面板兜底用户决策，
-        // 此处权限弹窗冗余，直接放行；进入 PLAN 的方向无后续审查面板，仍走权限弹窗。
-        if (tool.name == "planMode" && mode == AgentMode.PLAN) {
-            val action = (arguments["action"] as? JsonPrimitive)?.contentOrNull?.trim()?.lowercase()
-            if (action == "exit") {
-                return PermissionCheckResult(true)
-            }
-        }
-
-        val eval = policyEngine.evaluate(tool, tool.name, arguments, mode)
+        val eval = policyEngine.evaluate(tool, tool.name, arguments, mode, context.projectRoot, context)
         if (eval.verdict == ToolPermissionPolicyEngine.Verdict.DENY) {
             val reason = eval.denyReason ?: "该工具被项目安全规则策略禁止执行"
-            val code = if (mode == AgentMode.PLAN) "PLAN_MODE_REJECTED" else "SYSTEM_DENIED"
+            val code = if (mode == AgentMode.ASK) "ASK_MODE_REJECTED" else "SYSTEM_DENIED"
             return PermissionCheckResult(false, reason, code)
         }
 
-        if (tool.permissionPolicy == ToolPermissionPolicy.AUTO_APPROVE) {
+        // A tool-level AUTO_APPROVE default must never bypass the deletion-specific approval or
+        // catastrophic-path deny returned by the policy engine.
+        if (tool.permissionPolicy == ToolPermissionPolicy.AUTO_APPROVE && eval.deletionAnalysis?.isDeletion != true) {
             return PermissionCheckResult(true)
         }
 
         return when (eval.verdict) {
-            ToolPermissionPolicyEngine.Verdict.ALLOW -> PermissionCheckResult(true)
+            ToolPermissionPolicyEngine.Verdict.ALLOW -> PermissionCheckResult(true, reviewRecord = eval.reviewRecord)
             ToolPermissionPolicyEngine.Verdict.DENY -> PermissionCheckResult(false)
             ToolPermissionPolicyEngine.Verdict.ASK -> {
+                eval.deletionAnalysis?.takeIf { it.isDeletion }?.let { deletion ->
+                    return requestDeletionApproval(
+                        tool = tool,
+                        callId = callId,
+                        arguments = arguments,
+                        argsPreview = argsPreview,
+                        analysis = deletion,
+                        userRequest = userRequest,
+                        context = context,
+                        sessionId = sessionId
+                    )
+                }
                 // 「自主执行」挡位：先交 AI 命令审查器独立评审，通过直接放行；
-                // 拒绝/不确定/失败回退人工弹窗（拒绝时附审查器给出的危险说明）。
+                // DENY 返回给 agent，UNSURE/失败回退人工弹窗。
+                val permissionCommand = ((arguments["command"] ?: arguments["input"]) as? JsonPrimitive)?.contentOrNull
                 var aiReviewNote: String? = null
                 if (eval.aiReviewable) {
                     val command = ((arguments["command"] ?: arguments["input"]) as? JsonPrimitive)?.contentOrNull
                     if (command != null) {
-                        when (val review = reviewCommandWithAi(command, sessionId)) {
-                            is AiReviewResult.Allow -> return PermissionCheckResult(true)
-                            is AiReviewResult.Escalate -> aiReviewNote = review.reason
+                        val intent = (arguments["intent"] as? JsonPrimitive)?.contentOrNull
+                        val authLevel = policyEngine.currentCommandAuthLevel()
+                        val environment = (arguments["env"] as? JsonPrimitive)?.contentOrNull
+                            ?: (arguments["action"] as? JsonPrimitive)?.contentOrNull
+                            ?: "auto"
+                        when (val review = reviewCommandWithAi(
+                            command = command,
+                            intent = intent,
+                            userRequest = userRequest,
+                            history = context.history,
+                            requestId = context.inputMessageId,
+                            workingDirectory = context.projectRoot.ifBlank { "/root/workspace" },
+                            authLevel = authLevel,
+                            toolName = tool.name,
+                            environment = environment,
+                            sessionId = sessionId
+                        )) {
+                            is AiReviewResult.Allow -> {
+                                return PermissionCheckResult(true, reviewRecord = "AI 审查通过：${review.reason}")
+                            }
+                            is AiReviewResult.Deny -> return PermissionCheckResult(false, review.reason, "AI_REVIEW_DENIED")
+                            is AiReviewResult.Ask -> aiReviewNote = review.reason
                         }
                     }
                 }
                 val base = tool.buildPermissionRequest(callId, arguments, argsPreview)
+                val intent = (arguments["intent"] as? JsonPrimitive)?.contentOrNull?.trim()?.take(600)
+                val riskReason = eval.rememberDisabledReason?.takeIf { !eval.aiReviewable }
+                val details = buildString {
+                    append(base.details)
+                    if (!permissionCommand.isNullOrBlank()) append("\n\n完整命令：\n").append(permissionCommand)
+                    if (!intent.isNullOrBlank()) append("\nAgent 声明意图：").append(intent)
+                    if (!riskReason.isNullOrBlank()) append("\n风险提示：").append(riskReason)
+                }
                 val request = base.copy(
                     title = eval.askTitle ?: base.title,
+                    details = details,
                     rememberablePatterns = eval.rememberablePatterns,
                     rememberDisabledReason = eval.rememberDisabledReason,
                     sessionId = sessionId.orEmpty(),
-                    reviewNote = aiReviewNote
+                    reviewNote = aiReviewNote,
+                    sourceLabel = context.sourceLabel
                 )
                 when (permissionManager.awaitApproval(request)) {
                     PermissionChoice.REJECT -> PermissionCheckResult(false, "用户拒绝执行该工具", "USER_REJECTED")
@@ -1423,11 +1786,162 @@ class StatefulAgentWorkflow @Inject constructor(
                         }
                         PermissionCheckResult(true)
                     }
+                    PermissionChoice.REVIEW -> PermissionCheckResult(
+                        false,
+                        "AI 审查选项只适用于删除命令授权",
+                        "INVALID_PERMISSION_CHOICE"
+                    )
                 }
             }
         }
     }
+
+    private suspend fun requestDeletionApproval(
+        tool: AgentTool,
+        callId: String,
+        arguments: Map<String, JsonElement>,
+        argsPreview: String,
+        analysis: CommandDeletionAnalyzer.Analysis,
+        userRequest: String,
+        context: AgentContext,
+        sessionId: String?
+    ): PermissionCheckResult {
+        val command = ((arguments["command"] ?: arguments["input"]) as? JsonPrimitive)?.contentOrNull
+        val intent = (arguments["intent"] as? JsonPrimitive)?.contentOrNull?.trim()?.take(600)
+        val base = tool.buildPermissionRequest(callId, arguments, argsPreview)
+        val details = buildString {
+            append(base.details)
+            if (!command.isNullOrBlank()) append("\n\n完整命令：\n").append(command)
+            if (!intent.isNullOrBlank()) append("\nAgent 声明意图：").append(intent)
+            append("\n\n删除目标（共 ").append(analysis.targets.size).append(" 项）：")
+            if (analysis.targets.isEmpty()) append("\n- 静态解析无法确定目标，按高风险处理")
+            analysis.targets.forEach { target ->
+                append("\n- ").append(target.path)
+                if (target.outsideWorkspace) append(" [工作区外/无法确认]")
+                else append(" [工作区内]")
+                if (target.wildcard) append(" [通配符]")
+            }
+            if (!analysis.parseCertain) append("\n注意：删除目标无法被完整静态解析，实际影响范围可能更大。")
+            if (analysis.riskLabels.isNotEmpty()) append("\n风险标签：").append(analysis.riskLabels.joinToString("、"))
+            val estimate = estimateDeletionImpact(analysis, context.projectRoot.ifBlank { "/root/workspace" })
+            if (estimate.isNotBlank()) append("\n影响估算：").append(estimate)
+        }
+        val request = base.copy(
+            title = "确认删除操作",
+            summary = base.summary.ifBlank { command ?: "删除操作" },
+            details = details,
+            rememberablePatterns = emptyList(),
+            rememberDisabledReason = "删除授权仅对本次命令有效，不会记入始终允许规则。",
+            sessionId = sessionId.orEmpty(),
+            deletionReview = true,
+            sourceLabel = context.sourceLabel
+        )
+        return when (permissionManager.awaitApproval(request)) {
+            PermissionChoice.REJECT -> PermissionCheckResult(false, "用户拒绝删除操作", "USER_REJECTED")
+            PermissionChoice.ONCE -> PermissionCheckResult(true)
+            PermissionChoice.ALWAYS -> PermissionCheckResult(
+                false,
+                "删除命令不支持始终允许；请重新请求并选择单次放行",
+                "INVALID_PERMISSION_CHOICE"
+            )
+            PermissionChoice.REVIEW -> {
+                val review = if (command.isNullOrBlank()) {
+                    AiReviewResult.Ask("无法提取完整命令，AI 审查未能判断")
+                } else {
+                    reviewCommandWithAi(
+                        command = command,
+                        intent = intent,
+                        userRequest = userRequest,
+                        history = context.history,
+                        requestId = context.inputMessageId,
+                        workingDirectory = context.projectRoot.ifBlank { "/root/workspace" },
+                        authLevel = policyEngine.currentCommandAuthLevel(),
+                        toolName = tool.name,
+                        environment = (arguments["env"] as? JsonPrimitive)?.contentOrNull ?: "auto",
+                        sessionId = sessionId
+                    )
+                }
+                when (review) {
+                    is AiReviewResult.Allow -> PermissionCheckResult(
+                        approved = true,
+                        reviewRecord = "AI 删除审查通过：${review.reason}"
+                    )
+                    is AiReviewResult.Deny, is AiReviewResult.Ask -> {
+                        val reason = when (review) {
+                            is AiReviewResult.Deny -> "AI 审查拒绝：${review.reason}"
+                            is AiReviewResult.Ask -> "AI 无法确认安全性：${review.reason}"
+                            is AiReviewResult.Allow -> error("unreachable")
+                        }
+                        val secondChoice = permissionManager.awaitApproval(
+                            request.copy(
+                                deletionReviewCompleted = true,
+                                reviewNote = reason,
+                                rememberDisabledReason = "AI 未自动放行。你可以拒绝，或在核对完整目标后仍然单次放行。"
+                            )
+                        )
+                        if (secondChoice == PermissionChoice.ONCE) PermissionCheckResult(true)
+                        else PermissionCheckResult(false, "用户拒绝删除操作", "USER_REJECTED")
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun estimateDeletionImpact(
+        analysis: CommandDeletionAnalyzer.Analysis,
+        workingDirectory: String
+    ): String {
+        val estimate = withTimeoutOrNull(700) {
+            analysis.targets
+                .filterNot { it.wildcard }
+                .take(5)
+                .map { target ->
+                    val path = resolveDeletionPath(target.path, workingDirectory)
+                    try {
+                        when {
+                            !fileAccess.exists(path) -> "${target.path}: 不存在或无法访问"
+                            !fileAccess.isDirectory(path) -> "${target.path}: 文件 ${fileAccess.fileSize(path)} B"
+                            else -> {
+                                val children = fileAccess.listFiles(path).take(201)
+                                val count = minOf(children.size, 200)
+                                val byteCount = children.take(200).filterNot { it.isDirectory }.sumOf { it.size }
+                                "${target.path}: 直接子项约 ${if (children.size > 200) "200+" else count} 个，已知文件约 ${byteCount} B"
+                            }
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        "${target.path}: 大小估算不可用"
+                    }
+                }.toList().joinToString("；")
+        }
+        return estimate.orEmpty()
+    }
+
+    private fun resolveDeletionPath(path: String, workingDirectory: String): String {
+        val expanded = when {
+            path == "~" -> "/root"
+            path.startsWith("~/") -> "/root/${path.drop(2)}"
+            path.startsWith('/') -> path
+            else -> "${workingDirectory.trimEnd('/')}/$path"
+        }
+        val parts = ArrayDeque<String>()
+        expanded.replace('\\', '/').split('/').forEach { part ->
+            when (part) {
+                "", "." -> Unit
+                ".." -> if (parts.isNotEmpty()) parts.removeLast()
+                else -> parts.addLast(part)
+            }
+        }
+        return "/" + parts.joinToString("/")
+    }
 }
+
+/** 把自动审查放行的依据加入工具卡片参数 JSON，复用现有展开区域持久化展示。 */
+private fun withCommandReviewRecord(argsPreview: String, record: String): String = runCatching {
+    val original = Json.parseToJsonElement(argsPreview).jsonObject
+    JsonObject(original.toMap() + ("_ai_review" to JsonPrimitive(record))).toString()
+}.getOrElse { "$argsPreview\n_ai_review: $record" }
 
 /**
  * 把「快照被跳过、无法回滚」的警告注入工具结果（仅 status=success）。
@@ -1438,7 +1952,16 @@ class StatefulAgentWorkflow @Inject constructor(
 private fun withSnapshotSkipWarning(raw: String, reason: String): String = runCatching {
     val obj = Json.parseToJsonElement(raw).jsonObject
     if (obj["status"]?.jsonPrimitive?.contentOrNull != "success") return@runCatching raw
-    val data = (obj["data"] as? JsonObject) ?: JsonObject(emptyMap())
-    val mergedData = JsonObject(data.toMap() + ("warning" to JsonPrimitive(reason)))
-    JsonObject(obj.toMap() + ("data" to mergedData)).toString()
+    val data = obj["data"]
+    // data 可能是字符串（Bash/terminal 的 stdout）、数组或对象：
+    // - 对象：warning 合并进 data（既有 UI 解析路径不变）；
+    // - 其它（尤其字符串）：data 原样保留，warning 放同级顶层。
+    // 曾经的 bug：无条件 `obj["data"] as? JsonObject ?: JsonObject(emptyMap())`，
+    // 字符串 data 被替换成空对象 → Bash 的 stdout 整体消失，模型只看到 warning。
+    val mergedData: JsonElement = if (data is JsonObject) {
+        JsonObject(data.toMap() + ("warning" to JsonPrimitive(reason)))
+    } else {
+        data ?: JsonPrimitive(reason)
+    }
+    JsonObject(obj.toMap() + ("data" to mergedData) + ("warning" to JsonPrimitive(reason))).toString()
 }.getOrDefault(raw)

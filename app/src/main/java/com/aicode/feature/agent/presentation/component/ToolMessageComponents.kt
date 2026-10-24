@@ -2,15 +2,10 @@ package com.aicode.feature.agent.presentation.component
 
 import androidx.annotation.StringRes
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -69,6 +64,7 @@ import androidx.compose.ui.unit.dp
 import com.aicode.core.theme.Brand
 import com.aicode.core.theme.Radius
 import com.aicode.core.theme.Spacing
+import com.aicode.core.ui.rememberLifecyclePulseAlpha
 import com.aicode.core.theme.semanticColors
 import com.aicode.feature.agent.domain.session.SessionUseCase
 import com.aicode.feature.agent.presentation.AgentUIMessage
@@ -121,6 +117,9 @@ internal const val TOOL_SECTION_LINE_LIMIT = 20
  *  Text 会按全文做布局测量（O 字符数）——50KB 输出的卡片滚入视口时单次布局可达 10ms+，
  *  是快速滑动聊天记录时组合尖峰/掉帧的直接来源。超限截断展示，完整内容走原始记录。 */
 private const val TOOL_SECTION_CHAR_LIMIT = 16_000
+private const val TOOL_ERROR_SUMMARY_INPUT_LIMIT = 4_096
+private const val TOOL_ERROR_SUMMARY_CHAR_LIMIT = 140
+private val JSON_ERROR_MESSAGE = Regex(""""message"\s*:\s*"((?:\\.|[^"\\])*)"""")
 
 /** 工具「指令 / 结果」展开窗口的最大高度：超出后在窗口内滚动，不再无限撑高。 */
 private val ToolSectionMaxHeight = 240.dp
@@ -516,16 +515,8 @@ internal fun ToolStatusIcon(running: Boolean, isError: Boolean, toolName: String
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     val pulseAlpha = if (running) {
-        val transition = rememberInfiniteTransition(label = "tool-status-pulse")
-        transition.animateFloat(
-            initialValue = 1f,
-            targetValue = 0.35f,
-            animationSpec = infiniteRepeatable(animation = tween(650), repeatMode = RepeatMode.Reverse),
-            label = "tool-status-pulse-alpha"
-        ).value
-    } else {
-        1f
-    }
+        rememberLifecyclePulseAlpha(label = "tool-status-pulse", minAlpha = 0.35f)
+    } else null
     val statusLabel = stringResource(
         when {
             running -> R.string.chat_tool_running
@@ -541,7 +532,9 @@ internal fun ToolStatusIcon(running: Boolean, isError: Boolean, toolName: String
             modifier = Modifier
                 // 与思考行同一格宽：两行的图标中心与后续文字左边缘才对得齐
                 .size(ChatStyle.rowIconSize)
-                .graphicsLayer { alpha = pulseAlpha }
+                // Read animation state in the layer block so the pulse only invalidates drawing,
+                // not the whole tool row on every animation frame.
+                .graphicsLayer { alpha = pulseAlpha?.value ?: 1f }
         )
     }
 }
@@ -941,6 +934,33 @@ internal fun formatToolResult(raw: String): String {
     return s
 }
 
+/**
+ * 失败工具的折叠摘要：只解析有界输入，并限制输出长度，避免长 stderr/工具结果在列表构建时造成额外卡顿。
+ * 错误原文仍保留在展开详情里；这里仅用于任务头上始终可见的短摘要。
+ */
+internal fun summarizeToolFailure(raw: String): String? {
+    val cleaned = raw.withoutToolStatusPrefix()
+    if (cleaned.isBlank()) return null
+
+    val summary = if (cleaned.length <= TOOL_ERROR_SUMMARY_INPUT_LIMIT) {
+        formatToolResult(cleaned)
+    } else {
+        val bounded = cleaned.take(TOOL_ERROR_SUMMARY_INPUT_LIMIT)
+        val encodedMessage = JSON_ERROR_MESSAGE.find(bounded)?.groupValues?.getOrNull(1)
+        encodedMessage?.let { encoded ->
+            runCatching { Json.parseToJsonElement("\"$encoded\"").jsonPrimitive.contentOrNull }
+                .getOrNull()
+        } ?: bounded.substringBefore('\n')
+    }
+    val line = summary.lineSequence().map(String::trim).firstOrNull(String::isNotEmpty)
+        ?: summary.trim()
+    val compact = line.filter { it == '\t' || !it.isISOControl() }.replace('\t', ' ').trim()
+    if (compact.isBlank()) return null
+    return if (compact.length > TOOL_ERROR_SUMMARY_CHAR_LIMIT) {
+        compact.take(TOOL_ERROR_SUMMARY_CHAR_LIMIT - 1).trimEnd() + "…"
+    } else compact
+}
+
 private fun parseToolTransport(raw: String): JsonObject? {
     return runCatching {
         val obj = Json.parseToJsonElement(raw.trim()).jsonObject
@@ -958,6 +978,8 @@ private fun formatToolData(data: JsonElement?): String? {
         is JsonObject -> {
             val main = data["content"] ?: data["output"] ?: data["stdout"] ?: data["text"]
             val mainStr = (main as? JsonPrimitive)?.contentOrNull
+            val warning = (data["warning"] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+            if (mainStr != null && warning != null) return listOf("⚠ $warning", mainStr).joinToString("\n")
             mainStr ?: data.entries.joinToString("\n") { (k, v) ->
                 val vv = (v as? JsonPrimitive)?.contentOrNull ?: v.toString()
                 "$k: $vv"

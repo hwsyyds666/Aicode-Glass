@@ -1,88 +1,61 @@
 package com.aicode.feature.agent.presentation
 
 import com.aicode.feature.agent.data.local.entity.AgentMessageEntity
-import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertSame
 import org.junit.Test
+import java.util.concurrent.atomic.AtomicInteger
 
 class CachedUiMessageMapperTest {
-
     @Test
-    fun unchangedMessagesReusePreviousUiModelsWhenPageIsReemitted() {
+    fun unchangedEntitiesReuseMappedMessagesAndChangedEntitiesRemapOnlyThatEntry() {
         val conversions = AtomicInteger()
         val mapper = CachedUiMessageMapper { entity ->
             conversions.incrementAndGet()
             entity.toUIMessage()
         }
-        val firstPage = listOf(entity("one"), entity("two"))
+        val first = message("one", "first")
+        val second = message("two", "second")
 
-        val first = mapper.map("session", firstPage)
-        val reemitted = mapper.map("session", firstPage.map { it.copy() })
-
-        assertEquals("相同 Room 快照不应重复映射", 2, conversions.get())
-        assertSame(first[0], reemitted[0])
-        assertSame(first[1], reemitted[1])
-        assertEquals(first, reemitted)
-    }
-
-    @Test
-    fun changedMessageRemapsOnlyThatMessageAndKeepsOrder() {
-        val conversions = AtomicInteger()
-        val mapper = CachedUiMessageMapper { entity ->
-            conversions.incrementAndGet()
-            entity.toUIMessage()
-        }
-        val firstPage = listOf(entity("one", "first"), entity("two", "second"))
-        val first = mapper.map("session", firstPage)
-
-        val updated = mapper.map("session", listOf(firstPage[0], firstPage[1].copy(content = "updated")))
-
-        assertEquals("仅流式更新的消息需要重新映射", 3, conversions.get())
-        assertSame(first[0], updated[0])
-        assertNotSame(first[1], updated[1])
-        assertEquals(listOf("one", "two"), updated.map { it.id })
-        assertEquals("updated", updated[1].content)
-    }
-
-    @Test
-    fun removedMessagesAreEvictedSoCompactionCannotReuseStaleModels() {
-        val conversions = AtomicInteger()
-        val mapper = CachedUiMessageMapper { entity ->
-            conversions.incrementAndGet()
-            entity.toUIMessage()
-        }
-        val compacted = entity("old")
-        val retained = entity("new")
-
-        mapper.map("session", listOf(compacted, retained))
-        mapper.map("session", listOf(retained))
-        mapper.map("session", listOf(compacted, retained))
-
-        assertEquals("压缩后移除的消息重新出现时必须重新映射", 3, conversions.get())
-    }
-
-    @Test
-    fun sessionSwitchStartsWithAnEmptyCache() {
-        val conversions = AtomicInteger()
-        val mapper = CachedUiMessageMapper { entity ->
-            conversions.incrementAndGet()
-            entity.toUIMessage()
-        }
-        val message = entity("same-id")
-
-        mapper.map("first", listOf(message))
-        mapper.map("second", listOf(message))
+        val initial = mapper.map("session", listOf(first, second))
+        val unchanged = mapper.map("session", listOf(first.copy(), second.copy()))
 
         assertEquals(2, conversions.get())
+        assertSame(initial[0], unchanged[0])
+        assertSame(initial[1], unchanged[1])
+
+        val edited = mapper.map("session", listOf(first.copy(content = "edited"), second))
+        assertEquals(3, conversions.get())
+        assertNotSame(unchanged[0], edited[0])
+        assertSame(unchanged[1], edited[1])
+        assertEquals("edited", edited[0].content)
     }
 
-    private fun entity(id: String, content: String = id) = AgentMessageEntity(
+    @Test
+    fun cacheIsBoundToCurrentPageAndSession() {
+        val conversions = AtomicInteger()
+        val mapper = CachedUiMessageMapper { entity ->
+            conversions.incrementAndGet()
+            entity.toUIMessage()
+        }
+        val first = message("one", "first")
+        val second = message("two", "second")
+
+        mapper.map("session-a", listOf(first, second))
+        mapper.map("session-a", listOf(second))
+        mapper.map("session-a", listOf(first, second))
+        assertEquals("An item evicted from the current page is converted again", 3, conversions.get())
+
+        mapper.map("session-b", listOf(first, second))
+        assertEquals("Changing sessions clears prior page snapshots", 5, conversions.get())
+    }
+
+    private fun message(id: String, content: String) = AgentMessageEntity(
         id = id,
         sessionId = "session",
-        role = MessageRole.ASSISTANT.name,
+        role = MessageRole.USER.name,
         content = content,
-        timestamp = 1L
+        timestamp = id.hashCode().toLong()
     )
 }

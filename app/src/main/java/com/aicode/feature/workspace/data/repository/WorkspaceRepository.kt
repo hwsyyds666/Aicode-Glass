@@ -112,6 +112,7 @@ class WorkspaceRepository @Inject constructor(
 
     /** 外部本地工作区列表（用户所选设备目录），JSON 序列化持久化，重启保留。 */
     private val externalWorkspacesKey = stringPreferencesKey("external_workspaces")
+    private val gitHubWorkspaceSourcesKey = stringPreferencesKey("github_workspace_sources")
 
     /**
      * 所有项目的父目录，固定用内部 filesDir（app 私有 ext4）。
@@ -256,9 +257,18 @@ class WorkspaceRepository @Inject constructor(
     }
 
     private suspend fun refreshLocalWorkspaces(): List<Workspace> {
+        val sources = readGitHubWorkspaceSources()
         val internal = projectsRoot.listFiles { f -> f.isDirectory }
             ?.sortedBy { it.name.lowercase() }
-            ?.map { Workspace(name = it.name, path = it.absolutePath) }
+            ?.map { dir ->
+                val source = sources[dir.name]
+                Workspace(
+                    name = dir.name,
+                    path = dir.absolutePath,
+                    sourceRepository = source?.fullName,
+                    sourceRepositoryUrl = source?.htmlUrl
+                )
+            }
             ?: emptyList()
         // 外部本地工作区：失联（目录被移动/删除）时保留记录并标记不可用，目录恢复后自动重新可用
         val external = mapExternalWorkspaces(readExternalWorkspaces()) { File(it).isDirectory }
@@ -505,8 +515,44 @@ class WorkspaceRepository @Inject constructor(
             }
             target?.let { sessionUseCase.deleteSessionsByWorkspace(it.path) }
         }
+        context.workspaceDataStore.edit { prefs ->
+            val sources = runCatching {
+                json.decodeFromString<Map<String, GitHubWorkspaceSource>>(prefs[gitHubWorkspaceSourcesKey].orEmpty())
+            }.getOrDefault(emptyMap())
+            val updated = sources - name
+            if (updated.isEmpty()) prefs.remove(gitHubWorkspaceSourcesKey)
+            else prefs[gitHubWorkspaceSourcesKey] = json.encodeToString(updated)
+        }
         refreshWorkspaces()
         FileLogger.i(TAG, "删除工作区: $name")
+    }
+
+    /** Persist GitHub provenance separately from OAuth so local clones survive account disconnects. */
+    suspend fun recordGitHubWorkspace(name: String, fullName: String, htmlUrl: String) = withContext(Dispatchers.IO) {
+        require(fullName.matches(Regex("[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")))
+        val uri = java.net.URI(htmlUrl)
+        require(uri.scheme.equals("https", ignoreCase = true) && uri.host.equals("github.com", ignoreCase = true))
+        require(uri.rawUserInfo == null && uri.path.trimEnd('/') == "/$fullName")
+        context.workspaceDataStore.edit { prefs ->
+            val sources = runCatching {
+                json.decodeFromString<Map<String, GitHubWorkspaceSource>>(prefs[gitHubWorkspaceSourcesKey].orEmpty())
+            }.getOrDefault(emptyMap()).toMutableMap()
+            sources[name] = GitHubWorkspaceSource(fullName, htmlUrl)
+            prefs[gitHubWorkspaceSourcesKey] = json.encodeToString(sources)
+        }
+        refreshWorkspaces()
+    }
+
+    @Serializable
+    private data class GitHubWorkspaceSource(val fullName: String, val htmlUrl: String)
+
+    private suspend fun readGitHubWorkspaceSources(): Map<String, GitHubWorkspaceSource> {
+        val raw = context.workspaceDataStore.data.first()[gitHubWorkspaceSourcesKey] ?: return emptyMap()
+        return runCatching { json.decodeFromString<Map<String, GitHubWorkspaceSource>>(raw) }
+            .getOrElse { error ->
+                FileLogger.w(TAG, "GitHub 工作区来源记录解析失败，已忽略", error)
+                emptyMap()
+            }
     }
 
     /** 外部本地工作区持久化记录。 */

@@ -20,6 +20,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -480,6 +482,20 @@ class DeviceRootFileAccess @Inject constructor(
         val tmp = File(dir, "${real.hashCode().toString(16)}-$name")
         tmp.writeBytes(bytes)
         return tmp
+    }
+
+    override suspend fun sha256(path: String, maxBytes: Long): String? = withContext(Dispatchers.IO) {
+        if (!isFile(path)) return@withContext null
+        val size = fileSize(path)
+        if (size < 0L || size > maxBytes) return@withContext null
+        val real = resolve(path)
+        val result = runCatching {
+            sh("if command -v sha256sum >/dev/null 2>&1; then sha256sum -- ${q(real)}; else toybox sha256sum -- ${q(real)}; fi")
+        }.getOrNull() ?: return@withContext null
+        if (result.exitCode != 0 || result.truncated) return@withContext null
+        result.output.trim().substringBefore(' ').takeIf { it.matches(Regex("[0-9a-fA-F]{64}")) }
+            ?.lowercase()
+            ?.let { "sha256:$it" }
     }
 
     override suspend fun parentPath(path: String): String? {

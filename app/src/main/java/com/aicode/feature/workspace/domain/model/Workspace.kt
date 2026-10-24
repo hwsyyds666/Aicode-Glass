@@ -25,5 +25,8 @@ data class Workspace(
     /** 工作区类型，默认内部工作区，保持旧构造兼容。 */
     val type: WorkspaceType = WorkspaceType.INTERNAL,
     /** 工作区当前是否可用（外部本地目录被移动/删除时为 false），默认可用。 */
-    val available: Boolean = true
+    val available: Boolean = true,
+    /** GitHub 来源仓库的标识与网页地址；断开 OAuth 账号不会删除或解绑本地克隆。 */
+    val sourceRepository: String? = null,
+    val sourceRepositoryUrl: String? = null
 )

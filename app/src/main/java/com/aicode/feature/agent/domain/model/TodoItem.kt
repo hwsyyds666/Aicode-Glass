@@ -1,6 +1,6 @@
 package com.aicode.feature.agent.domain.model
 
-enum class TodoStatus { PENDING, IN_PROGRESS, COMPLETED }
+enum class TodoStatus { PENDING, IN_PROGRESS, COMPLETED, FAILED }
 
 data class TodoItem(
     val id: String,

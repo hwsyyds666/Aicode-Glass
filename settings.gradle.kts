@@ -23,6 +23,7 @@ dependencyResolutionManagement {
 rootProject.name = "app"
 
 include(":app")
+include(":macrobenchmark")
 include(":terminal-emulator")
 include(":terminal-view")
 

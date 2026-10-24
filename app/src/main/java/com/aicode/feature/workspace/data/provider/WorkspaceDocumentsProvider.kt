@@ -85,17 +85,17 @@ class WorkspaceDocumentsProvider : DocumentsProvider() {
     /** 往根游标追加一个 root：docId 用目录绝对路径，与 [docIdForFile] 一致。 */
     private fun addRoot(result: MatrixCursor, dir: File, title: String) {
         result.newRow().apply {
-            add(Root.COLUMN_ROOT_ID, docIdForFile(dir))
-            add(Root.COLUMN_DOCUMENT_ID, docIdForFile(dir))
-            add(Root.COLUMN_SUMMARY, null)
-            add(
+            addIfPresent(result, Root.COLUMN_ROOT_ID, docIdForFile(dir))
+            addIfPresent(result, Root.COLUMN_DOCUMENT_ID, docIdForFile(dir))
+            addIfPresent(result, Root.COLUMN_SUMMARY, null)
+            addIfPresent(result,
                 Root.COLUMN_FLAGS,
-                Root.FLAG_SUPPORTS_CREATE or Root.FLAG_SUPPORTS_SEARCH or Root.FLAG_SUPPORTS_IS_CHILD,
+                Root.FLAG_SUPPORTS_SEARCH or Root.FLAG_SUPPORTS_IS_CHILD,
             )
-            add(Root.COLUMN_TITLE, title)
-            add(Root.COLUMN_MIME_TYPES, ALL_MIME_TYPES)
-            add(Root.COLUMN_AVAILABLE_BYTES, dir.freeSpace)
-            add(Root.COLUMN_ICON, R.mipmap.ic_launcher)
+            addIfPresent(result, Root.COLUMN_TITLE, title)
+            addIfPresent(result, Root.COLUMN_MIME_TYPES, ALL_MIME_TYPES)
+            addIfPresent(result, Root.COLUMN_AVAILABLE_BYTES, dir.freeSpace)
+            addIfPresent(result, Root.COLUMN_ICON, R.mipmap.ic_launcher)
         }
     }
 
@@ -114,12 +114,13 @@ class WorkspaceDocumentsProvider : DocumentsProvider() {
         val parent = fileForDocId(parentDocumentId)
         // 根目录（filesDir 本身）只放出白名单子目录，隐藏 rootfs/数据库等内部目录；
         // 其余层级照常列出全部内容。
-        val children = if (parent.absolutePath == baseDir().absolutePath) {
+        val children = if (parent.canonicalFile == baseDir().canonicalFile) {
             exposedChildren()
         } else {
             parent.listFiles()?.toList() ?: emptyList()
         }
-        children.forEach { child -> includeFile(result, null, child) }
+        children.filter { isExposedWorkspaceDocument(baseDir(), it) }
+            .forEach { child -> includeFile(result, null, child) }
         return result
     }
 
@@ -138,10 +139,24 @@ class WorkspaceDocumentsProvider : DocumentsProvider() {
         mimeType: String,
         displayName: String,
     ): String {
+        if (displayName.isEmpty() || displayName == "." || displayName == ".." ||
+            '/' in displayName || '\u0000' in displayName
+        ) {
+            throw FileNotFoundException("Invalid document name")
+        }
         val parent = fileForDocId(parentDocumentId)
+        if (parent.canonicalFile == baseDir().canonicalFile) {
+            throw FileNotFoundException("Cannot create documents in the root directory")
+        }
         var newFile = File(parent, displayName)
         var conflictId = 2
-        while (newFile.exists()) {
+        while (true) {
+            if (!isExposedWorkspaceDocument(baseDir(), newFile) ||
+                newFile.canonicalFile == baseDir().canonicalFile
+            ) {
+                throw FileNotFoundException("${newFile.path} is outside exposed roots")
+            }
+            if (!newFile.exists() && !java.nio.file.Files.isSymbolicLink(newFile.toPath())) break
             newFile = File(parent, "$displayName ($conflictId)")
             conflictId++
         }
@@ -156,6 +171,9 @@ class WorkspaceDocumentsProvider : DocumentsProvider() {
 
     override fun deleteDocument(documentId: String) {
         val file = fileForDocId(documentId)
+        if (isExposedWorkspaceRoot(baseDir(), file)) {
+            throw FileNotFoundException("Cannot delete the root directory")
+        }
         if (!file.deleteRecursively()) {
             throw FileNotFoundException("Failed to delete document: $documentId")
         }
@@ -173,19 +191,18 @@ class WorkspaceDocumentsProvider : DocumentsProvider() {
         val root = fileForDocId(rootId)
         val rootCanonical = root.canonicalPath
         // 从根（filesDir）搜索时只下钻白名单子目录，避免扫到 rootfs 等内部目录；其余层级照常。
-        val seeds = if (root.absolutePath == baseDir().absolutePath) exposedChildren() else listOf(root)
+        val seeds = if (rootCanonical == baseDir().canonicalPath) exposedChildren() else listOf(root)
         val pending = LinkedList<File>().apply { addAll(seeds) }
+        val visited = HashSet<String>()
         val needle = query.lowercase()
 
         while (pending.isNotEmpty() && result.count < MAX_SEARCH_RESULTS) {
             val file = pending.removeFirst()
-            // 仅在根目录内搜索，避免 symlink 指向外部导致扫到整个磁盘
-            val insideRoot = try {
-                file.canonicalPath.startsWith(rootCanonical)
-            } catch (e: Exception) {
-                false
-            }
-            if (!insideRoot) continue
+            val canonical = runCatching { file.canonicalPath }.getOrNull() ?: continue
+            if (!isExposedWorkspaceDocument(baseDir(), file) ||
+                (canonical != rootCanonical && !isStrictChildPath(rootCanonical, canonical)) ||
+                !visited.add(canonical)
+            ) continue
             if (file.isDirectory) {
                 file.listFiles()?.let { pending.addAll(it) }
             } else if (file.name.lowercase().contains(needle)) {
@@ -195,14 +212,20 @@ class WorkspaceDocumentsProvider : DocumentsProvider() {
         return result
     }
 
-    override fun isChildDocument(parentDocumentId: String, documentId: String): Boolean =
-        documentId.startsWith(parentDocumentId)
+    override fun isChildDocument(parentDocumentId: String, documentId: String): Boolean {
+        val parent = runCatching { fileForDocId(parentDocumentId).canonicalPath }.getOrNull() ?: return false
+        val child = runCatching { fileForDocId(documentId).canonicalPath }.getOrNull() ?: return false
+        return child != parent && isStrictChildPath(parent, child)
+    }
 
     private fun docIdForFile(file: File): String = file.absolutePath
 
     private fun fileForDocId(docId: String): File {
         val f = File(docId)
         if (!f.exists()) throw FileNotFoundException("${f.absolutePath} not found")
+        if (!isExposedWorkspaceDocument(baseDir(), f)) {
+            throw FileNotFoundException("$docId is outside exposed roots")
+        }
         return f
     }
 
@@ -218,27 +241,40 @@ class WorkspaceDocumentsProvider : DocumentsProvider() {
     private fun includeFile(result: MatrixCursor, docId: String?, file: File?) {
         val resolvedFile = file ?: docId?.let { fileForDocId(it) }
         ?: throw FileNotFoundException("docId and file both null")
+        if (!isExposedWorkspaceDocument(baseDir(), resolvedFile)) {
+            throw FileNotFoundException("${resolvedFile.path} is outside exposed roots")
+        }
         val resolvedDocId = docId ?: docIdForFile(resolvedFile)
 
+        val isNavigationRoot = resolvedFile.canonicalFile == baseDir().canonicalFile
+        val isProtectedRoot = isExposedWorkspaceRoot(baseDir(), resolvedFile)
         var flags = 0
         if (resolvedFile.isDirectory) {
-            if (resolvedFile.canWrite()) flags = flags or Document.FLAG_DIR_SUPPORTS_CREATE
+            if (!isNavigationRoot && resolvedFile.canWrite()) flags = flags or Document.FLAG_DIR_SUPPORTS_CREATE
         } else if (resolvedFile.canWrite()) {
             flags = flags or Document.FLAG_SUPPORTS_WRITE
         }
-        if (resolvedFile.parentFile?.canWrite() == true) flags = flags or Document.FLAG_SUPPORTS_DELETE
+        if (!isProtectedRoot && resolvedFile.parentFile?.canWrite() == true) flags = flags or Document.FLAG_SUPPORTS_DELETE
 
         val mime = mimeType(resolvedFile)
         if (mime.startsWith("image/")) flags = flags or Document.FLAG_SUPPORTS_THUMBNAIL
 
         result.newRow().apply {
-            add(Document.COLUMN_DOCUMENT_ID, resolvedDocId)
-            add(Document.COLUMN_DISPLAY_NAME, resolvedFile.name)
-            add(Document.COLUMN_SIZE, resolvedFile.length())
-            add(Document.COLUMN_MIME_TYPE, mime)
-            add(Document.COLUMN_LAST_MODIFIED, resolvedFile.lastModified())
-            add(Document.COLUMN_FLAGS, flags)
-            add(Document.COLUMN_ICON, R.mipmap.ic_launcher)
+            addIfPresent(result, Document.COLUMN_DOCUMENT_ID, resolvedDocId)
+            addIfPresent(result, Document.COLUMN_DISPLAY_NAME, resolvedFile.name)
+            addIfPresent(result, Document.COLUMN_SIZE, resolvedFile.length())
+            addIfPresent(result, Document.COLUMN_MIME_TYPE, mime)
+            addIfPresent(result, Document.COLUMN_LAST_MODIFIED, resolvedFile.lastModified())
+            addIfPresent(result, Document.COLUMN_FLAGS, flags)
+            addIfPresent(result, Document.COLUMN_ICON, R.mipmap.ic_launcher)
         }
+    }
+
+    private fun MatrixCursor.RowBuilder.addIfPresent(
+        cursor: MatrixCursor,
+        column: String,
+        value: Any?,
+    ) {
+        if (cursor.getColumnIndex(column) >= 0) add(column, value)
     }
 }

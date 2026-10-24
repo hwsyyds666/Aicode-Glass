@@ -113,6 +113,7 @@ import compose.icons.feathericons.Download
 import compose.icons.feathericons.Edit2
 import compose.icons.feathericons.FilePlus
 import compose.icons.feathericons.Folder
+import compose.icons.feathericons.MoreHorizontal
 import compose.icons.feathericons.FolderPlus
 import compose.icons.feathericons.Globe
 import compose.icons.feathericons.RefreshCw
@@ -578,6 +579,20 @@ private fun SessionListContent(
             addAll(buildSessionGroups(unpinned, now))
         }
     }
+    val expandedRows = remember(groups, subSessionsByParent, expandedIds) {
+        groups.associate { group ->
+            group.groupKey to buildList {
+                group.sessions.forEach { parent ->
+                    add(DrawerSessionRow(parent, isSubagent = false))
+                    if (parent.id in expandedIds) {
+                        subSessionsByParent[parent.id].orEmpty().forEach { child ->
+                            add(DrawerSessionRow(child, isSubagent = true, parentId = parent.id))
+                        }
+                    }
+                }
+            }
+        }
+    }
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize()
@@ -591,96 +606,45 @@ private fun SessionListContent(
                 )
             }
             itemsIndexed(
-                items = group.sessions,
-                key = { _, session -> session.id },
-                contentType = { _, _ -> "session" }
-            ) { index, session ->
-                Column {
-                    if (index > 0) {
-                        if (group.groupKey == "pinned") Spacer(Modifier.height(Spacing.sm)) else SettingsDivider()
-                    }
-                    val state = agentStates[session.id]
-                    val isExecuting = state is AgentUIState.Loading || state is AgentUIState.Streaming
-                    val subSessions = subSessionsByParent[session.id].orEmpty()
-                    val expanded = session.id in expandedIds
-                    ChatSessionRow(
-                        session = session,
-                        selected = if (selectionMode) false else session.id == currentSessionId,
-                        isExecuting = isExecuting,
-                        awaitingPermission = session.id in awaitingPermissionSessionIds,
-                        pinned = session.isPinned,
-                        selectionMode = selectionMode,
-                        checked = session.id in selectedSessionIds,
-                        onCheckedChange = { onToggleSelectSession(session) },
-                        onClick = {
-                            if (selectionMode) {
-                                onToggleSelectSession(session)
-                            } else {
-                                onSelect(session)
-                            }
-                        },
-                        onLongClick = {
-                            if (selectionMode) {
-                                onToggleSelectSession(session)
-                            } else {
-                                onLongClick(session)
-                            }
-                        },
-                        trailing = if (subSessions.isEmpty()) null else {
-                            {
-                                SubAgentExpandToggle(
-                                    expanded = expanded,
-                                    count = subSessions.size,
-                                    onToggle = {
-                                        expandedIds = if (expanded) {
-                                            expandedIds - session.id
-                                        } else {
-                                            expandedIds + session.id
-                                        }
-                                    }
-                                )
-                            }
-                        }
-                    )
-                    AnimatedVisibility(
-                        visible = expanded,
-                        enter = expandVertically(expandFrom = androidx.compose.ui.Alignment.Top) + fadeIn(),
-                        exit = shrinkVertically(shrinkTowards = androidx.compose.ui.Alignment.Top) + fadeOut()
-                    ) {
-                        Column {
-                            subSessions.forEach { sub ->
-                                val subState = agentStates[sub.id]
-                                Row(modifier = Modifier.padding(start = Spacing.lg)) {
-                                    ChatSessionRow(
-                                        session = sub,
-                                        selected = if (selectionMode) false else sub.id == currentSessionId,
-                                        isExecuting = subState is AgentUIState.Loading ||
-                                            subState is AgentUIState.Streaming,
-                                        awaitingPermission = sub.id in awaitingPermissionSessionIds,
-                                        pinned = false,
-                                        selectionMode = selectionMode,
-                                        checked = sub.id in selectedSessionIds,
-                                        onCheckedChange = { onToggleSelectSession(sub) },
-                                        onClick = {
-                                            if (selectionMode) {
-                                                onToggleSelectSession(sub)
-                                            } else {
-                                                onSelect(sub)
-                                            }
-                                        },
-                                        onLongClick = {
-                                            if (selectionMode) {
-                                                onToggleSelectSession(sub)
-                                            } else {
-                                                onLongClick(sub)
-                                            }
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    }
+                items = expandedRows[group.groupKey].orEmpty(),
+                key = { _, row -> if (row.isSubagent) "subagent-${row.session.id}" else row.session.id },
+                contentType = { _, row -> if (row.isSubagent) "subagent-session" else "session" }
+            ) { index, row ->
+                val session = row.session
+                if (index > 0) {
+                    if (group.groupKey == "pinned") Spacer(Modifier.height(Spacing.sm)) else SettingsDivider()
                 }
+                val state = agentStates[session.id]
+                val isExecuting = state is AgentUIState.Loading || state is AgentUIState.Streaming
+                val childSessions = if (row.isSubagent) emptyList() else subSessionsByParent[session.id].orEmpty()
+                val expanded = session.id in expandedIds
+                ChatSessionRow(
+                    session = session,
+                    selected = if (selectionMode) false else session.id == currentSessionId,
+                    isExecuting = isExecuting,
+                    awaitingPermission = session.id in awaitingPermissionSessionIds,
+                    pinned = session.isPinned,
+                    selectionMode = selectionMode,
+                    checked = session.id in selectedSessionIds,
+                    onCheckedChange = { onToggleSelectSession(session) },
+                    onClick = {
+                        if (selectionMode) onToggleSelectSession(session) else onSelect(session)
+                    },
+                    onLongClick = {
+                        if (selectionMode) onToggleSelectSession(session) else onLongClick(session)
+                    },
+                    trailing = if (childSessions.isEmpty()) null else {
+                        {
+                            SubAgentExpandToggle(
+                                expanded = expanded,
+                                count = childSessions.size,
+                                onToggle = {
+                                    expandedIds = if (expanded) expandedIds - session.id else expandedIds + session.id
+                                }
+                            )
+                        }
+                    }
+                )
             }
         }
     }
@@ -902,10 +866,18 @@ private fun FileBrowserTab(
                 val maxContentPx = remember(state.nodes, textStyle) {
                     with(density) {
                         val widest = state.nodes.maxByOrNull { node ->
-                            val label = if (node.isRoot) WORKSPACE_LABEL else node.entry.name
+                            val label = when {
+                                node.isRoot -> WORKSPACE_LABEL
+                                node.isLoadMore -> "load more entries"
+                                else -> node.entry.name
+                            }
                             node.depth * 4 + label.sumOf { ch -> if (ch.code > 0x2E80) 2 else 1 }
                         } ?: return@with 0
-                        val label = if (widest.isRoot) WORKSPACE_LABEL else widest.entry.name
+                        val label = when {
+                            widest.isRoot -> WORKSPACE_LABEL
+                            widest.isLoadMore -> "load more entries"
+                            else -> widest.entry.name
+                        }
                         val textW = textMeasurer.measure(label, textStyle).size.width
                         (FILE_TREE_ROW_OVERHEAD.toPx() + (Spacing.lg * widest.depth).toPx() + textW).toInt()
                     }
@@ -923,13 +895,13 @@ private fun FileBrowserTab(
                             FileTreeRow(
                                 node = node,
                                 rowWidth = rowWidth,
-                                expanding = node.entry.isDirectory && node.path == expandingPath,
+                                expanding = !node.isLoadMore && node.entry.isDirectory && node.path == expandingPath,
                                 busy = node.path in fileOpPaths,
                                 onClick = {
-                                    if (node.entry.isDirectory) onToggleExpand(node.path)
+                                    if (node.isLoadMore || node.entry.isDirectory) onToggleExpand(node.path)
                                     else onOpenFile(node.path)
                                 },
-                                onLongClick = { menuNode = node },
+                                onLongClick = { if (!node.isLoadMore) menuNode = node },
                                 modifier = Modifier.animateItem(
                                     fadeInSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing),
                                     fadeOutSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
@@ -1242,18 +1214,19 @@ private fun FileTreeRow(
     onLongClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // 展开加载态加最小延迟：本地模式列目录极快，避免每次展开都闪一下转圈。
+    // Show the loading affordance quickly so remote directory expansion feels responsive.
     var showExpanding by remember { mutableStateOf(false) }
     LaunchedEffect(expanding) {
         if (expanding) {
-            delay(180)
+            delay(60)
             showExpanding = true
         } else {
             showExpanding = false
         }
     }
-    val isDotfile = !node.isRoot && node.entry.name.startsWith(".")
+    val isDotfile = !node.isRoot && !node.isLoadMore && node.entry.name.startsWith(".")
     val decorationColor: Color? = when {
+        node.isLoadMore -> MaterialTheme.colorScheme.onSurfaceVariant
         node.hasError -> MaterialTheme.colorScheme.error
         node.ignored -> FileTreeIgnoredColor
         isDotfile -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
@@ -1302,7 +1275,11 @@ private fun FileTreeRow(
         }
         Spacer(Modifier.width(Spacing.sm))
         Text(
-            text = if (node.isRoot) WORKSPACE_LABEL else node.entry.name,
+            text = when {
+                node.isRoot -> WORKSPACE_LABEL
+                node.isLoadMore -> stringResource(R.string.file_browser_load_more, node.loadMoreCount)
+                else -> node.entry.name
+            },
             style = MaterialTheme.typography.bodyMedium,
             color = decorationColor ?: MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
@@ -1314,10 +1291,10 @@ private fun FileTreeRow(
 /** 文件树行的类型图标：目录用文件夹，文件按扩展名挑选单色线性图标。[decorationColor] 非空时统一染色（.gitignore/dotfile 弱化）。 */
 @Composable
 private fun FileTreeIcon(node: FileTreeNode, decorationColor: Color?) {
-    val vector = if (node.entry.isDirectory) {
-        FeatherIcons.Folder
-    } else {
-        fileTypeIconFor(node.entry.name)
+    val vector = when {
+        node.isLoadMore -> FeatherIcons.MoreHorizontal
+        node.entry.isDirectory -> FeatherIcons.Folder
+        else -> fileTypeIconFor(node.entry.name)
     }
     Icon(
         imageVector = vector,
@@ -1457,6 +1434,12 @@ private fun SheetActionRow(
 internal data class SessionGroup(
     val groupKey: String,
     val sessions: List<ChatSession>
+)
+
+private data class DrawerSessionRow(
+    val session: ChatSession,
+    val isSubagent: Boolean,
+    val parentId: String? = null
 )
 
 /**

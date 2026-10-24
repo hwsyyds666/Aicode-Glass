@@ -27,7 +27,6 @@ import com.aicode.feature.agent.domain.mcp.McpServerConfig
 import com.aicode.feature.agent.domain.mcp.McpServerEntry
 import com.aicode.feature.agent.domain.mcp.McpServerStatus
 import com.aicode.feature.agent.domain.mcp.McpToolDescriptor
-import com.aicode.feature.agent.domain.model.AgentMode
 import com.aicode.feature.agent.domain.permission.HighRiskRule
 import com.aicode.feature.agent.domain.permission.HighRiskRulesRepository
 import com.aicode.feature.agent.domain.permission.PermissionRule
@@ -39,13 +38,6 @@ import com.aicode.feature.agent.domain.skill.SkillImportReport
 import com.aicode.feature.agent.domain.skill.SkillRepository
 import com.aicode.feature.agent.domain.skill.SkillSaveError
 import com.aicode.feature.agent.domain.skill.SkillScope
-import com.aicode.feature.agent.domain.subagent.AgentDefinitionConfigRepository
-import com.aicode.feature.agent.domain.subagent.AgentDefinitionForm
-import com.aicode.feature.agent.domain.subagent.AgentDefinitionRepository
-import com.aicode.feature.agent.domain.subagent.AgentDefinitionScope
-import com.aicode.feature.agent.domain.subagent.AgentSaveError
-import com.aicode.feature.agent.domain.subagent.InjectPart
-import com.aicode.feature.agent.domain.tool.ToolRegistry
 import com.aicode.feature.settings.data.remote.ModelApiService
 import com.aicode.feature.settings.data.remote.ContainerImageDownloader
 import com.aicode.feature.settings.data.remote.ModelMetadataService
@@ -71,7 +63,12 @@ import com.aicode.feature.settings.data.repository.KeepaliveSettingsRepository
 import com.aicode.feature.settings.data.repository.LanguageSettingsRepository
 import com.aicode.feature.settings.data.repository.LogSettingsRepository
 import com.aicode.feature.settings.data.repository.ReviewerModelSettingsRepository
+import com.aicode.feature.settings.data.repository.SubAgentModelSettingsRepository
+import com.aicode.feature.settings.data.repository.SubAgentSettingsRepository
+import com.aicode.feature.settings.data.repository.SubAgentModelChoice
+import com.aicode.feature.settings.data.repository.SubAgentModelTier
 import com.aicode.feature.settings.data.repository.ContextWindowOverrideRepository
+import com.aicode.feature.settings.data.repository.ContextWindowOverridePolicy
 import com.aicode.feature.settings.data.repository.ProxyConfig
 import com.aicode.feature.settings.data.repository.ProxySettingsRepository
 import com.aicode.feature.settings.data.repository.ScreenOnSettingsRepository
@@ -87,6 +84,7 @@ import com.aicode.feature.workspace.domain.repository.RemoteRepository
 import com.aicode.feature.settings.domain.model.AIProviderConfig
 import com.aicode.feature.settings.domain.model.DashboardContext
 import com.aicode.feature.settings.domain.model.ModelMetadata
+import com.aicode.feature.settings.domain.model.ModelContextPolicy
 import com.aicode.feature.settings.domain.model.modelMetadataKey
 import com.aicode.feature.settings.domain.model.ProviderDashboardResult
 import com.aicode.feature.settings.domain.model.ProviderDashboardState
@@ -104,6 +102,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
@@ -238,23 +237,6 @@ data class SkillUiEntry(
     val requiredTools: List<String> = emptyList()
 )
 
-/** 子代理列表页的 UI 状态：定义内容 + 来源作用域 + 启停状态。 */
-data class SubAgentUiEntry(
-    val name: String,
-    val description: String,
-    val scope: AgentDefinitionScope,
-    val disabled: Boolean,
-    val providerId: String?,
-    val model: String?,
-    val reasoningEffort: String?,
-    val mode: AgentMode?,
-    val allowedTools: List<String>,
-    val disallowedTools: List<String>,
-    val inject: Set<InjectPart>,
-    val prompt: String,
-    val filePath: String?
-)
-
 /** 技能编辑页的保存结果：UI 据此决定是退回列表还是就地报错。 */
 sealed interface SkillSaveState {
     data object Idle : SkillSaveState
@@ -271,13 +253,6 @@ sealed interface SkillImportState {
 }
 
 /** 子代理编辑页的保存结果：UI 据此决定是退回列表还是就地报错。 */
-sealed interface SubAgentSaveState {
-    data object Idle : SubAgentSaveState
-    data object Saving : SubAgentSaveState
-    data object Saved : SubAgentSaveState
-    data class Failed(val error: AgentSaveError) : SubAgentSaveState
-}
-
 /**
  * 把趋势聚合补全为周期内的完整时间轴：无记录的天/小时补 0，避免周期内调用集中在同一天时
  * 趋势只有单个点而无法绘制折线图。「全部」周期从最早有记录的那天起补到当天。
@@ -325,15 +300,14 @@ class SettingsViewModel @Inject constructor(
     private val highRiskRulesRepository: HighRiskRulesRepository,
     private val toolSafetySettingsRepository: ToolSafetySettingsRepository,
     private val skillRepository: SkillRepository,
-    private val agentDefinitionRepository: AgentDefinitionRepository,
-    private val agentDefinitionConfigRepository: AgentDefinitionConfigRepository,
-    private val toolRegistry: ToolRegistry,
     private val skillConfigRepository: SkillConfigRepository,
     private val visionModelSettingsRepository: VisionModelSettingsRepository,
     private val imageGenModelSettingsRepository: ImageGenModelSettingsRepository,
     private val compactionModelSettingsRepository: CompactionModelSettingsRepository,
     private val titleModelSettingsRepository: TitleModelSettingsRepository,
     private val reviewerModelSettingsRepository: ReviewerModelSettingsRepository,
+    private val subAgentModelSettingsRepository: SubAgentModelSettingsRepository,
+    private val subAgentSettingsRepository: SubAgentSettingsRepository,
     private val contextWindowOverrideRepository: ContextWindowOverrideRepository,
     private val defaultModelSettingsRepository: DefaultModelSettingsRepository,
     private val containerSettingsRepository: ContainerSettingsRepository,
@@ -436,6 +410,19 @@ class SettingsViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.Eagerly, "")
     val defaultModel: StateFlow<String> = defaultModelSettingsRepository.modelFlow
         .stateIn(viewModelScope, SharingStarted.Eagerly, "")
+
+    val fastSubAgentModel: StateFlow<SubAgentModelChoice> = subAgentModelSettingsRepository
+        .choiceFlow(SubAgentModelTier.FAST)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SubAgentModelChoice(reasoningEffort = "medium"))
+    val powerSubAgentModel: StateFlow<SubAgentModelChoice> = subAgentModelSettingsRepository
+        .choiceFlow(SubAgentModelTier.POWER)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SubAgentModelChoice(reasoningEffort = "high"))
+    val maxSubAgentRunning: StateFlow<Int> = subAgentSettingsRepository.maxRunningFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 3)
+    val maxSubAgentTotal: StateFlow<Int> = subAgentSettingsRepository.maxTotalPerParentFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 12)
+    val subAgentTimeoutMinutes: StateFlow<Int> = subAgentSettingsRepository.timeoutMinutesFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 20)
 
     /** 识图模型选择：providerId 为空即「跟随当前聊天模型」。 */
     private val _visionProviderId = MutableStateFlow("")
@@ -570,16 +557,6 @@ class SettingsViewModel @Inject constructor(
     private val _skillDeleting = MutableStateFlow<String?>(null)
     val skillDeleting: StateFlow<String?> = _skillDeleting.asStateFlow()
 
-    private val _subAgents = MutableStateFlow<List<SubAgentUiEntry>>(emptyList())
-    val subAgents: StateFlow<List<SubAgentUiEntry>> = _subAgents.asStateFlow()
-
-    private val _subAgentSaveState = MutableStateFlow<SubAgentSaveState>(SubAgentSaveState.Idle)
-    val subAgentSaveState: StateFlow<SubAgentSaveState> = _subAgentSaveState.asStateFlow()
-
-    /** 正在删除的子代理名（非 null 表示删除进行中，用于弹窗转圈与禁用按钮）。 */
-    private val _subAgentDeleting = MutableStateFlow<String?>(null)
-    val subAgentDeleting: StateFlow<String?> = _subAgentDeleting.asStateFlow()
-
     val mcpStatuses: StateFlow<List<McpServerStatus>> = mcpManager.statuses
 
     private val _mcpReloading = MutableStateFlow(false)
@@ -623,6 +600,9 @@ class SettingsViewModel @Inject constructor(
     /** 命令执行授权挡位（自主执行 / 规则拦截 / 完全权限）。 */
     private val _commandAuthLevel = MutableStateFlow(CommandAuthLevel.RULE_BASED)
     val commandAuthLevel: StateFlow<CommandAuthLevel> = _commandAuthLevel.asStateFlow()
+
+    private val _commandReviewTimeoutSeconds = MutableStateFlow(ToolSafetySettingsRepository.DEFAULT_REVIEW_TIMEOUT_SECONDS)
+    val commandReviewTimeoutSeconds: StateFlow<Int> = _commandReviewTimeoutSeconds.asStateFlow()
 
     /** 高危拦截规则（含内置预设与用户自建）。 */
     private val _highRiskRules = MutableStateFlow<List<HighRiskRule>>(emptyList())
@@ -993,21 +973,13 @@ class SettingsViewModel @Inject constructor(
             }
 
             launch {
-                agentDefinitionConfigRepository.changes.collectLatest {
-                    refreshSubAgents()
-                }
-            }
-
-            launch {
                 refreshSkills()
             }
 
-            // 全局技能/子代理在远程模式下以远端为源，本地目录监听（skills.changes）不会触发；
-            // 执行模式切换或远程连接就绪后需重扫，否则列表停留在旧环境的内容。
+            // 技能在远程模式下以远端为源；执行模式切换或远程连接就绪后需重扫。
             launch {
                 executionMode.collectLatest {
                     refreshSkills()
-                    refreshSubAgents()
                 }
             }
 
@@ -1015,7 +987,6 @@ class SettingsViewModel @Inject constructor(
                 connectionState.collectLatest { state ->
                     if (state == ConnectionState.CONNECTED) {
                         refreshSkills()
-                        refreshSubAgents()
                     }
                 }
             }
@@ -1041,6 +1012,12 @@ class SettingsViewModel @Inject constructor(
             launch {
                 toolSafetySettingsRepository.commandAuthLevelFlow.collectLatest {
                     _commandAuthLevel.value = it
+                }
+            }
+
+            launch {
+                toolSafetySettingsRepository.commandReviewTimeoutSecondsFlow.collectLatest {
+                    _commandReviewTimeoutSeconds.value = it
                 }
             }
 
@@ -1363,84 +1340,6 @@ class SettingsViewModel @Inject constructor(
             }
         }.getOrNull()
         return queried ?: uri.lastPathSegment?.substringAfterLast('/').orEmpty()
-    }
-
-    /** 重新扫描子代理定义（进入设置页 / 删除后调用，反映盘上增删改）。 */
-    fun refreshSubAgents() {
-        viewModelScope.launch {
-            _subAgents.value = withContext(Dispatchers.IO) {
-                agentDefinitionRepository.listAll().map { entry ->
-                    SubAgentUiEntry(
-                        name = entry.definition.name,
-                        description = entry.definition.description,
-                        scope = entry.scope,
-                        disabled = agentDefinitionRepository.isDisabled(entry.definition.name),
-                        providerId = entry.definition.providerId,
-                        model = entry.definition.model,
-                        reasoningEffort = entry.definition.reasoningEffort,
-                        mode = entry.definition.mode,
-                        allowedTools = entry.definition.allowedTools,
-                        disallowedTools = entry.definition.disallowedTools,
-                        inject = entry.definition.inject,
-                        prompt = entry.definition.prompt,
-                        filePath = entry.definition.filePath
-                    )
-                }
-            }
-        }
-    }
-
-    /** 删除指定作用域的子代理定义文件（不可恢复），随后立即刷新列表。 */
-    /** 切换子代理启用/禁用（写入对应作用域的 agents.json）；禁用后不再进主代理的可派发清单。 */
-    fun setSubAgentEnabled(name: String, enabled: Boolean, scope: AgentDefinitionScope) {
-        viewModelScope.launch {
-            withContext(Dispatchers.IO) { agentDefinitionRepository.setDisabled(name, !enabled, scope) }
-            refreshSubAgents()
-        }
-    }
-
-    /**
-     * 保存子代理定义。[originalName] 为编辑前的名称，新建时为 null；
-     * 结果转成 [subAgentSaveState]，编辑页据此退回列表或就地报错。
-     */
-    fun saveSubAgent(
-        form: AgentDefinitionForm,
-        scope: AgentDefinitionScope,
-        originalName: String? = null
-    ) {
-        if (_subAgentSaveState.value is SubAgentSaveState.Saving) return
-        _subAgentSaveState.value = SubAgentSaveState.Saving
-        viewModelScope.launch {
-            val error = withContext(Dispatchers.IO) {
-                agentDefinitionRepository.save(form, scope, originalName)
-            }
-            _subAgentSaveState.value = if (error == null) {
-                SubAgentSaveState.Saved
-            } else {
-                SubAgentSaveState.Failed(error)
-            }
-            if (error == null) refreshSubAgents()
-        }
-    }
-
-    fun clearSubAgentSaveState() {
-        _subAgentSaveState.value = SubAgentSaveState.Idle
-    }
-
-    /** 当前已注册的全部工具名（含 MCP 动态工具），供编辑页勾选工具白名单与黑名单。 */
-    fun availableToolNames(): List<String> = toolRegistry.getAvailableTools().map { it.name }
-
-    fun deleteSubAgent(name: String, scope: AgentDefinitionScope) {
-        if (_subAgentDeleting.value != null) return
-        _subAgentDeleting.value = name
-        viewModelScope.launch {
-            try {
-                withContext(Dispatchers.IO) { agentDefinitionRepository.delete(name, scope) }
-                refreshSubAgents()
-            } finally {
-                _subAgentDeleting.value = null
-            }
-        }
     }
 
     fun getMcpServerTools(serverName: String?): List<McpToolDescriptor> {
@@ -2095,9 +1994,39 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    /** 子代理模型选择立即写入；清空该档即表示跟随当前派发会话。 */
+    fun setSubAgentModel(tier: SubAgentModelTier, providerId: String, model: String) {
+        val current = if (tier == SubAgentModelTier.FAST) fastSubAgentModel.value else powerSubAgentModel.value
+        viewModelScope.launch {
+            subAgentModelSettingsRepository.setChoice(tier, providerId, model, current.reasoningEffort)
+        }
+    }
+
+    fun setSubAgentReasoningEffort(tier: SubAgentModelTier, effort: String) {
+        val current = if (tier == SubAgentModelTier.FAST) fastSubAgentModel.value else powerSubAgentModel.value
+        viewModelScope.launch {
+            subAgentModelSettingsRepository.setChoice(tier, current.providerId, current.model, effort)
+        }
+    }
+
+    fun clearSubAgentModel(tier: SubAgentModelTier) {
+        viewModelScope.launch { subAgentModelSettingsRepository.clearChoice(tier) }
+    }
+
+    fun setMaxSubAgentRunning(value: Int) {
+        viewModelScope.launch { subAgentSettingsRepository.setMaxRunning(value) }
+    }
+
+    fun setMaxSubAgentTotal(value: Int) {
+        viewModelScope.launch { subAgentSettingsRepository.setMaxTotalPerParent(value) }
+    }
+
+    fun setSubAgentTimeoutMinutes(value: Int) {
+        viewModelScope.launch { subAgentSettingsRepository.setTimeoutMinutes(value) }
+    }
+
     /**
-     * 保存「上下文窗口统一值」。必填项（总上下文窗口、输出窗口）缺失时存储层会自动把
-     * 开关置回关闭，[ContextWindowOverrideUiState] 随之刷新——UI 不必自己判定。
+     * 自动保存「上下文窗口统一值」。无效数值不覆盖上一次有效配置，开关状态不随字段编辑改变。
      */
     fun saveContextWindowOverride(contextTokens: Int, inputTokens: Int?, outputTokens: Int?) {
         viewModelScope.launch {
@@ -2108,7 +2037,45 @@ class SettingsViewModel @Inject constructor(
     /** 直接开关「上下文窗口统一值」；必填项不齐时无法开启。 */
     fun setContextWindowOverrideEnabled(enabled: Boolean) {
         viewModelScope.launch {
-            contextWindowOverrideRepository.setEnabled(enabled)
+            if (!enabled) {
+                contextWindowOverrideRepository.setEnabled(false)
+                return@launch
+            }
+            val current = contextWindowOverrideRepository.getOverride()
+            if (ContextWindowOverridePolicy.isValid(
+                    current.contextTokens,
+                    current.inputTokens,
+                    current.outputTokens
+                )
+            ) {
+                contextWindowOverrideRepository.setEnabled(true)
+                return@launch
+            }
+
+            // First enable seeds the fields from the current default chat model; if no model metadata
+            // is available yet, use the same conservative policy fallback used for request budgeting.
+            val providerId = defaultModelSettingsRepository.getDefaultProviderId()
+            val configuredModel = defaultModelSettingsRepository.getDefaultModel()
+            val allProviders = repository.getAllProviders().first()
+            val provider = providerId.takeIf(String::isNotBlank)?.let { savedId ->
+                allProviders.firstOrNull { it.id == savedId } ?: repository.getProviderById(savedId)
+            } ?: allProviders.firstOrNull { it.isEnabled && it.hasUsableApiKey && it.models.isNotEmpty() }
+            val model = configuredModel.ifBlank { provider?.effectiveModel.orEmpty() }
+            val metadata = if (provider != null && model.isNotBlank()) {
+                runCatching { modelMetadataService.resolve(provider.id, provider.type, model) }.getOrNull()
+            } else null
+            val contextTokens = metadata?.contextTokens?.takeIf { it in 1..ContextWindowOverridePolicy.MAX_TOKEN_VALUE }
+                ?: ModelContextPolicy.DEFAULT_CONTEXT_TOKENS
+            val outputTokens = metadata?.outputTokens?.takeIf { it > 0 }?.coerceAtMost(contextTokens)
+                ?: ModelContextPolicy.outputReserveTokens(
+                    metadata ?: ModelMetadata(id = model.ifBlank { "default" }, contextTokens = contextTokens)
+                ).coerceAtMost(contextTokens)
+            val inputTokens = metadata?.inputTokens?.takeIf {
+                it > 0 && it.toLong() + outputTokens.toLong() <= contextTokens.toLong()
+            }
+            if (contextWindowOverrideRepository.save(contextTokens, inputTokens, outputTokens)) {
+                contextWindowOverrideRepository.setEnabled(true)
+            }
         }
     }
 
@@ -2448,6 +2415,10 @@ class SettingsViewModel @Inject constructor(
     /** 切换命令授权挡位。 */
     fun setCommandAuthLevel(level: CommandAuthLevel) {
         viewModelScope.launch { toolSafetySettingsRepository.setCommandAuthLevel(level) }
+    }
+
+    fun setCommandReviewTimeoutSeconds(seconds: Int) {
+        viewModelScope.launch { toolSafetySettingsRepository.setCommandReviewTimeoutSeconds(seconds) }
     }
 
     /** 新增用户自建高危拦截规则。 */

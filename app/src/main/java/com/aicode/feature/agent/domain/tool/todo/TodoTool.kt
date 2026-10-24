@@ -37,9 +37,10 @@ class TodoTool @Inject constructor(
     }
 
     override val name = "todo"
-    override val description = "用当前完整 items 列表替换会话任务清单。只需提交完整列表，" +
-        "无需 action、todo_id 或单项更新。items 可为空数组表示清空；每项为 " +
-        "{subject, description, status, priority}。status 可为 pending、in_progress、completed。"
+    override val description = "用当前完整 items 列表替换并展示会话任务清单。PLAN 模式开始多步骤实施前必须先提交计划，" +
+        "随后自动按步骤执行并持续同步状态；计划变化时提交更新后的完整列表。无需 action、todo_id 或单项更新。" +
+        "items 可为空数组表示清空；每项为 {subject, description, status, priority}。" +
+        "status 可为 pending、in_progress、completed、failed；不得把未实际完成的步骤标为 completed。"
 
     override val permissionPolicy = ToolPermissionPolicy.AUTO_APPROVE
     override val capabilities = setOf(ToolCapability.MODIFY_TODO_STATE)
@@ -58,8 +59,8 @@ class TodoTool @Inject constructor(
             ),
             "status" to mapOf(
                 "type" to "string",
-                "enum" to listOf("pending", "in_progress", "completed"),
-                "description" to "状态，默认 pending。in_progress 表示正在处理，completed 表示已完成。"
+                "enum" to listOf("pending", "in_progress", "completed", "failed"),
+                "description" to "状态，默认 pending。in_progress 表示正在处理，completed 表示已完成，failed 表示未能完成并应在 description 说明原因。"
             ),
             "priority" to mapOf(
                 "type" to "integer",
@@ -73,7 +74,7 @@ class TodoTool @Inject constructor(
         "items" to ToolParameter(
             name = "items",
             type = ParameterType.ARRAY,
-            description = "当前完整待办列表。传空数组会清空任务清单；每项为含 subject 的对象。",
+            description = "当前完整计划/待办列表。传空数组会清空；PLAN 开始前先提交完整计划，每步执行后更新状态；status 可为 pending、in_progress、completed、failed；每项为含 subject 的对象。",
             required = true,
             itemsSchema = todoItemSchema
         )
@@ -87,14 +88,14 @@ class TodoTool @Inject constructor(
             ?: return ToolResult.Error("未关联会话", "NO_SESSION")
 
         return try {
-            replaceTodos(args, sessionId)
+            replaceTodos(args, sessionId, context.mode == com.aicode.feature.agent.domain.model.AgentMode.PLAN)
         } catch (e: Exception) {
             FileLogger.e(TAG, "todo 工具执行失败: ${e.message}", e)
             ToolResult.Error("待办操作失败：${e.message}")
         }
     }
 
-    private suspend fun replaceTodos(args: Map<String, JsonElement>, sessionId: String): ToolResult {
+    private suspend fun replaceTodos(args: Map<String, JsonElement>, sessionId: String, planMode: Boolean): ToolResult {
         val itemElements = args["items"] as? JsonArray
             ?: return ToolResult.Error("缺少必需参数：items", "MISSING_ITEMS")
         val existingBySubject = todoItemDao.getBySessionOnce(sessionId)
@@ -123,10 +124,14 @@ class TodoTool @Inject constructor(
             ))
         }
 
-        todoItemDao.deleteBySession(sessionId)
-        if (entities.isNotEmpty()) {
-            todoItemDao.upsertAll(entities)
+        if (planMode && entities.count { it.status == TodoStatus.IN_PROGRESS.name } > 1) {
+            return ToolResult.Error(
+                "PLAN 模式按步骤顺序执行，同一计划最多只能有一项处于 in_progress。请保留当前步骤，其余步骤设为 pending。",
+                "MULTIPLE_PLAN_STEPS_IN_PROGRESS"
+            )
         }
+
+        todoItemDao.replaceForSession(sessionId, entities)
         FileLogger.d(TAG, "todo replace: 同步了 ${entities.size} 项待办")
 
         return listTodos(sessionId)

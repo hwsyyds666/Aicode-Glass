@@ -50,6 +50,8 @@ fun providerLogoRes(provider: AIProviderConfig?): Int? =
 fun modelBrandKey(modelName: String): String {
     val target = modelName.lowercase()
     return when {
+        target.contains("stepfun") || target.contains("阶跃") || target.startsWith("step-") -> "stepfun"
+        target.contains("xiaomi") || target.contains("小米") || target.contains("mimo") -> "xiaomi"
         target.contains("doubao") || target.contains("豆包") -> "doubao"
         // minimax 必须排在 grok 之前：minimaxai 等名称含 "xai"，否则会被 grok 规则误匹配
         target.contains("minimax") || target.contains("abab") -> "minimax"
@@ -79,6 +81,8 @@ fun modelBrandKey(modelName: String): String {
 /** 品牌 key → 用户可见的显示名称 */
 fun brandDisplayName(context: Context, key: String): String = when (key) {
     "doubao" -> context.getString(R.string.provider_brand_doubao)
+    "stepfun" -> "StepFun"
+    "xiaomi" -> "Xiaomi"
     "minimax" -> "MiniMax"
     "moonshot" -> "Moonshot"
     "zhipu" -> context.getString(R.string.provider_brand_zhipu)
@@ -102,6 +106,8 @@ fun brandDisplayName(context: Context, key: String): String = when (key) {
 
 /** 品牌 key → 对应 logo drawable 资源，无匹配时返回 null */
 fun brandLogoRes(key: String): Int? = when (key) {
+    "stepfun" -> R.drawable.logo_stepfun
+    "xiaomi" -> R.drawable.logo_xiaomi
     "doubao" -> R.drawable.logo_doubao
     "minimax" -> R.drawable.logo_minimax
     "moonshot" -> R.drawable.logo_moonshot
@@ -125,7 +131,7 @@ fun brandLogoRes(key: String): Int? = when (key) {
 
 /** 是否给 logo 施加主题色 tint；保留原色的品牌（如 hunyuan/siliconflow 多色 logo）不在此列。 */
 private fun shouldTintModelLogo(key: String): Boolean =
-    key == "grok" || key == "groq" || key == "moonshot" || key == "openai" ||
+    key == "stepfun" || key == "grok" || key == "groq" || key == "moonshot" || key == "openai" ||
         key == "openrouter" || key == "perplexity" ||
         key == "ollama" || key == "meta" || key == "mistral"
 

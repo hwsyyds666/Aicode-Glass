@@ -88,7 +88,6 @@ import com.aicode.feature.settings.presentation.SkillImportState
 import com.aicode.feature.settings.presentation.SkillUiEntry
 import com.aicode.feature.agent.domain.skill.SkillImportError
 import com.aicode.feature.agent.domain.skill.SkillScope
-import com.aicode.feature.settings.presentation.SubAgentUiEntry
 import compose.icons.FeatherIcons
 import compose.icons.feathericons.Activity
 import compose.icons.feathericons.ArrowLeft
@@ -144,6 +143,7 @@ internal enum class SettingsSection(@param:StringRes val titleRes: Int) {
     Menu(R.string.settings_title),
     General(R.string.settings_general),
     Providers(R.string.settings_providers),
+    OpenAIAccounts(R.string.openai_accounts_title),
     ProviderEditor(R.string.settings_provider_editor),
     DefaultModels(R.string.settings_default_models),
     ContextWindow(R.string.settings_context_window),
@@ -154,9 +154,6 @@ internal enum class SettingsSection(@param:StringRes val titleRes: Int) {
     PromptEditor(R.string.prompts_title),
     SkillDetail(R.string.settings_skills),
     SkillEditor(R.string.settings_skills),
-    SubAgents(R.string.settings_subagents),
-    SubAgentDetail(R.string.settings_subagents),
-    SubAgentEditor(R.string.settings_subagents),
     ExecutionChannel(R.string.settings_execution_channel),
     Container(R.string.settings_container),
     ContainerDownloads(R.string.container_download_image),
@@ -181,15 +178,14 @@ internal enum class SettingsSection(@param:StringRes val titleRes: Int) {
  */
 private fun SettingsSection.depth(): Int = when (this) {
     SettingsSection.Menu -> 0
-    // 技能/子代理编辑页既可从列表(1) 进也可从详情页(2) 进，必须比详情页更深：
+    // 技能编辑页既可从列表(1) 进也可从详情页(2) 进，必须比详情页更深：
     // 同深度会让「编辑 → 详情」也被当成前进，返回时页面从右侧滑入，方向是反的。
     SettingsSection.SkillEditor,
-    SettingsSection.SubAgentEditor,
     SettingsSection.PromptEditor -> 3
     SettingsSection.ProviderEditor,
+    SettingsSection.OpenAIAccounts,
     SettingsSection.PromptDetail,
     SettingsSection.SkillDetail,
-    SettingsSection.SubAgentDetail,
     SettingsSection.ContainerDownloads,
         SettingsSection.ContextWindow,
         SettingsSection.PerfPanel,
@@ -208,80 +204,19 @@ fun SettingsScreen(
     onOnboardingModelAdded: (() -> Unit)? = null,
     onOnboardingDismissFetchDialog: (() -> Unit)? = null
 ) {
+    // Frequent per-section flows are collected by the section hosts below; only truly shared state stays here.
     val providers by viewModel.providers.collectAsStateWithLifecycle()
-    val logLevel by viewModel.logLevel.collectAsStateWithLifecycle()
-    val logViewerState by viewModel.logViewerState.collectAsStateWithLifecycle()
-    val mcpEntries by viewModel.mcpEntries.collectAsStateWithLifecycle()
-    val mcpStatuses by viewModel.mcpStatuses.collectAsStateWithLifecycle()
-    val mcpReloading by viewModel.mcpReloading.collectAsStateWithLifecycle()
-    val skills by viewModel.skills.collectAsStateWithLifecycle()
-    val skillSaveState by viewModel.skillSaveState.collectAsStateWithLifecycle()
     val skillImportState by viewModel.skillImportState.collectAsStateWithLifecycle()
-    val skillDeleting by viewModel.skillDeleting.collectAsStateWithLifecycle()
-    val subAgents by viewModel.subAgents.collectAsStateWithLifecycle()
-    val subAgentSaveState by viewModel.subAgentSaveState.collectAsStateWithLifecycle()
-    val subAgentDeleting by viewModel.subAgentDeleting.collectAsStateWithLifecycle()
-    val globalRules by viewModel.globalRules.collectAsStateWithLifecycle()
-    val projectRules by viewModel.projectRules.collectAsStateWithLifecycle()
-    val currentProjectName by viewModel.currentProjectName.collectAsStateWithLifecycle()
-    val disableSafetyInterception by viewModel.disableSafetyInterception.collectAsStateWithLifecycle()
-    val commandAuthLevel by viewModel.commandAuthLevel.collectAsStateWithLifecycle()
-    val highRiskRules by viewModel.highRiskRules.collectAsStateWithLifecycle()
-    val executionMode by viewModel.executionMode.collectAsStateWithLifecycle()
-    val rootProbeState by viewModel.rootProbeState.collectAsStateWithLifecycle()
-    val keepaliveEnabled by viewModel.keepaliveEnabled.collectAsStateWithLifecycle()
-    val screenOnEnabled by viewModel.screenOnEnabled.collectAsStateWithLifecycle()
-    val agentSoundEnabled by viewModel.agentSoundEnabled.collectAsStateWithLifecycle()
-    val autoRemoveStaleModels by viewModel.autoRemoveStaleModels.collectAsStateWithLifecycle()
-    val startupSessionMode by viewModel.startupSessionMode.collectAsStateWithLifecycle()
-    val firstByteTimeoutSec by viewModel.firstByteTimeoutSec.collectAsStateWithLifecycle()
-    val streamIdleTimeoutSec by viewModel.streamIdleTimeoutSec.collectAsStateWithLifecycle()
-    val maxNetworkRetries by viewModel.maxNetworkRetries.collectAsStateWithLifecycle()
-    val enterToSend by viewModel.enterToSend.collectAsStateWithLifecycle()
-    val compactionThresholdPercent by viewModel.compactionThresholdPercent.collectAsStateWithLifecycle()
-    val sendFileMaxSizeMb by viewModel.sendFileMaxSizeMb.collectAsStateWithLifecycle()
-    val deleteExternalWorkspaceSessions by viewModel.deleteExternalWorkspaceSessions.collectAsStateWithLifecycle()
-    val todoDisplayPosition by viewModel.todoDisplayPosition.collectAsStateWithLifecycle()
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
     val themePresetId by viewModel.themePresetId.collectAsStateWithLifecycle()
     val dynamicColorEnabled by viewModel.dynamicColorEnabled.collectAsStateWithLifecycle()
     val backgroundImagePath by viewModel.backgroundImagePath.collectAsStateWithLifecycle()
-    val backgroundAlpha by viewModel.backgroundAlpha.collectAsStateWithLifecycle()
     val languageTag by viewModel.languageTag.collectAsStateWithLifecycle()
-    val visionProviderId by viewModel.visionProviderId.collectAsStateWithLifecycle()
-    val visionModel by viewModel.visionModel.collectAsStateWithLifecycle()
-    val compactionProviderId by viewModel.compactionProviderId.collectAsStateWithLifecycle()
-    val compactionModel by viewModel.compactionModel.collectAsStateWithLifecycle()
-    val titleProviderId by viewModel.titleProviderId.collectAsStateWithLifecycle()
-    val titleModel by viewModel.titleModel.collectAsStateWithLifecycle()
-    val imageGenProviderId by viewModel.imageGenProviderId.collectAsStateWithLifecycle()
-    val imageGenModel by viewModel.imageGenModel.collectAsStateWithLifecycle()
-    val reviewerProviderId by viewModel.reviewerProviderId.collectAsStateWithLifecycle()
-    val reviewerModel by viewModel.reviewerModel.collectAsStateWithLifecycle()
-    val contextWindowOverride by viewModel.contextWindowOverride.collectAsStateWithLifecycle()
-    val modelMetadata by viewModel.modelMetadata.collectAsStateWithLifecycle()
-    val containerProfiles by viewModel.profiles.collectAsStateWithLifecycle()
-    val activeProfileId by viewModel.activeProfileId.collectAsStateWithLifecycle()
-    val defaultContainerId by viewModel.defaultContainerId.collectAsStateWithLifecycle()
-    val containerOsMap by viewModel.containerOsMap.collectAsStateWithLifecycle()
-    val remoteConnections by viewModel.remoteConnections.collectAsStateWithLifecycle()
-    val tokenStats by viewModel.tokenStats.collectAsStateWithLifecycle()
-    val updateCheckEnabled by viewModel.updateCheckEnabled.collectAsStateWithLifecycle()
-    val updateCheckChannel by viewModel.updateCheckChannel.collectAsStateWithLifecycle()
     val containerAnnouncementText by viewModel.containerAnnouncementText.collectAsStateWithLifecycle()
     val containerAnnouncementOutdated by viewModel.containerAnnouncementOutdated.collectAsStateWithLifecycle()
     val promptsAnnouncementText by viewModel.promptsAnnouncementText.collectAsStateWithLifecycle()
     val promptsAnnouncementOutdated by viewModel.promptsAnnouncementOutdated.collectAsStateWithLifecycle()
-    val imageCatalog by viewModel.imageCatalog.collectAsStateWithLifecycle()
-    val imageDownload by viewModel.containerImageDownload.collectAsStateWithLifecycle()
-    val containerReset by viewModel.containerReset.collectAsStateWithLifecycle()
-    val imageSourceOptions by viewModel.imageSourceOptions.collectAsStateWithLifecycle()
-    val selectedImageSource by viewModel.selectedImageSource.collectAsStateWithLifecycle()
-    val downloadedImages by viewModel.downloadedImages.collectAsStateWithLifecycle()
-    val sourceUnavailableIds by viewModel.sourceUnavailableIds.collectAsStateWithLifecycle()
     val terminalSettings by viewModel.terminalSettings.collectAsStateWithLifecycle()
-    val proxyConfig by viewModel.proxyConfig.collectAsStateWithLifecycle()
-    val proxyTestState by viewModel.proxyTestState.collectAsStateWithLifecycle()
     var showTerminalSettingsSheet by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
@@ -373,16 +308,6 @@ fun SettingsScreen(
     val skillZipLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) viewModel.importSkillsFromZip(uri, skillImportScope)
     }
-    var selectedSubAgent by remember { mutableStateOf<SubAgentUiEntry?>(null) }
-    var subAgentToDelete by remember { mutableStateOf<SubAgentUiEntry?>(null) }
-    // 子代理编辑目标：null 表示新建一个；编辑现有定义时指向被编辑的条目。
-    var editingSubAgent by remember { mutableStateOf<SubAgentUiEntry?>(null) }
-    // 编辑页的返回目标：从详情页进就回详情页，从列表顶栏「＋」进就回列表。
-    var subAgentEditorReturn by remember { mutableStateOf(SettingsSection.SubAgents) }
-    // 保存后要在详情页展示的子代理名：列表刷新是异步的，先记名字等刷新完再换快照。
-    var pendingSubAgentName by remember { mutableStateOf<String?>(null) }
-    // 子代理提示词 Markdown 解析缓存：与技能详情同理，避免重复解析卡顿
-    val subAgentMarkdownCache = remember { MarkdownRenderCache() }
     // 技能正文 Markdown 解析缓存：详情页多次进入复用，避免重复解析卡顿
     val skillMarkdownCache = remember { MarkdownRenderCache() }
     var showContainerAddSheet by remember { mutableStateOf(false) }
@@ -402,13 +327,12 @@ fun SettingsScreen(
     val parentSection: SettingsSection? = when (section) {
         SettingsSection.Menu -> null
         SettingsSection.ProviderEditor -> SettingsSection.Providers
+        SettingsSection.OpenAIAccounts -> SettingsSection.Providers
         SettingsSection.Log -> logReturnSection.takeUnless { expanded && it == SettingsSection.Menu }
         SettingsSection.SkillDetail -> SettingsSection.Skills
         SettingsSection.PromptEditor -> promptEditorReturn
         SettingsSection.PromptDetail -> SettingsSection.Prompts
         SettingsSection.SkillEditor -> skillEditorReturn
-        SettingsSection.SubAgentDetail -> SettingsSection.SubAgents
-        SettingsSection.SubAgentEditor -> subAgentEditorReturn
         SettingsSection.ContainerDownloads -> SettingsSection.Container
         else -> if (expanded) null else SettingsSection.Menu
     }
@@ -421,25 +345,6 @@ fun SettingsScreen(
     // settingsViewModel 为 Activity 级共享实例，每次进入设置页重新扫描技能，反映磁盘增删改。
     LaunchedEffect(Unit) {
         viewModel.refreshSkills()
-        viewModel.refreshSubAgents()
-    }
-
-    // 编辑保存后回详情页：等列表刷新出新快照再换，避免详情页停在保存前的旧值（改名时按新名找）。
-    LaunchedEffect(skills, pendingSkillName) {
-        val target = pendingSkillName ?: return@LaunchedEffect
-        skills.firstOrNull { it.name.equals(target, ignoreCase = true) }?.let { fresh ->
-            selectedSkill = fresh
-            pendingSkillName = null
-        }
-    }
-
-    // 编辑保存后回详情页：等列表刷新出新快照再换，避免详情页停在保存前的旧值（改名时按新名找）。
-    LaunchedEffect(subAgents, pendingSubAgentName) {
-        val target = pendingSubAgentName ?: return@LaunchedEffect
-        subAgents.firstOrNull { it.name.equals(target, ignoreCase = true) }?.let { fresh ->
-            selectedSubAgent = fresh
-            pendingSubAgentName = null
-        }
     }
 
     // 首次（或公告内容更新后）进入「容器与镜像」页自动弹出使用说明；哈希比对在 ViewModel 完成。
@@ -461,7 +366,8 @@ fun SettingsScreen(
     // 内部 rememberScrollState 一并丢弃，从二级页返回就跳回顶部。
     val menuScrollState = rememberScrollState()
     val menuBody: @Composable () -> Unit = {
-        SettingsMenu(
+        SettingsMenuAlphaHost(
+            viewModel = viewModel,
             scrollState = menuScrollState,
             themeMode = themeMode,
             themePresetId = themePresetId,
@@ -469,7 +375,6 @@ fun SettingsScreen(
             terminalSettings = terminalSettings,
             currentLanguageDisplayName = currentLanguageDisplayName,
             backgroundImagePath = backgroundImagePath,
-            backgroundAlpha = backgroundAlpha,
             onOpenThemeSheet = { showThemeSheet = true },
             onOpenTerminalSettingsSheet = { showTerminalSettingsSheet = true },
             onOpenBackgroundSheet = { showBackgroundSheet = true },
@@ -552,63 +457,32 @@ fun SettingsScreen(
                 }
             )
 
-            current == SettingsSection.SkillEditor -> SkillEditorScreen(
-                initial = editingSkill,
-                saveState = skillSaveState,
-                defaultScope = skillImportScope,
-                onSave = { form, scope -> viewModel.saveSkill(form, scope, editingSkill?.name) },
-                onSaved = { savedName ->
-                    viewModel.clearSkillSaveState()
-                    // 从详情页进来的改完回详情页，但得等新快照到位再展示
-                    if (skillEditorReturn == SettingsSection.SkillDetail) {
-                        pendingSkillName = savedName
+            current == SettingsSection.SkillEditor -> {
+                SkillEditorSectionHost(
+                    viewModel = viewModel,
+                    initial = editingSkill,
+                    defaultScope = skillImportScope,
+                    onSave = { form, scope -> viewModel.saveSkill(form, scope, editingSkill?.name) },
+                    onSaved = { savedName ->
+                        viewModel.clearSkillSaveState()
+                        // 从详情页进来的改完回详情页，但得等新快照到位再展示
+                        if (skillEditorReturn == SettingsSection.SkillDetail) {
+                            pendingSkillName = savedName
+                        }
+                        section = skillEditorReturn
+                    },
+                    onNavigateBack = {
+                        viewModel.clearSkillSaveState()
+                        section = skillEditorReturn
                     }
-                    section = skillEditorReturn
-                },
-                onNavigateBack = {
-                    viewModel.clearSkillSaveState()
-                    section = skillEditorReturn
-                }
-            )
-
-            current == SettingsSection.SubAgentEditor -> SubAgentEditorScreen(
-                initial = editingSubAgent,
-                providers = providers,
-                modelMetadata = modelMetadata,
-                availableTools = remember { viewModel.availableToolNames() },
-                saveState = subAgentSaveState,
-                onLoadMetadata = { viewModel.loadAllModelMetadata() },
-                onSave = { form, scope -> viewModel.saveSubAgent(form, scope, editingSubAgent?.name) },
-                onSaved = { savedName ->
-                    viewModel.clearSubAgentSaveState()
-                    // 从详情页进来的改完回详情页，但得等新快照到位再展示
-                    if (subAgentEditorReturn == SettingsSection.SubAgentDetail) {
-                        pendingSubAgentName = savedName
-                    }
-                    section = subAgentEditorReturn
-                },
-                onNavigateBack = {
-                    viewModel.clearSubAgentSaveState()
-                    section = subAgentEditorReturn
-                }
-            )
+                )
+            }
 
             current == SettingsSection.PromptEditor -> {
-                val promptsViewModel: com.aicode.feature.settings.presentation.PromptsViewModel =
-                    androidx.hilt.navigation.compose.hiltViewModel()
-                val promptsState by promptsViewModel.state.collectAsStateWithLifecycle()
                 val number = promptEditTarget?.number
-                val fragment = number?.let { value -> promptsState.fragments.firstOrNull { it.number == value } }
-                PromptEditorScreen(
-                    isNew = number == null,
-                    initialNumber = number ?: 0,
-                    initialTitle = fragment?.title.orEmpty(),
-                    initialDescription = fragment?.description.orEmpty(),
-                    initialContent = fragment?.body.orEmpty(),
-                    initialScope = fragment?.source ?: PromptFragmentSource.GLOBAL,
-                    hasWorkspace = promptsState.hasWorkspace,
-                    onSave = { savedNumber, title, scope, content ->
-                        promptsViewModel.saveFragment(savedNumber, title, scope, content, previousNumber = number)
+                PromptEditorSectionHost(
+                    number = number,
+                    onSaved = {
                         section = promptEditorReturn
                     },
                     onNavigateBack = { section = promptEditorReturn }
@@ -625,6 +499,9 @@ fun SettingsScreen(
             // 它的构造即触发一次全盘统计，不能提到 SettingsScreen 顶层（那样每次进设置页都会扫盘）。
             val storageViewModel: com.aicode.feature.settings.presentation.StorageViewModel? =
                 if (current == SettingsSection.Storage) androidx.hilt.navigation.compose.hiltViewModel() else null
+            val mcpReloading = if (current == SettingsSection.Mcp) {
+                viewModel.mcpReloading.collectAsStateWithLifecycle().value
+            } else false
             Scaffold(
         containerColor = settingsPageBackground(),
         topBar = {
@@ -633,8 +510,6 @@ fun SettingsScreen(
                     Text(
                         text = if (current == SettingsSection.SkillDetail) {
                             selectedSkill?.name ?: stringResource(current.titleRes)
-                        } else if (current == SettingsSection.SubAgentDetail) {
-                            selectedSubAgent?.name ?: stringResource(current.titleRes)
                         } else if (expanded && current == SettingsSection.Menu) {
                             // 大屏左栏顶部已经写着「设置」，右栏空态不再重复
                             ""
@@ -749,32 +624,6 @@ fun SettingsScreen(
                                 )
                             }
                         }
-                        SettingsSection.SubAgents -> IconButton(onClick = {
-                            editingSubAgent = null
-                            subAgentEditorReturn = SettingsSection.SubAgents
-                            section = SettingsSection.SubAgentEditor
-                        }) {
-                            Icon(
-                                FeatherIcons.Plus,
-                                contentDescription = stringResource(R.string.subagent_add),
-                                tint = MaterialTheme.colorScheme.onBackground,
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-                        SettingsSection.SubAgentDetail -> selectedSubAgent?.let { entry ->
-                            IconButton(onClick = {
-                                editingSubAgent = entry
-                                subAgentEditorReturn = SettingsSection.SubAgentDetail
-                                section = SettingsSection.SubAgentEditor
-                            }) {
-                                Icon(
-                                    FeatherIcons.Edit2,
-                                    contentDescription = stringResource(R.string.subagent_edit),
-                                    tint = MaterialTheme.colorScheme.onBackground,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-                        }
                         SettingsSection.Log -> {
                             IconButton(onClick = { viewModel.refreshLogs() }) {
                                 Icon(FeatherIcons.RefreshCw, contentDescription = stringResource(R.string.settings_refresh_logs))
@@ -846,81 +695,46 @@ fun SettingsScreen(
             when (current) {
                 // 大屏菜单已常驻左栏，右栏在没选中分区时给个占位提示
                 SettingsSection.Menu -> if (expanded) SettingsDetailPlaceholder() else menuBody()
-                SettingsSection.General -> GeneralSettingsSection(
-                    autoRemoveStaleModels = autoRemoveStaleModels,
-                    onToggleAutoRemoveStaleModels = { viewModel.setAutoRemoveStaleModels(it) },
-                    startupSessionMode = startupSessionMode,
-                    onSelectStartupSessionMode = { viewModel.setStartupSessionMode(it) },
-                    firstByteTimeoutSec = firstByteTimeoutSec,
-                    onSetFirstByteTimeoutSec = { viewModel.setFirstByteTimeoutSec(it) },
-                    streamIdleTimeoutSec = streamIdleTimeoutSec,
-                    onSetStreamIdleTimeoutSec = { viewModel.setStreamIdleTimeoutSec(it) },
-                    maxNetworkRetries = maxNetworkRetries,
-                    onSetMaxNetworkRetries = { viewModel.setMaxNetworkRetries(it) },
-                    enterToSend = enterToSend,
-                    onToggleEnterToSend = { viewModel.setEnterToSend(it) },
-                    compactionThresholdPercent = compactionThresholdPercent,
-                    onSetCompactionThresholdPercent = { viewModel.setCompactionThresholdPercent(it) },
-                    sendFileMaxSizeMb = sendFileMaxSizeMb,
-                    onSetSendFileMaxSizeMb = { viewModel.setSendFileMaxSizeMb(it) },
-                    deleteExternalWorkspaceSessions = deleteExternalWorkspaceSessions,
-                    onToggleDeleteExternalWorkspaceSessions = { viewModel.setDeleteExternalWorkspaceSessions(it) },
-                    todoDisplayPosition = todoDisplayPosition,
-                    onSelectTodoDisplayPosition = { viewModel.setTodoDisplayPosition(it) }
-                )
+                SettingsSection.General -> GeneralSettingsSectionHost(viewModel)
                 SettingsSection.Providers -> ProvidersSection(
                     providers = providers,
                     onEdit = {
-                        editingProvider = it
-                        section = SettingsSection.ProviderEditor
+                        if (!com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(it)) {
+                            editingProvider = it
+                            section = SettingsSection.ProviderEditor
+                        }
                     },
-                    onDelete = { viewModel.deleteProvider(it.id) },
+                    onDelete = {
+                        if (!com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(it)) {
+                            viewModel.deleteProvider(it.id)
+                        }
+                    },
                     onReorder = { fromIndex, toIndex ->
                         viewModel.reorderProviders(fromIndex, toIndex)
-                    }
+                    },
+                    onOpenOpenAIAccounts = { section = SettingsSection.OpenAIAccounts }
                 )
-                SettingsSection.DefaultModels -> DefaultModelsSection(
+                SettingsSection.OpenAIAccounts -> OpenAIAccountsSection()
+                SettingsSection.DefaultModels -> DefaultModelsSectionHost(
+                    viewModel = viewModel,
                     providers = providers,
-                    visionProviderId = visionProviderId,
-                    visionModel = visionModel,
-                    compactionProviderId = compactionProviderId,
-                    compactionModel = compactionModel,
-                    titleProviderId = titleProviderId,
-                    titleModel = titleModel,
-                    imageGenProviderId = imageGenProviderId,
-                    imageGenModel = imageGenModel,
-                    reviewerProviderId = reviewerProviderId,
-                    reviewerModel = reviewerModel,
-                    modelMetadata = modelMetadata,
-                    onLoadMetadata = { viewModel.loadAllModelMetadata() },
-                    onSelectVisionModel = { pid, m -> viewModel.setVisionModel(pid, m) },
-                    onClearVisionModel = { viewModel.clearVisionModel() },
-                    onSelectCompactionModel = { pid, m -> viewModel.setCompactionModel(pid, m) },
-                    onClearCompactionModel = { viewModel.clearCompactionModel() },
-                    onSelectTitleModel = { pid, m -> viewModel.setTitleModel(pid, m) },
-                    onClearTitleModel = { viewModel.clearTitleModel() },
-                    onSelectImageGenModel = { pid, m -> viewModel.setImageGenModel(pid, m) },
-                    onClearImageGenModel = { viewModel.clearImageGenModel() },
-                    onSelectReviewerModel = { pid, m -> viewModel.setReviewerModel(pid, m) },
-                    onClearReviewerModel = { viewModel.clearReviewerModel() },
-                    contextWindowEnabled = contextWindowOverride.enabled,
                     onOpenContextWindow = { section = SettingsSection.ContextWindow }
                 )
-                SettingsSection.Mcp -> McpSection(
-                    entries = mcpEntries,
-                    statuses = mcpStatuses,
+                SettingsSection.Mcp -> McpSectionHost(
+                    viewModel = viewModel,
                     reloading = mcpReloading,
-                    onReload = { viewModel.reloadMcp() },
-                    onToggle = { name, enabled, scope -> viewModel.setMcpServerEnabled(name, enabled, scope) },
                     onEdit = {
                         editingMcp = it
                         showMcpDialog = true
-                    },
-                    onDelete = { name, scope -> viewModel.deleteMcpServer(name, scope) }
+                    }
                 )
-                SettingsSection.Skills -> SkillsSection(
-                    projectName = currentProjectName,
-                    entries = skills,
+                SettingsSection.Skills -> SkillsSectionHost(
+                    viewModel = viewModel,
+                    pendingSkillName = pendingSkillName,
+                    onResolvePendingSkill = {
+                        selectedSkill = it
+                        pendingSkillName = null
+                    },
                     onDelete = { skillToDelete = it },
                     onOpenDetail = {
                         selectedSkill = it
@@ -928,19 +742,11 @@ fun SettingsScreen(
                     }
                 )
                 SettingsSection.Prompts -> {
-                    val promptsViewModel: com.aicode.feature.settings.presentation.PromptsViewModel =
-                        androidx.hilt.navigation.compose.hiltViewModel()
-                    val promptsState by promptsViewModel.state.collectAsStateWithLifecycle()
-                    LaunchedEffect(Unit) { promptsViewModel.refresh() }
-                    PromptsSection(
-                        state = promptsState,
+                    PromptsSectionHost(
                         onOpenFragment = { fragment ->
                             selectedPrompt = fragment
                             section = SettingsSection.PromptDetail
-                        },
-                        onDeleteFragment = promptsViewModel::deleteFragment,
-                        onReorder = promptsViewModel::reorderFragments,
-                        onToggleBuiltinDisabled = promptsViewModel::setBuiltinDisabled
+                        }
                     )
                     if (showPromptsAddSheet) {
                         PromptsAddSheet(
@@ -959,14 +765,7 @@ fun SettingsScreen(
                     }
                 }
                 SettingsSection.PromptDetail -> {
-                    val promptsViewModel: com.aicode.feature.settings.presentation.PromptsViewModel =
-                        androidx.hilt.navigation.compose.hiltViewModel()
-                    val promptsState by promptsViewModel.state.collectAsStateWithLifecycle()
-                    selectedPrompt?.let { sel ->
-                        promptsState.fragments.firstOrNull { it.number == sel.number }?.let { fragment ->
-                            PromptDetailSection(fragment = fragment)
-                        }
-                    }
+                    PromptDetailSectionHost(selectedPrompt)
                 }
                 SettingsSection.PromptEditor -> Unit
                 SettingsSection.SkillDetail -> selectedSkill?.let { entry ->
@@ -980,144 +779,26 @@ fun SettingsScreen(
                         }
                     )
                 }
-                SettingsSection.SubAgents -> SubAgentsSection(
-                    projectName = currentProjectName,
-                    entries = subAgents,
-                    onDelete = { subAgentToDelete = it },
-                    onOpenDetail = {
-                        selectedSubAgent = it
-                        section = SettingsSection.SubAgentDetail
-                    }
-                )
-                SettingsSection.SubAgentDetail -> selectedSubAgent?.let { entry ->
-                    SubAgentDetailSection(
-                        entry = entry,
-                        cache = subAgentMarkdownCache,
-                        onToggle = { enabled ->
-                            viewModel.setSubAgentEnabled(entry.name, enabled, entry.scope)
-                            // 同步更新详情页快照，开关立即响应
-                            selectedSubAgent = selectedSubAgent?.copy(disabled = !enabled)
-                        }
-                    )
-                }
-                SettingsSection.ExecutionChannel -> ExecutionChannelSection(
-                    executionMode = executionMode,
-                    profiles = containerProfiles,
-                    activeProfileId = activeProfileId,
-                    defaultContainerId = defaultContainerId,
-                    rootProbeState = rootProbeState,
-                    onSwitchChannel = viewModel::switchExecutionChannel,
-                    onProbeRoot = viewModel::probeDeviceRoot
-                )
-                SettingsSection.Container -> ContainerSection(
-                    profiles = containerProfiles,
-                    activeProfileId = activeProfileId,
-                    defaultContainerId = defaultContainerId,
-                    osMap = containerOsMap,
-                    showAddSheetExternal = showContainerAddSheet,
+                SettingsSection.ExecutionChannel -> ExecutionChannelSectionHost(viewModel)
+                SettingsSection.Container -> ContainerSectionHost(
+                    viewModel = viewModel,
+                    showAddSheet = showContainerAddSheet,
                     onDismissAddSheet = { showContainerAddSheet = false },
-                    onSelect = { viewModel.setActiveContainerProfile(it) },
-                    onSetDefaultContainer = { viewModel.setDefaultContainerId(it) },
-                    onSaveCustom = { viewModel.saveCustomContainerProfile(it) },
-                    onEditCustom = { viewModel.editCustomContainerProfile(it) },
-                    onDeleteProfile = { viewModel.deleteContainerProfile(it) },
-                    onSwitchConfirmed = onStopAllAndCloseTerminal,
-                    onResetProfile = { profile ->
-                        // 重置与切换容器同等破坏性：rootfs 整体删掉，AI 会话与终端标签必须全部停掉，
-                        // 否则它们会继续读写正在被删的目录。
-                        onStopAllAndCloseTerminal()
-                        viewModel.resetContainer(profile)
-                    },
-                    resetState = containerReset,
-                    onRestoreBuiltin = { viewModel.restoreBuiltinAlpine() },
-                    remoteConnections = remoteConnections
+                    onStopAllAndCloseTerminal = onStopAllAndCloseTerminal
                 )
-                SettingsSection.ContainerDownloads -> ContainerImageDownloadSection(
-                    catalog = imageCatalog,
-                    state = imageDownload,
-                    downloadedImages = downloadedImages,
-                    sourceUnavailableIds = sourceUnavailableIds,
-                    selectedSourceName = viewModel.sourceDisplayName(selectedImageSource, languageTag),
-                    onDownload = { entry -> viewModel.startContainerImageDownload(entry, selectedImageSource) },
-                    onCancel = { viewModel.cancelContainerImageDownload() },
-                    onImport = { entryId, fileUri -> viewModel.importDownloadedImage(entryId, fileUri) },
-                    onDelete = { entryId -> viewModel.deleteDownloadedImage(entryId) }
-                )
-                SettingsSection.Proxy -> ProxySection(
-                    config = proxyConfig,
-                    testState = proxyTestState,
-                    onTestProxy = viewModel::testProxy,
-                    onSetEnabled = viewModel::setProxyEnabled,
-                    onSetType = viewModel::setProxyType,
-                    onSetHost = viewModel::setProxyHost,
-                    onSetPort = viewModel::setProxyPort,
-                    onSetUsername = viewModel::setProxyUsername,
-                    onSetPassword = viewModel::setProxyPassword,
-                    onSetNoProxy = viewModel::setProxyNoProxy
-                )
-                SettingsSection.Log -> LogSection(
-                    current = logLevel,
-                    onSelect = { viewModel.setLogLevel(it) },
-                    state = logViewerState,
-                    onSelectFile = { viewModel.selectLogFile(it) },
-                    onClearFilter = { viewModel.refreshLogs(filterServerName = null) },
-                    onRefresh = { viewModel.refreshLogs(silent = true) }
-                )
-                SettingsSection.Permissions -> PermissionsSection(
-                    commandAuthLevel = commandAuthLevel,
-                    highRiskRules = highRiskRules,
-                    onSelectAuthLevel = { viewModel.setCommandAuthLevel(it) },
-                    onToggleHighRiskRule = { rule, enabled -> viewModel.updateHighRiskRule(rule.copy(enabled = enabled)) },
-                    onSaveHighRiskRule = { rule, isNew ->
-                        if (isNew) viewModel.addHighRiskRule(rule) else viewModel.updateHighRiskRule(rule)
-                    },
-                    onDeleteHighRiskRule = { viewModel.removeHighRiskRule(it.id) },
-                    onResetHighRiskRules = { viewModel.resetHighRiskRules() }
-                )
-                SettingsSection.ContextWindow -> {
-                    val ctxOverride by viewModel.contextWindowOverride.collectAsStateWithLifecycle()
-                    ContextWindowSection(
-                        state = ctxOverride,
-                        onToggleEnabled = { viewModel.setContextWindowOverrideEnabled(it) },
-                        onSave = { total, input, output ->
-                            viewModel.saveContextWindowOverride(total, input, output)
-                        }
-                    )
-                }
-                SettingsSection.AppPermissions -> {
-                    val shizukuViewModel: ShizukuViewModel =
-                        androidx.hilt.navigation.compose.hiltViewModel()
-                    val shizukuState by shizukuViewModel.state.collectAsStateWithLifecycle()
-                    AppPermissionsSection(
-                        shizukuState = shizukuState,
-                        onRequestShizukuPermission = { shizukuViewModel.requestPermission() },
-                        onOpenShizuku = { shizukuViewModel.openShizukuApp() },
-                        onRefreshShizuku = { shizukuViewModel.refresh() }
-                    )
-                }
-                SettingsSection.BackgroundRun -> BackgroundRunSection(
-                    keepaliveEnabled = keepaliveEnabled,
-                    onToggleKeepalive = { viewModel.setKeepaliveEnabled(it) },
-                    screenOnEnabled = screenOnEnabled,
-                    onToggleScreenOn = { viewModel.setScreenOnEnabled(it) },
-                    agentSoundEnabled = agentSoundEnabled,
-                    onToggleAgentSound = { viewModel.setAgentSoundEnabled(it) }
-                )
+                SettingsSection.ContainerDownloads -> ContainerImageDownloadSectionHost(viewModel, languageTag)
+                SettingsSection.Proxy -> ProxySectionHost(viewModel)
+                SettingsSection.Log -> LogSectionHost(viewModel)
+                SettingsSection.Permissions -> PermissionsSectionHost(viewModel)
+                SettingsSection.ContextWindow -> ContextWindowSectionHost(viewModel)
+                SettingsSection.AppPermissions -> AppPermissionsSectionHost()
+                SettingsSection.BackgroundRun -> BackgroundRunSectionHost(viewModel)
                 SettingsSection.Backup -> {
                     val backupViewModel: com.aicode.feature.backup.presentation.BackupViewModel =
                         androidx.hilt.navigation.compose.hiltViewModel()
                     BackupSection(viewModel = backupViewModel)
                 }
-                SettingsSection.TokenStats -> TokenStatsSection(
-                    state = tokenStats,
-                    onSelectPeriod = { viewModel.setTokenStatsPeriod(it) },
-                    onSelectPage = { viewModel.setTokenStatsPage(it) },
-                    onSelectProviderPage = { viewModel.setProviderStatsPage(it) },
-                    onSelectModelPage = { viewModel.setModelStatsPage(it) },
-                    onSelectFilterProvider = { viewModel.setFilterProviderId(it) },
-                    onSelectFilterModel = { viewModel.setFilterModel(it) },
-                    onClearFilters = { viewModel.clearTokenStatsFilters() }
-                )
+                SettingsSection.TokenStats -> TokenStatsSectionHost(viewModel)
                 SettingsSection.Storage -> storageViewModel?.let { StorageSectionHost(viewModel = it) }
                 SettingsSection.PerfPanel -> {
                     val perfViewModel: com.aicode.feature.settings.presentation.PerfPanelViewModel =
@@ -1126,15 +807,8 @@ fun SettingsScreen(
                 }
                 SettingsSection.ProviderEditor -> {} // 已在上方 early return 处理
                 SettingsSection.SkillEditor -> {} // 已在上方 early return 处理
-                SettingsSection.SubAgentEditor -> {} // 已在上方 early return 处理
                 SettingsSection.RemoteServers -> {} // 已在上方 early return 处理
-                SettingsSection.About -> AboutSection(
-                    updateCheckEnabled = updateCheckEnabled,
-                    updateCheckChannel = updateCheckChannel,
-                    onToggleUpdateCheck = { viewModel.setUpdateCheckEnabled(it) },
-                    onSelectChannel = { viewModel.setUpdateCheckChannel(it) },
-                    onCheckUpdate = { viewModel.checkUpdate(manual = true) }
-                )
+                SettingsSection.About -> AboutSectionHost(viewModel)
             }
         }
     }
@@ -1230,11 +904,10 @@ fun SettingsScreen(
     }
 
     if (showBackgroundSheet) {
-        BackgroundImageSheet(
+        BackgroundImageSheetStateHost(
+            viewModel = viewModel,
             imagePath = backgroundImagePath,
-            alpha = backgroundAlpha,
             onPickImage = { viewModel.setBackgroundImage(it) },
-            onAlphaChange = { viewModel.setBackgroundAlpha(it) },
             onRemove = { viewModel.clearBackgroundImage() },
             onDismiss = { showBackgroundSheet = false }
         )
@@ -1249,10 +922,9 @@ fun SettingsScreen(
     }
 
     if (showImageSourceSheet) {
-        SourceSelectionSheet(
-            options = imageSourceOptions.map { it to viewModel.sourceDisplayName(it, languageTag) },
-            selected = selectedImageSource,
-            onSelected = { viewModel.setImageSource(it) },
+        SourceSelectionSheetHost(
+            viewModel = viewModel,
+            languageTag = languageTag,
             onDismiss = { showImageSourceSheet = false }
         )
     }
@@ -1275,73 +947,14 @@ fun SettingsScreen(
     }
 
     skillToDelete?.let { target ->
-        val deleting = skillDeleting == target.name
-        // 删除进行中保持弹窗（转圈），完成后才关闭，避免无反馈地“突然消失”。
-        var deleteStarted by remember(target) { mutableStateOf(false) }
-        LaunchedEffect(deleteStarted, deleting) {
-            if (deleteStarted && !deleting) skillToDelete = null
-        }
-        AlertDialog(
-            onDismissRequest = { if (!deleting) skillToDelete = null },
-            title = { Text(stringResource(R.string.skills_delete_confirm_title)) },
-            text = { Text(stringResource(R.string.skills_delete_confirm_message, target.name)) },
-            confirmButton = {
-                TextButton(
-                    enabled = !deleting,
-                    onClick = {
-                        deleteStarted = true
-                        viewModel.deleteSkill(target.name, target.scope)
-                    }
-                ) {
-                    if (deleting) {
-                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                    } else {
-                        Text(stringResource(R.string.common_delete))
-                    }
-                }
-            },
-            dismissButton = {
-                TextButton(enabled = !deleting, onClick = { skillToDelete = null }) {
-                    Text(stringResource(R.string.common_cancel))
-                }
-            }
+        SkillDeleteDialogHost(
+            viewModel = viewModel,
+            target = target,
+            onDismiss = { skillToDelete = null }
         )
     }
 
     SkillImportResultDialog(state = skillImportState, onDismiss = { viewModel.clearSkillImportState() })
-
-    subAgentToDelete?.let { target ->
-        val deleting = subAgentDeleting == target.name
-        var deleteStarted by remember(target) { mutableStateOf(false) }
-        LaunchedEffect(deleteStarted, deleting) {
-            if (deleteStarted && !deleting) subAgentToDelete = null
-        }
-        AlertDialog(
-            onDismissRequest = { if (!deleting) subAgentToDelete = null },
-            title = { Text(stringResource(R.string.subagents_delete_confirm_title)) },
-            text = { Text(stringResource(R.string.subagents_delete_confirm_message, target.name)) },
-            confirmButton = {
-                TextButton(
-                    enabled = !deleting,
-                    onClick = {
-                        deleteStarted = true
-                        viewModel.deleteSubAgent(target.name, target.scope)
-                    }
-                ) {
-                    if (deleting) {
-                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                    } else {
-                        Text(stringResource(R.string.common_delete))
-                    }
-                }
-            },
-            dismissButton = {
-                TextButton(enabled = !deleting, onClick = { subAgentToDelete = null }) {
-                    Text(stringResource(R.string.common_cancel))
-                }
-            }
-        )
-    }
 
     // 「容器与镜像」使用说明公告：首次进入（或内容更新后）自动弹出，右上角 Info 按钮可随时重看。
     if (showContainerAnnouncement) {
@@ -1490,6 +1103,63 @@ private fun SettingsDetailPlaceholder() {
     }
 }
 
+@Composable
+private fun SettingsMenuAlphaHost(
+    viewModel: SettingsViewModel,
+    scrollState: ScrollState,
+    themeMode: AppThemeMode,
+    themePresetId: String?,
+    dynamicColorEnabled: Boolean,
+    terminalSettings: TerminalSettings,
+    currentLanguageDisplayName: String,
+    backgroundImagePath: String?,
+    onOpenThemeSheet: () -> Unit,
+    onOpenTerminalSettingsSheet: () -> Unit,
+    onOpenBackgroundSheet: () -> Unit,
+    onOpenLanguageSheet: () -> Unit,
+    onOpenManual: () -> Unit,
+    onRerunOnboarding: () -> Unit,
+    onOpen: (SettingsSection) -> Unit
+) {
+    val backgroundAlpha by viewModel.backgroundAlpha.collectAsStateWithLifecycle()
+    SettingsMenu(
+        scrollState = scrollState,
+        themeMode = themeMode,
+        themePresetId = themePresetId,
+        dynamicColorEnabled = dynamicColorEnabled,
+        terminalSettings = terminalSettings,
+        currentLanguageDisplayName = currentLanguageDisplayName,
+        backgroundImagePath = backgroundImagePath,
+        backgroundAlpha = backgroundAlpha,
+        onOpenThemeSheet = onOpenThemeSheet,
+        onOpenTerminalSettingsSheet = onOpenTerminalSettingsSheet,
+        onOpenBackgroundSheet = onOpenBackgroundSheet,
+        onOpenLanguageSheet = onOpenLanguageSheet,
+        onOpenManual = onOpenManual,
+        onRerunOnboarding = onRerunOnboarding,
+        onOpen = onOpen
+    )
+}
+
+@Composable
+private fun BackgroundImageSheetStateHost(
+    viewModel: SettingsViewModel,
+    imagePath: String?,
+    onPickImage: (Uri) -> Unit,
+    onRemove: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val alpha by viewModel.backgroundAlpha.collectAsStateWithLifecycle()
+    BackgroundImageSheet(
+        imagePath = imagePath,
+        alpha = alpha,
+        onPickImage = onPickImage,
+        onAlphaChange = viewModel::setBackgroundAlpha,
+        onRemove = onRemove,
+        onDismiss = onDismiss
+    )
+}
+
 /** 设置首页：每个分区一个可点击的二级菜单入口。 */
 @Composable
 internal fun SettingsMenu(
@@ -1611,12 +1281,6 @@ internal fun SettingsMenu(
                 icon = FeatherIcons.Book,
                 title = stringResource(SettingsSection.Skills.titleRes),
                 onClick = { onOpen(SettingsSection.Skills) }
-            )
-            SettingsDivider()
-            SettingsRow(
-                icon = FeatherIcons.Users,
-                title = stringResource(SettingsSection.SubAgents.titleRes),
-                onClick = { onOpen(SettingsSection.SubAgents) }
             )
             SettingsDivider()
             SettingsRow(

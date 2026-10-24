@@ -31,6 +31,7 @@ class SessionUseCase @Inject constructor(
     /** 冷启动收尾：上次进程被杀时若有工具正在执行，其占位行会永久显示「执行中」。 */
     suspend fun initColdStartCleanup() {
         runCatching {
+            chatSessionDao.markRunningSubagentsCancelled()
             val n = listOf(PENDING_TOOL_MARKER, LEGACY_PENDING_TOOL_MARKER).sumOf { marker ->
                 agentMessageDao.markPendingToolsInterrupted(
                     toolRole = MessageRole.TOOL.name,
@@ -69,16 +70,26 @@ class SessionUseCase @Inject constructor(
 
     /** 删除会话及其全部子代理会话（消息 + 会话记录一并删除）。返回被删除的会话 id 列表。 */
     suspend fun deleteSession(id: String): List<String> {
-        val deleted = mutableListOf(id)
-        // 递归收集子会话（v1 仅一层，循环即可）
-        chatSessionDao.getSubSessionsByParentOnce(id).forEach { child ->
-            agentMessageDao.deleteBySession(child.id)
-            chatSessionDao.delete(child.id)
-            deleted.add(child.id)
+        val deleted = getSessionCascadeIds(id)
+        // Children first: this remains safe if a future schema adds a parent foreign key.
+        deleted.forEach { sessionId ->
+            agentMessageDao.deleteBySession(sessionId)
+            chatSessionDao.delete(sessionId)
         }
-        agentMessageDao.deleteBySession(id)
-        chatSessionDao.delete(id)
         return deleted
+    }
+
+    /** Returns a stable post-order list (descendants before root), tolerating corrupt cycles/orphans. */
+    suspend fun getSessionCascadeIds(id: String): List<String> {
+        val visited = linkedSetOf<String>()
+        val postOrder = mutableListOf<String>()
+        suspend fun visit(sessionId: String) {
+            if (!visited.add(sessionId)) return
+            chatSessionDao.getSubSessionsByParentOnce(sessionId).forEach { child -> visit(child.id) }
+            postOrder += sessionId
+        }
+        visit(id)
+        return postOrder
     }
 
     /** 删除某工作区下的全部会话（含子代理会话）及其消息，返回删除的会话数。 */
@@ -129,7 +140,10 @@ class SessionUseCase @Inject constructor(
         providerId: String? = null,
         model: String? = null,
         reasoningEffort: String? = null,
-        mode: AgentMode? = null
+        mode: AgentMode? = null,
+        allowedWritePaths: List<String> = emptyList(),
+        allowedReadPaths: List<String> = emptyList(),
+        dispatchMessageId: String? = null
     ): ChatSessionEntity {
         val now = System.currentTimeMillis()
         return ChatSessionEntity(
@@ -146,8 +160,20 @@ class SessionUseCase @Inject constructor(
             model = model ?: parent.model,
             reasoningEffort = reasoningEffort ?: parent.reasoningEffort,
             parentId = parentId,
-            subagentType = subagentType
+            subagentType = subagentType,
+            subagentStatus = "STARTING",
+            allowedWritePaths = allowedWritePaths.joinToString("\n"),
+            allowedReadPaths = allowedReadPaths.joinToString("\n"),
+            dispatchMessageId = dispatchMessageId
         )
+    }
+
+    suspend fun updateSubagentStatus(sessionId: String, status: String) {
+        chatSessionDao.updateSubagentStatus(sessionId, status)
+    }
+
+    suspend fun updateSuperAgentEnabled(sessionId: String, enabled: Boolean) {
+        chatSessionDao.updateSuperAgentEnabled(sessionId, enabled)
     }
 
     suspend fun upsertSession(entity: ChatSessionEntity) {

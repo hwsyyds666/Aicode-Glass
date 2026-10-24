@@ -60,16 +60,16 @@ class ExecuteCommandTool @Inject constructor(
             description = "要执行的 shell 命令",
             required = true
         ),
+        "intent" to ToolParameter(
+            name = "intent",
+            type = ParameterType.STRING,
+            description = "必填：用一句话说明本条命令如何服务于用户当前任务；必须与实际命令效果一致。该声明会和命令本身一起接受安全审查，不能代替实际命令判断。",
+            required = true
+        ),
         "timeout" to ToolParameter(
             name = "timeout",
             type = ParameterType.INTEGER,
             description = "命令最长执行时间（秒），超时将被强制终止。默认 $DEFAULT_TIMEOUT_SECONDS 秒，上限 $MAX_TIMEOUT_SECONDS 秒。耗时命令（如安装依赖）可适当调大。",
-            required = false
-        ),
-        "elevate" to ToolParameter(
-            name = "elevate",
-            type = ParameterType.BOOLEAN,
-            description = "提权重试：命令因内置安全防护（灾难性删除等）被拒且确有必要时，置为 true 重试，会弹窗请用户一次性授权（不可记忆）。PLAN 模式下无效。",
             required = false
         ),
         "env" to ToolParameter(

@@ -188,6 +188,19 @@ class ToolGroupExpansionTest {
     }
 
     @Test
+    fun summarizeToolFailure_extractsReadableTransportMessageAndBoundsLongOutput() {
+        assertEquals(
+            "Permission denied",
+            summarizeToolFailure("{\"status\":\"error\",\"message\":\"Permission denied\",\"code\":\"EACCES\"}")
+        )
+
+        val longError = "{\"status\":\"error\",\"message\":\"Remote failure\",\"output\":\"${"x".repeat(8_000)}\"}"
+        val summary = summarizeToolFailure(longError)
+        assertEquals("Remote failure", summary)
+        assertTrue(summary!!.length <= 140)
+    }
+
+    @Test
     fun manualTurnExpand_survivesFinish() {
         // 用户手动展开过：任务收工也不自动收起
         val items = items(

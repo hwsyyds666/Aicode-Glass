@@ -26,6 +26,8 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val TAG = "RemoteSshConnection"
+private const val SFTP_CONNECT_TIMEOUT_MS = 30_000
+private const val SFTP_READ_TIMEOUT_MS = 30_000
 
 /**
  * 共享的 SSH 连接管理器：持有两条独立的 sshj [SSHClient]——exec 通道供 [RemoteSshEngine] 执行命令，
@@ -140,7 +142,15 @@ class RemoteSshConnection @Inject constructor(
     }
 
     /** 建立一条 SSH transport 并完成认证与保活（exec 与 SFTP 各建一条）。 */
-    private fun newSshClient(config: RemoteConnectionConfig): SSHClient = SSHClient().apply {
+    private fun newSshClient(
+        config: RemoteConnectionConfig,
+        connectTimeoutMs: Int? = null,
+        readTimeoutMs: Int? = null
+    ): SSHClient = SSHClient().apply {
+        // SSHJ 的阻塞 socket I/O 不会因协程 Job 取消而立即中断；SFTP 通道显式设置
+        // socket connect/read timeout，withTimeout 才不会只取消调用方却留下线程卡在网络读上。
+        connectTimeoutMs?.let(::setConnectTimeout)
+        readTimeoutMs?.let(::setTimeout)
         addHostKeyVerifier(hostKeyVerifier)
         connect(config.host, config.port)
         when (val auth = config.auth) {
@@ -199,7 +209,9 @@ class RemoteSshConnection @Inject constructor(
             ?.takeIf { sftpSshClient?.isConnected == true && sftpSshClient?.isAuthenticated == true }
             ?.let { return@withLock it }
         closeSftpInternal()
-        val client = withContext(Dispatchers.IO) { newSshClient(cfg) }
+        val client = withContext(Dispatchers.IO) {
+            newSshClient(cfg, SFTP_CONNECT_TIMEOUT_MS, SFTP_READ_TIMEOUT_MS)
+        }
         sftpSshClient = client
         val sftp = withContext(Dispatchers.IO) { client.newSFTPClient() }
         sftpClient = sftp

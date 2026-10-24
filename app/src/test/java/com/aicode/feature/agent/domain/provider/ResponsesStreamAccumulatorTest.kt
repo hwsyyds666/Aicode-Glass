@@ -89,6 +89,7 @@ class ResponsesStreamAccumulatorTest {
         acc.accept(terminalEvent(ResponsesEvent.COMPLETED, "completed", usage = usage(12, 3, 8)))
 
         assertTrue(acc.terminated)
+        assertTrue(acc.completedSuccessfully)
         val response = acc.toResponse()
         assertEquals("Hello world", response.content)
         assertEquals("stop", response.stopReason)
@@ -96,6 +97,27 @@ class ResponsesStreamAccumulatorTest {
         assertEquals(3, response.outputTokens)
         assertEquals(8, response.cachedInputTokens)
         assertFalse(response.isTruncated)
+    }
+
+    @Test
+    fun subscriptionPlanUsageLimitIsNotTreatedAsTransient429() {
+        val error = JsonObject().apply {
+            addProperty("code", "subscription_sharing_usage_limit_exceeded")
+            addProperty("message", "usage limit")
+            addProperty("param", "model")
+        }
+        val thrown = runCatching {
+            ResponsesStreamAccumulator().accept(
+                terminalEvent(ResponsesEvent.FAILED, "failed", error = error)
+            )
+        }.exceptionOrNull()
+
+        val usageLimit = thrown as? SubscriptionSharingUsageLimitException
+            ?: throw AssertionError("expected a typed plan usage limit error, got $thrown")
+        assertEquals(429, usageLimit.statusCode)
+        assertEquals("model", usageLimit.errorParam)
+        assertFalse(isRetriableNetworkError(usageLimit))
+        assertFalse(isRateLimitError(usageLimit))
     }
 
     @Test

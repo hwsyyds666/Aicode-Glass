@@ -53,6 +53,16 @@ class ToolPermissionManager @Inject constructor() {
     fun pendingForSession(sessionId: String): PendingToolPermission? =
         synchronized(lock) { pending.values.firstOrNull { it.request.sessionId == sessionId }?.request }
 
+    /** Resolve any parked approval as reject before a rewind/delete boundary cancels its workflow. */
+    fun cancelPendingForSession(sessionId: String) {
+        val decisions = synchronized(lock) {
+            pending.values
+                .filter { it.request.sessionId == sessionId }
+                .map { it.decision }
+        }
+        decisions.forEach { it.complete(PermissionChoice.REJECT) }
+    }
+
     /** 在持锁区内调用：把内部表投影到两个对外 StateFlow。 */
     private fun publish() {
         _pendingRequest.value = pending.values.firstOrNull()?.request

@@ -97,6 +97,20 @@ class LocalFileAccess @Inject constructor(
         }
     }
 
+    override suspend fun listFilesForBrowse(path: String): List<FileEntry> {
+        val dir = resolve(path)
+        return dir.listFiles().orEmpty().map { child ->
+            FileEntry(
+                name = child.name,
+                isDirectory = child.isDirectory,
+                size = 0L,
+                lastModified = 0L,
+                localFile = child,
+                permissions = ""
+            )
+        }
+    }
+
     override suspend fun readBytes(path: String): ByteArray {
         val file = resolve(path)
         if (!file.exists()) throw NoSuchFileException(file)
@@ -143,6 +157,12 @@ class LocalFileAccess @Inject constructor(
     }
 
     override suspend fun copyToLocal(path: String): File = resolve(path)
+
+    override suspend fun sha256(path: String, maxBytes: Long): String? {
+        val file = resolve(path)
+        if (!file.isFile || file.length() < 0L || file.length() > maxBytes) return null
+        return file.sha256Hex()
+    }
 
     override suspend fun delete(path: String) {
         resolve(path).delete()

@@ -407,6 +407,19 @@ private fun GraphCanvas(
     modifier: Modifier = Modifier
 ) {
     val nodeColor = laneColors.getOrElse(lane) { Color.Gray }
+    // 这些集合由边/泳道数据决定，不依赖每帧 DrawScope 的尺寸；记忆在组合期，绘制期只读。
+    val allLanes = remember(activeTopLanes, activeBottomLanes, lane) {
+        (activeTopLanes + activeBottomLanes + lane).toSet()
+    }
+    val crossEdgeToLanes = remember(edges) {
+        edges.asSequence()
+            .filter { it.fromLane != it.toLane }
+            .map { it.toLane }
+            .toSet()
+    }
+    val curveBotLanes = remember(crossEdgeToLanes, activeTopLanes) {
+        crossEdgeToLanes.filterNot { it in activeTopLanes }.toSet()
+    }
     Canvas(modifier = modifier) {
         val lanePx = laneWidth.toPx()
         val padPx = Spacing.xs.toPx()
@@ -414,15 +427,9 @@ private fun GraphCanvas(
         val centerY = size.height / 2f
         val stroke = 2.5.dp.toPx()
 
-        // 所有相关泳道（包含 top 和 bottom 的并集）
-        val allLanes = (activeTopLanes + activeBottomLanes + lane).toSet()
-
         // 跨列边（出边与入边）均在下半段绘制贝塞尔曲线。
         // curveBotLanes 记录被曲线接替下半段竖线的列：仅当该列上半段无竖线（非贯穿通道）时才排除，
         // 避免孤立半段；若该列上半段已有竖线（主干穿过），则保留下半段竖线使其贯穿，曲线叠画在上方。
-        val crossEdgeToLanes = edges.filter { it.fromLane != it.toLane }.map { it.toLane }.toSet()
-        val curveBotLanes = crossEdgeToLanes.filterNot { it in activeTopLanes }.toSet()
-
         // 1. 分段竖线绘制：精细控制 0->centerY 与 centerY->height
         for (l in allLanes) {
             val inTop = l in activeTopLanes

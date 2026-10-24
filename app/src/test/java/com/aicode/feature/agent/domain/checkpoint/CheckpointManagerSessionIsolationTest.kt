@@ -83,14 +83,33 @@ class CheckpointManagerSessionIsolationTest {
 
         manager.beforeFileModified("sessionA", modified)
         fileAccess.writeFile(modified, "改过了", overwrite = true)
+        manager.recordFileVersion("sessionA", modified)
         manager.beforeFileModified("sessionA", created)
         fileAccess.writeFile(created, "新建的", overwrite = true)
+        manager.recordFileVersion("sessionA", created)
 
         val restored = manager.restoreCodeToCheckpoint("sessionA", cpA.id)
 
         assertEquals(2, restored)
         assertEquals("original", File(modified).readText())
         assertFalse(File(created).exists())
+    }
+
+    @Test
+    fun restoringOwnSession_skipsFileChangedByAnotherWriterAfterward() = runTest {
+        val path = File(workspace, "shared.txt").apply { writeText("before A") }.absolutePath
+        val checkpoint = manager.createCheckpoint("sessionA", "msgA", "A request")
+
+        manager.beforeFileModified("sessionA", path)
+        fileAccess.writeFile(path, "written by A", overwrite = true)
+        manager.recordFileVersion("sessionA", path)
+        fileAccess.writeFile(path, "later change from another session", overwrite = true)
+
+        val result = manager.restoreCodeToCheckpointDetailed("sessionA", checkpoint.id)
+
+        assertEquals(0, result.restoredFileCount)
+        assertEquals("later change from another session", File(path).readText())
+        assertTrue(result.limitations.any { it.contains("已跳过") })
     }
 
     @Test
@@ -106,6 +125,42 @@ class CheckpointManagerSessionIsolationTest {
 
         assertEquals(listOf(pathA), dao.getFileSnapshotsForCheckpoint(cpA.id).map { it.filePath })
         assertEquals(listOf(pathB), dao.getFileSnapshotsForCheckpoint(cpB.id).map { it.filePath })
+    }
+
+    @Test
+    fun childWriteUsesDispatchCheckpointEvenAfterParentStartsAnotherTurn() = runTest {
+        val path = File(workspace, "child.txt").apply { writeText("before parent turn") }.absolutePath
+        val dispatchCheckpoint = manager.createCheckpoint("parent", "parent-msg-1", "dispatch child")
+        manager.createCheckpoint("parent", "parent-msg-2", "a later parent turn")
+
+        manager.beforeFileModified("parent", path, dispatchCheckpoint.id)
+        fileAccess.writeFile(path, "written by child", overwrite = true)
+        manager.recordFileVersion("parent", path, dispatchCheckpoint.id)
+
+        assertEquals(
+            listOf(path),
+            dao.getFileSnapshotsForCheckpoint(dispatchCheckpoint.id).map { it.filePath }
+        )
+        assertTrue(dao.getFileSnapshotsForCheckpoint(
+            dao.getCheckpointsForSession("parent").last().id
+        ).isEmpty())
+
+        val restored = manager.restoreCodeToCheckpoint("parent", dispatchCheckpoint.id)
+        assertEquals(1, restored)
+        assertEquals("before parent turn", File(path).readText())
+    }
+
+    @Test
+    fun explicitMissingOrForeignCheckpointNeverFallsBackToAnotherActiveTurn() = runTest {
+        val path = File(workspace, "unattributed.txt").absolutePath
+        val active = manager.createCheckpoint("sessionA", "msgA", "active turn")
+        val foreign = manager.createCheckpoint("sessionB", "msgB", "foreign turn")
+
+        manager.beforeFileModified("sessionA", path, checkpointIdOverride = "")
+        manager.beforeFileModified("sessionA", path, checkpointIdOverride = foreign.id)
+
+        assertTrue(dao.getFileSnapshotsForCheckpoint(active.id).isEmpty())
+        assertTrue(dao.getFileSnapshotsForCheckpoint(foreign.id).isEmpty())
     }
 
     @Test
@@ -197,6 +252,14 @@ class CheckpointManagerSessionIsolationTest {
         override suspend fun countSnapshot(checkpointId: String, filePath: String): Int =
             snapshots.count { it.checkpointId == checkpointId && it.filePath == filePath }
 
+        override suspend fun updateExpectedFingerprint(checkpointId: String, filePath: String, fingerprint: String?) {
+            snapshots.replaceAll { snapshot ->
+                if (snapshot.checkpointId == checkpointId && snapshot.filePath == filePath) {
+                    snapshot.copy(expectedFingerprint = fingerprint)
+                } else snapshot
+            }
+        }
+
         override suspend fun deleteCheckpointsForSession(sessionId: String) {
             checkpoints.removeAll { it.sessionId == sessionId }
         }
@@ -208,6 +271,42 @@ class CheckpointManagerSessionIsolationTest {
 
         override suspend fun deleteCheckpointsBefore(cutoffTimestamp: Long) {
             checkpoints.removeAll { it.createdAt < cutoffTimestamp }
+        }
+
+        override suspend fun deleteFileSnapshotsFrom(sessionId: String, cutoffTimestamp: Long) {
+            val ids = checkpoints
+                .filter { it.sessionId == sessionId && it.createdAt >= cutoffTimestamp }
+                .map { it.id }
+                .toSet()
+            snapshots.removeAll { it.checkpointId in ids }
+        }
+
+        override suspend fun deleteCheckpointsFrom(sessionId: String, cutoffTimestamp: Long) {
+            checkpoints.removeAll { it.sessionId == sessionId && it.createdAt >= cutoffTimestamp }
+        }
+
+        override suspend fun countFileSnapshotsFrom(sessionId: String, cutoffTimestamp: Long): Int {
+            val ids = checkpoints
+                .filter { it.sessionId == sessionId && it.createdAt >= cutoffTimestamp }
+                .map { it.id }
+                .toSet()
+            return snapshots.asSequence()
+                .filter { it.checkpointId in ids }
+                .map { it.filePath }
+                .distinct()
+                .count()
+        }
+
+        override suspend fun countUnverifiableFileSnapshotsFrom(sessionId: String, cutoffTimestamp: Long): Int {
+            val ids = checkpoints
+                .filter { it.sessionId == sessionId && it.createdAt >= cutoffTimestamp }
+                .map { it.id }
+                .toSet()
+            return snapshots.asSequence()
+                .filter { it.checkpointId in ids && it.expectedFingerprint == null }
+                .map { it.filePath }
+                .distinct()
+                .count()
         }
     }
 
@@ -236,8 +335,8 @@ class CheckpointManagerSessionIsolationTest {
         }
 
         override fun readLines(path: String): kotlinx.coroutines.flow.Flow<String> = throw UnsupportedOperationException()
-        override suspend fun isDirectory(path: String): Boolean = throw UnsupportedOperationException()
-        override suspend fun isFile(path: String): Boolean = throw UnsupportedOperationException()
+        override suspend fun isDirectory(path: String): Boolean = File(path).isDirectory
+        override suspend fun isFile(path: String): Boolean = File(path).isFile
         override suspend fun fileSize(path: String): Long = sizeOverrides[path] ?: File(path).length()
         override suspend fun lastModified(path: String): Long = throw UnsupportedOperationException()
         override suspend fun permissions(path: String): String = throw UnsupportedOperationException()

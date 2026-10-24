@@ -70,8 +70,8 @@ There is nothing to set up beforehand: install the app, configure a model under 
 ### AI Agent
 
 - **AI Agent** — Built-in tools for file read/write/edit, shell execution, background terminal, code & web search, image recognition, todo lists, and more; streaming output with live Markdown rendering and automatic context compression
-- **Parallel subagents** — Spawn subagents with their own isolated context to research, review or compare approaches in the background without blocking the current chat; a read-only **Explore** subagent is built in, and you can define your own with a custom model, tool set and prompt
-- **Three run modes** — BUILD for normal development, PLAN for read-only planning (writes blocked at the tool layer), AUTO to approve everything without prompts — pick the permission scope you trust
+- **Parallel subagents** — Enable a session's built-in Explore, Research, Worker and Reviewer agents; workers have scoped writes, cannot nest agents, and return work for the main agent to review
+- **Three run modes** — BUILD for normal development, PLAN to draft and execute a tracked plan under the same tool permissions, and ASK for read-only questions
 - **Checkpoints & Undo** — Snapshots are recorded before the agent edits code; one-tap rollback of code, chat history, or both
 - **Skills & Auto Memory** — Global/project-level skills and long-term memory let the AI reuse experience and project conventions across sessions
 - **MCP Protocol** — Connect to local (stdio) or remote (HTTP) MCP servers to dynamically extend AI tool capabilities
@@ -97,7 +97,12 @@ There is nothing to set up beforehand: install the app, configure a model under 
 - **Token stats** — Usage and cost estimates per provider and model, with a drill-down into individual calls
 - **Appearance & language** — Light/dark themes, preset color schemes, Material You colors, custom background images, and a bilingual (Chinese/English) UI
 - **Network proxy** — Configure a global proxy and per-provider proxies separately
-- **Backup & Restore** — Encrypted export/import of provider configs, credentials, chat history and workspace files
+- **Backup & Restore** — Encrypted export/import of provider configs, chat history and workspace files; device-bound GitHub/OpenAI OAuth tokens are excluded and must be reauthorized after restore
+
+### Official Accounts
+
+- **OpenAI / ChatGPT** — Sign in through OpenAI's official OAuth flow; tokens are encrypted on-device with Android Keystore. This app stores one ChatGPT plan-usage profile and never switches or rotates accounts to work around limits. Quota refresh uses an undocumented endpoint and may stop working if it changes. Local token totals are not plan quota—use OpenAI's usage page as the authoritative view.
+- **GitHub** — Connect with Device Flow, browse and clone repositories, and confirm each pull-request creation. The app never pushes a branch on your behalf.
 
 ## Getting Started
 

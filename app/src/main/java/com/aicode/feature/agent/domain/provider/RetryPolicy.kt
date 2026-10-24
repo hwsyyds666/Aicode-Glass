@@ -203,6 +203,14 @@ class StreamApiException(
     val retryAfterMillis: Long? = null
 ) : Exception(message.ifBlank { code ?: "stream error" })
 
+/** OpenAI's documented ChatGPT-plan limit response is not a transient API 429. */
+class SubscriptionSharingUsageLimitException(
+    val statusCode: Int? = null,
+    val requestId: String? = null,
+    val errorParam: String? = null,
+    message: String
+) : Exception(message)
+
 // 对齐 Codex CLI is_retryable()：这些错误码明确不可重试。
 // 限流类（rate_limit_*）在此列，是让它们优先走多 Key 自动切换；单 Key 无候选时由调用方按限流退避重试。
 // 额度类（quota_exceeded / insufficient_quota / usage_* 等）不是瞬时限流，重试无益，保持不可重试。
@@ -231,6 +239,7 @@ private val NON_RETRYABLE_STREAM_CODES = setOf(
  */
 fun isRetriableNetworkError(t: Throwable): Boolean {
     if (t is CancellationException) return false
+    if (t is SubscriptionSharingUsageLimitException) return false
 
     if (t is StreamApiException) {
         return !NON_RETRYABLE_STREAM_CODES.contains(t.code)

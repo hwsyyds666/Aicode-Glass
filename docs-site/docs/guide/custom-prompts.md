@@ -35,7 +35,6 @@ App 里的改动与手工放文件完全等价，两种方式可以混用。
 │   ├── ...           顶层是「静态基线」片段，按两位数字前缀排序（内置最后一个为 99-runtime-context.md）
 │   └── agent/        按需注入的片段（不进静态基线，用到时才读取）
 │       ├── plan-mode.md           PLAN 模式提醒
-│       ├── auto-mode.md           AUTO 模式提醒
 │       ├── subagent-base.md       子代理基础运行规范
 │       ├── subagent-context.md    子代理运行期上下文（身份/工作区/时间）
 │       ├── compact-summary.md     长对话上下文压缩
@@ -155,7 +154,6 @@ App 里的改动与手工放文件完全等价，两种方式可以混用。
 | `70-skills-and-mcp.md` | 技能与 MCP 说明 |
 | `99-runtime-context.md` | 运行期上下文：技能、子代理、记忆、项目规则、工作区与当前时间（用变量承载） |
 | `agent/plan-mode.md` | PLAN 模式提醒（按需注入） |
-| `agent/auto-mode.md` | AUTO 模式提醒（按需注入） |
 | `agent/subagent-base.md` | 子代理基础运行规范（按需注入） |
 | `agent/subagent-context.md` | 子代理运行期上下文：身份、工作区与时间（按需注入） |
 | `agent/compact-summary.md` | 长对话上下文压缩的提示词 |

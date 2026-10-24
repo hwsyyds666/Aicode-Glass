@@ -84,6 +84,12 @@ interface FileAccessProvider {
     suspend fun listFiles(path: String): List<FileEntry>
 
     /**
+     * Lightweight directory listing for the file tree. Implementations may omit metadata that
+     * is only needed by the file listing tool, keeping expansion responsive on slower storage.
+     */
+    suspend fun listFilesForBrowse(path: String): List<FileEntry> = listFiles(path)
+
+    /**
      * 递归列出 [path] 下所有普通文件，深度不超过 [maxDepth]（[path] 的直接子项算第 1 层）。
      * 返回相对 [path] 的路径（`/` 分隔）；目录不存在时返回空列表。
      * 供技能/子代理目录扫描使用。
@@ -147,6 +153,16 @@ interface FileAccessProvider {
      * 供 [ViewImageTool]（需本地路径喂 BitmapFactory）等使用。
      */
     suspend fun copyToLocal(path: String): File
+
+    /** Hash a bounded regular file. Backend overrides should stream where possible. */
+    suspend fun sha256(path: String, maxBytes: Long): String? {
+        if (!exists(path) || !isFile(path)) return null
+        val size = fileSize(path)
+        if (size < 0L || size > maxBytes) return null
+        val bytes = readBytes(path)
+        if (bytes.size.toLong() != size || bytes.size.toLong() > maxBytes) return null
+        return bytes.sha256Hex()
+    }
 
     /** 删除文件或空目录。 */
     suspend fun delete(path: String)

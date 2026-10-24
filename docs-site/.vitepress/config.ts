@@ -37,7 +37,9 @@ export default defineConfig({
               items: [
                 { text: 'Quick Start', link: '/en/guide/quick-start' },
                 { text: 'Feature Overview', link: '/en/guide/overview' },
-                { text: 'Free Vendors', link: '/en/guide/free-providers' }
+                { text: 'Free Vendors', link: '/en/guide/free-providers' },
+                { text: 'GitHub Workspaces', link: '/en/guide/git' },
+                { text: 'File Browser & Code Editor', link: '/en/guide/files' }
               ]
             },
             {

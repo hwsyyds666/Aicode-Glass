@@ -4,6 +4,7 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -41,6 +42,7 @@ import com.aicode.core.theme.Spacing
 import com.aicode.core.theme.semanticColors
 import com.aicode.core.ui.SwipeToDeleteRow
 import com.aicode.feature.settings.domain.model.AIProviderConfig
+import com.aicode.feature.settings.data.repository.OpenAIAccountRepository
 import compose.icons.FeatherIcons
 import compose.icons.feathericons.ChevronRight
 import androidx.compose.ui.res.stringResource
@@ -57,12 +59,9 @@ internal fun ProvidersSection(
     providers: List<AIProviderConfig>,
     onEdit: (AIProviderConfig) -> Unit,
     onDelete: (AIProviderConfig) -> Unit,
-    onReorder: (fromIndex: Int, toIndex: Int) -> Unit
+    onReorder: (fromIndex: Int, toIndex: Int) -> Unit,
+    onOpenOpenAIAccounts: () -> Unit
 ) {
-    if (providers.isEmpty()) {
-        EmptyHint(stringResource(R.string.providers_empty))
-        return
-    }
     val lazyListState = rememberLazyListState()
     val reorderableState = rememberReorderableLazyListState(lazyListState) { from, to ->
         onReorder(from.index, to.index)
@@ -77,10 +76,19 @@ internal fun ProvidersSection(
         contentPadding = PaddingValues(top = Spacing.sm),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
+        item(key = "openai_accounts") {
+            OpenAIAccountsEntryCard(onClick = onOpenOpenAIAccounts)
+        }
+        if (providers.isEmpty()) {
+            item(key = "providers_empty") {
+                EmptyHint(stringResource(R.string.providers_empty))
+            }
+        }
         itemsIndexed(
             items = providers,
             key = { _, provider -> provider.id }
         ) { _, provider ->
+            val managedProfile = OpenAIAccountRepository.isAccountProvider(provider)
             ReorderableItem(
                 state = reorderableState,
                 key = provider.id
@@ -112,13 +120,10 @@ internal fun ProvidersSection(
                         provider = provider,
                         onEdit = { onEdit(provider) },
                         onDelete = { onDelete(provider) },
-                        dragModifier = Modifier.longPressDraggableHandle(
-                            onDragStarted = {
-                                hapticFeedback.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
-                            },
-                            onDragStopped = {
-                                hapticFeedback.performHapticFeedback(HapticFeedbackType.GestureEnd)
-                            }
+                        managedProfile = managedProfile,
+                        dragModifier = if (managedProfile) Modifier else Modifier.longPressDraggableHandle(
+                            onDragStarted = { hapticFeedback.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate) },
+                            onDragStopped = { hapticFeedback.performHapticFeedback(HapticFeedbackType.GestureEnd) }
                         )
                     )
                 }
@@ -154,16 +159,15 @@ fun ProviderItem(
     provider: AIProviderConfig,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
-    dragModifier: Modifier = Modifier
+    dragModifier: Modifier = Modifier,
+    managedProfile: Boolean = false
 ) {
     val sortDescription = stringResource(R.string.provider_sort_long_press)
     // 状态色与 MCP 行一致：启用用主题 tertiary（绿调），停用用 outline（灰）。
     val statusColor = if (provider.isEnabled) MaterialTheme.semanticColors.success else MaterialTheme.colorScheme.outline
 
-    SwipeToDeleteRow(
-        onDelete = onDelete,
-        onClick = onEdit
-    ) {
+    @Composable
+    fun ProviderRow() {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -240,10 +244,18 @@ fun ProviderItem(
             Spacer(Modifier.width(Spacing.xs))
             Icon(
                 imageVector = FeatherIcons.ChevronRight,
-                contentDescription = null,
+                contentDescription = if (managedProfile) stringResource(R.string.openai_account_managed_provider) else null,
                 tint = MaterialTheme.semanticColors.subtleText,
                 modifier = Modifier.size(18.dp)
             )
+        }
+    }
+
+    if (managedProfile) {
+        ProviderRow()
+    } else {
+        SwipeToDeleteRow(onDelete = onDelete, onClick = onEdit) {
+            ProviderRow()
         }
     }
 }

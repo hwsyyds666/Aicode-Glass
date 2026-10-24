@@ -33,8 +33,23 @@ interface CheckpointDao {
     @Query("SELECT COUNT(*) FROM checkpoint_file_snapshots WHERE checkpointId = :checkpointId AND filePath = :filePath")
     suspend fun countSnapshot(checkpointId: String, filePath: String): Int
 
+    @Query("UPDATE checkpoint_file_snapshots SET expectedFingerprint = :fingerprint WHERE checkpointId = :checkpointId AND filePath = :filePath")
+    suspend fun updateExpectedFingerprint(checkpointId: String, filePath: String, fingerprint: String?)
+
     @Query("DELETE FROM session_checkpoints WHERE sessionId = :sessionId")
     suspend fun deleteCheckpointsForSession(sessionId: String)
+
+    @Query("DELETE FROM checkpoint_file_snapshots WHERE checkpointId IN (SELECT id FROM session_checkpoints WHERE sessionId = :sessionId AND createdAt >= :cutoffTimestamp)")
+    suspend fun deleteFileSnapshotsFrom(sessionId: String, cutoffTimestamp: Long)
+
+    @Query("DELETE FROM session_checkpoints WHERE sessionId = :sessionId AND createdAt >= :cutoffTimestamp")
+    suspend fun deleteCheckpointsFrom(sessionId: String, cutoffTimestamp: Long)
+
+    @Query("SELECT COUNT(DISTINCT filePath) FROM checkpoint_file_snapshots WHERE checkpointId IN (SELECT id FROM session_checkpoints WHERE sessionId = :sessionId AND createdAt >= :cutoffTimestamp)")
+    suspend fun countFileSnapshotsFrom(sessionId: String, cutoffTimestamp: Long): Int
+
+    @Query("SELECT COUNT(DISTINCT filePath) FROM checkpoint_file_snapshots WHERE expectedFingerprint IS NULL AND checkpointId IN (SELECT id FROM session_checkpoints WHERE sessionId = :sessionId AND createdAt >= :cutoffTimestamp)")
+    suspend fun countUnverifiableFileSnapshotsFrom(sessionId: String, cutoffTimestamp: Long): Int
 
     @Query("DELETE FROM checkpoint_file_snapshots WHERE checkpointId IN (SELECT id FROM session_checkpoints WHERE sessionId = :sessionId)")
     suspend fun deleteFileSnapshotsForSession(sessionId: String)

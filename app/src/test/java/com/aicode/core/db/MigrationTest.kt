@@ -16,6 +16,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import kotlinx.coroutines.runBlocking
 
 /**
  * Room 官方迁移测试（Robolectric，JVM 上跑真实的 Android SQLite）。
@@ -107,10 +108,10 @@ class MigrationTest {
         // 2. 从 assets 取 58→59 的文件式迁移，跑迁移并按 59.json 校验 schema
         val migration59 = MigrationLoader.loadMigrations(context)
             .filterIsInstance<FileMigration>()
-            .first { it.version == AgentDatabase.SCHEMA_VERSION }
+            .first { it.version == 59 }
         val db = helper.runMigrationsAndValidate(
             dbName,
-            AgentDatabase.SCHEMA_VERSION,
+            59,
             true,
             migration59
         )
@@ -154,5 +155,84 @@ class MigrationTest {
             )
         }
         db.close()
+    }
+
+    @Test
+    fun migration_59_to_66_preservesSubagentsAndCreatesOpenAIProfiles() {
+        helper.createDatabase(dbName, 59).use { db ->
+            db.execSQL(
+                "INSERT INTO chat_sessions (id, title, createdAt, updatedAt, workspacePath, mode, " +
+                    "reasoningEffort, totalInputTokens, totalOutputTokens, lastInputTokens, isPinned, parentId, subagentType) " +
+                    "VALUES ('parent', 'parent', 1, 1, '/workspace/app', 'BUILD', 'MEDIUM', 0, 0, 0, 0, NULL, NULL), " +
+                    "('child', 'child', 2, 2, '/workspace/app', 'BUILD', 'MEDIUM', 0, 0, 0, 0, 'parent', 'Explore')"
+            )
+        }
+        val migrations = MigrationLoader.loadMigrations(context)
+            .filterIsInstance<FileMigration>()
+            .filter { it.version in 60..66 }
+            .sortedBy(FileMigration::version)
+        assertEquals(listOf(60, 61, 62, 63, 64, 65, 66), migrations.map(FileMigration::version))
+        val db = helper.runMigrationsAndValidate(dbName, 66, true, *migrations.toTypedArray())
+        db.query("SELECT subagentStatus, allowedWritePaths, allowedReadPaths FROM chat_sessions WHERE id = 'child'").use { c ->
+            assertTrue(c.moveToFirst())
+            assertEquals("COMPLETED", c.getString(0))
+            assertTrue(c.isNull(1))
+            assertTrue(c.isNull(2))
+        }
+        db.query("SELECT subagentCreatedCount FROM chat_sessions WHERE id = 'parent'").use { c ->
+            assertTrue(c.moveToFirst())
+            assertEquals(1, c.getInt(0))
+        }
+        db.query("SELECT subagentReworkCount FROM chat_sessions WHERE id = 'child'").use { c ->
+            assertTrue(c.moveToFirst())
+            assertEquals(0, c.getInt(0))
+        }
+        db.query("PRAGMA table_info(openai_accounts)").use { c ->
+            val columns = buildSet {
+                while (c.moveToNext()) add(c.getString(c.getColumnIndexOrThrow("name")))
+            }
+            assertTrue(columns.containsAll(setOf(
+                "providerId", "subject", "clientId", "encryptedAccessToken",
+                "encryptedRefreshToken", "encryptedIdToken", "scopes", "accessTokenExpiresAt", "restoreProviderEnabled",
+                "chatgptAccountId", "planType", "quotaPrimaryUsedPercent", "quotaPrimaryWindowSeconds",
+                "quotaPrimaryResetAt", "quotaSecondaryUsedPercent", "quotaSecondaryWindowSeconds",
+                "quotaSecondaryResetAt", "quotaUpdatedAt", "quotaError", "usageCooldownUntil"
+            )))
+            assertFalse(columns.contains("accessToken"))
+            assertFalse(columns.contains("refreshToken"))
+            assertTrue(columns.containsAll(setOf("hostId", "modelCatalogJson")))
+        }
+        db.query("PRAGMA table_info(checkpoint_file_snapshots)").use { c ->
+            val columns = buildSet {
+                while (c.moveToNext()) add(c.getString(c.getColumnIndexOrThrow("name")))
+            }
+            assertTrue(columns.contains("expectedFingerprint"))
+        }
+        db.execSQL(
+            "INSERT INTO openai_accounts (id, providerId, subject, email, displayName, clientId, " +
+                "encryptedAccessToken, encryptedRefreshToken, encryptedIdToken, scopes, accessTokenExpiresAt, createdAt, updatedAt) " +
+                "VALUES ('a', 'p', 's', 'e@example.com', 'e', 'client', 'cipher-a', 'cipher-r', 'cipher-i', 'openid', 1, 1, 1)"
+        )
+        db.query("SELECT hostId, modelCatalogJson, restoreProviderEnabled, planType, quotaPrimaryUsedPercent FROM openai_accounts WHERE id = 'a'").use { c ->
+            assertTrue(c.moveToFirst())
+            assertEquals("", c.getString(0))
+            assertEquals("[]", c.getString(1))
+            assertEquals(1, c.getInt(2))
+            assertTrue(c.isNull(3))
+            assertTrue(c.isNull(4))
+        }
+        db.close()
+
+        val roomDb = Room.databaseBuilder(context, AgentDatabase::class.java, dbName).build()
+        runBlocking {
+            val dao = roomDb.chatSessionDao()
+            assertEquals(1, dao.reserveSubagentRework("child", "parent", 2))
+            dao.updateSubagentStatus("child", "COMPLETED")
+            assertEquals(1, dao.reserveSubagentRework("child", "parent", 2))
+            dao.updateSubagentStatus("child", "COMPLETED")
+            assertEquals("the persisted limit must reject a third round", 0, dao.reserveSubagentRework("child", "parent", 2))
+            assertEquals(2, dao.getById("child")?.subagentReworkCount)
+        }
+        roomDb.close()
     }
 }

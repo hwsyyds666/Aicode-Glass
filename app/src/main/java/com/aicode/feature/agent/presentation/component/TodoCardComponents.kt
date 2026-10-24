@@ -1,10 +1,5 @@
 package com.aicode.feature.agent.presentation.component
 
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -25,6 +20,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -45,6 +41,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import androidx.compose.ui.res.stringResource
 import com.aicode.R
+import com.aicode.core.ui.rememberLifecyclePulseAlpha
 
 /** 解析后的待办列表快照 */
 internal data class ParsedTodoResult(
@@ -126,6 +123,7 @@ internal fun TodoCard(items: List<ParsedTodoItem>) {
 internal fun TodoItemRow(item: ParsedTodoItem) {
     val isCompleted = item.status == "completed"
     val isInProgress = item.status == "in_progress"
+    val isFailed = item.status == "failed"
 
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -142,16 +140,7 @@ internal fun TodoItemRow(item: ParsedTodoItem) {
                 )
             }
             isInProgress -> {
-                val transition = rememberInfiniteTransition(label = "todo-progress-dot")
-                val alpha by transition.animateFloat(
-                    initialValue = 1f,
-                    targetValue = 0.3f,
-                    animationSpec = infiniteRepeatable(
-                        animation = tween(650),
-                        repeatMode = RepeatMode.Reverse
-                    ),
-                    label = "todo-progress-dot-alpha"
-                )
+                val alpha by rememberLifecyclePulseAlpha(label = "todo-progress-dot", minAlpha = 0.3f)
                 Box(
                     modifier = Modifier
                         .size(8.dp)
@@ -159,6 +148,16 @@ internal fun TodoItemRow(item: ParsedTodoItem) {
                         .clip(CircleShape)
                         .background(MaterialTheme.colorScheme.primary)
                 )
+            }
+            isFailed -> {
+                Box(
+                    modifier = Modifier
+                        .size(14.dp)
+                        .border(1.5.dp, MaterialTheme.colorScheme.error, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("!", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+                }
             }
             else -> {
                 Box(
@@ -172,7 +171,9 @@ internal fun TodoItemRow(item: ParsedTodoItem) {
         Spacer(Modifier.width(Spacing.sm))
         Text(
             text = item.subject,
-            color = if (isCompleted) {
+            color = if (isFailed) {
+                MaterialTheme.colorScheme.error
+            } else if (isCompleted) {
                 MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
             } else {
                 MaterialTheme.colorScheme.onSurface
@@ -192,6 +193,19 @@ internal fun TodoItemRow(item: ParsedTodoItem) {
                 Text(
                     text = stringResource(R.string.todo_in_progress),
                     color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+                )
+            }
+        } else if (isFailed) {
+            Spacer(Modifier.width(Spacing.xs))
+            Surface(
+                shape = RoundedCornerShape(4.dp),
+                color = MaterialTheme.colorScheme.errorContainer
+            ) {
+                Text(
+                    text = stringResource(R.string.todo_failed),
+                    color = MaterialTheme.colorScheme.onErrorContainer,
                     style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
                 )

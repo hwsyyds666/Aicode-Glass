@@ -11,7 +11,7 @@ import com.aicode.feature.agent.domain.skill.SkillListFormatter
 import com.aicode.feature.agent.domain.skill.SkillRelevanceMatcher
 import com.aicode.feature.agent.domain.skill.SkillRepository
 import com.aicode.feature.agent.domain.subagent.AgentDefinition
-import com.aicode.feature.agent.domain.subagent.AgentDefinitionRepository
+import com.aicode.feature.agent.domain.subagent.BuiltInSubAgentCatalog
 import com.aicode.feature.agent.domain.subagent.InjectPart
 import com.aicode.feature.settings.data.repository.ExecutionMode
 import com.aicode.feature.settings.data.repository.ExecutionModeHolder
@@ -39,7 +39,6 @@ class SystemPromptProvider @Inject constructor(
     private val memoryRepository: MemoryRepository,
     private val promptFragmentCatalog: PromptFragmentCatalog,
     private val containerInstaller: ContainerInstaller,
-    private val agentDefinitionRepository: AgentDefinitionRepository,
     private val executionModeHolder: ExecutionModeHolder
 ) {
     // 抽象独立的 Source
@@ -115,8 +114,8 @@ class SystemPromptProvider @Inject constructor(
     }
 
     /**
-     * 可用子代理清单（仅注入主代理）：让 AI 知道有哪些自定义 agent 可派发。
-     * 会话级缓存，避免每轮扫盘导致 system prompt 抖动打断 KV 缓存。
+     * 内置子代理类型清单（仅注入主代理），由类型单一来源生成。
+     * 会话级缓存，保持 system prompt 稳定以命中 KV 缓存。
      */
     private inner class SubAgentListSource : PromptSource {
         private val cachedByKey = ConcurrentHashMap<SourceCacheKey, String>()
@@ -125,21 +124,7 @@ class SystemPromptProvider @Inject constructor(
             val key = SourceCacheKey(ctx.sessionId, ctx.projectRoot)
             val cached = cachedByKey[key]
             if (cached != null) return cached.ifEmpty { null }
-            val entries = try {
-                agentDefinitionRepository.listEnabled()
-            } catch (e: Exception) {
-                FileLogger.w(TAG, "扫描子代理定义失败: ${e.message}", e)
-                return null
-            }
-            if (entries.isEmpty()) {
-                cachedByKey[key] = ""
-                return null
-            }
-
-            val list = entries.joinToString("\n") { entry ->
-                "- ${entry.definition.name}: ${entry.definition.description.ifBlank { "（无描述）" }}"
-            }
-            val content = list
+            val content = BuiltInSubAgentCatalog.parentGuidance()
             cachedByKey[key] = content
             trimIfNeeded()
             return content
@@ -282,7 +267,7 @@ class SystemPromptProvider @Inject constructor(
         )
 
         // 4. 压缩空清单展开留下的多余空行；稳定基线在前、动态内容集中在末尾片段，均利于 KV Cache。
-        return collapseBlankLines(staticContent)
+        return applySuperAgentGuidance(collapseBlankLines(staticContent), agentContext)
     }
 
     /**
@@ -315,7 +300,7 @@ class SystemPromptProvider @Inject constructor(
             return ""
         }
         val memories = memoryListSource.build(ctx)
-        return renderVariables(
+        return applySuperAgentGuidance(renderVariables(
             content,
             activeSkillsSource.build(ctx),
             memories.global,
@@ -325,6 +310,13 @@ class SystemPromptProvider @Inject constructor(
             workspaceSource.build(ctx),
             environmentSource.build(ctx),
             currentDate()
+        ), ctx)
+    }
+
+    private suspend fun applySuperAgentGuidance(prompt: String, ctx: AgentContext): String {
+        if (!ctx.superAgentEnabled) return prompt
+        return collapseBlankLines(
+            "$prompt\n\n${resolvePrompt(SUPER_AGENT_FILE)}"
         )
     }
 
@@ -461,6 +453,7 @@ class SystemPromptProvider @Inject constructor(
         const val CLAUDE_FILE = "CLAUDE.md"
         const val SUBAGENT_BASE_FILE = "agent/subagent-base.md"
         const val SUBAGENT_CONTEXT_FILE = "agent/subagent-context.md"
+        const val SUPER_AGENT_FILE = "agent/super-agent.md"
         const val MAX_AGENTS_CHARS = 32_000
         /** 会话级缓存 key 数量上限：超过后整体清空，仅防长期累积；正常会话数远小于此。 */
         const val SOURCE_CACHE_LIMIT = 32

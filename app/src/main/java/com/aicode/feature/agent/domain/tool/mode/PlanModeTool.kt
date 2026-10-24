@@ -16,21 +16,13 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import javax.inject.Inject
 
-/**
- * 让 AI 进入或退出 PLAN（计划）模式。退出时恢复到进入 PLAN 之前的模式（见 [AgentContext.modeBeforePlan]）。
- *
- * 退出（action="exit"）不是立即切换：workflow 会挂起并弹出「计划审查面板」，
- * 用户可选择：
- * - 批准并实施：按计划切回原模式执行；
- * - 继续反馈：回到 PLAN 模式，用户随后输入修改意见，AI 修订后再次 exit 重新提交，
- *   循环往复直到用户满意（对齐 Claude Code 的计划审批闭环）。
- */
+/** 让 AI 进入或退出 PLAN（计划）模式；退出时恢复到进入 PLAN 之前的模式。 */
 class PlanModeTool @Inject constructor(
     private val chatSessionDao: ChatSessionDao
 ) : AbstractContextualTool() {
 
     override val name = "planMode"
-    override val description = "进入或退出 PLAN（计划）模式。action=\"enter\"：进入计划模式，转为只读探索、构思复杂改动方案，不要在 BUILD 模式直接写代码；action=\"exit\"：计划已经完成、提交给用户审阅时退出计划模式。退出后会自动恢复到进入 PLAN 之前的模式（从 BUILD 进入就回到 BUILD，从 ASK 进入就回到 ASK），无需你指定目标模式。退出会弹出计划审查面板，用户有两种选择：「批准并实施」→ 按计划执行；「继续反馈」→ 留在计划模式，用户会提出修改意见，你修订完善后再次调用 exit 重新提交，直到用户满意为止。进入与退出都需要用户授权；模式切换只能由用户在界面手动完成，本工具无法修改用户当前选择的模式。"
+    override val description = "进入或退出 PLAN（计划）模式。PLAN 的职责是先制定并展示执行计划，再按清单逐步完成；它拥有与 BUILD 相同的工具能力和权限挡位，不代表免授权或只读。进入后先用 todo 提交完整步骤清单，执行过程中及时更新 in_progress/completed，并在失败或计划变化时同步更新；不要在计划为空时直接开始多步骤工作。action=\"exit\"：计划执行完或不再需要计划时退出；退出后自动恢复进入 PLAN 之前的模式（从 BUILD 进入回 BUILD，从 ASK 进入回 ASK）。切换模式不再额外等待计划批准面板；文件、命令、网络等操作仍由用户当前授权挡位和危险操作专用授权决定。"
     override val permissionPolicy = ToolPermissionPolicy.ASK
     override val capabilities = setOf(ToolCapability.MODIFY_SESSION_STATE)
 
@@ -38,14 +30,14 @@ class PlanModeTool @Inject constructor(
         "action" to ToolParameter(
             name = "action",
             type = ParameterType.STRING,
-            description = "操作：'enter' 进入 PLAN 模式（只读规划），'exit' 退出 PLAN 模式（恢复到进入前的模式）",
+            description = "操作：'enter' 进入 PLAN 模式（先计划后执行），'exit' 退出 PLAN 模式（恢复到进入前的模式）",
             required = true,
             enum = listOf("enter", "exit")
         ),
         "reason" to ToolParameter(
             name = "reason",
             type = ParameterType.STRING,
-            description = "进入或退出 PLAN 模式的理由，将展示给用户",
+            description = "进入或退出 PLAN 模式的理由，记入模式切换记录",
             required = true
         )
     )

@@ -36,6 +36,35 @@ interface ChatSessionDao {
     @Query("SELECT * FROM chat_sessions WHERE parentId = :parentId ORDER BY updatedAt DESC")
     suspend fun getSubSessionsByParentOnce(parentId: String): List<ChatSessionEntity>
 
+    @Query("SELECT COUNT(*) FROM chat_sessions WHERE parentId = :parentId")
+    suspend fun countSubSessionsByParent(parentId: String): Int
+
+    @Query("SELECT subagentCreatedCount FROM chat_sessions WHERE id = :parentId")
+    suspend fun getSubagentCreatedCount(parentId: String): Int?
+
+    @Query("UPDATE chat_sessions SET subagentCreatedCount = subagentCreatedCount + 1 WHERE id = :parentId AND subagentCreatedCount < :maxTotal")
+    suspend fun reserveSubagentCreation(parentId: String, maxTotal: Int): Int
+
+    @Query("UPDATE chat_sessions SET subagentCreatedCount = MAX(0, subagentCreatedCount - 1) WHERE id = :parentId")
+    suspend fun rollbackSubagentCreation(parentId: String)
+
+    @Query("UPDATE chat_sessions SET subagentStatus = :status WHERE id = :id AND parentId IS NOT NULL")
+    suspend fun updateSubagentStatus(id: String, status: String)
+
+    /** Atomically reserve one bounded rework round only after a child reached a terminal state. */
+    @Query("UPDATE chat_sessions SET subagentReworkCount = subagentReworkCount + 1, subagentStatus = 'STARTING' " +
+        "WHERE id = :id AND parentId = :parentId AND subagentStatus IN ('COMPLETED', 'FAILED', 'TIMED_OUT', 'CANCELLED') " +
+        "AND subagentReworkCount < :maxRounds")
+    suspend fun reserveSubagentRework(id: String, parentId: String, maxRounds: Int): Int
+
+    /** Roll back a reservation only while its wake-up event has not changed the STARTING state. */
+    @Query("UPDATE chat_sessions SET subagentReworkCount = MAX(0, subagentReworkCount - 1), subagentStatus = :previousStatus " +
+        "WHERE id = :id AND parentId = :parentId AND subagentStatus = 'STARTING' AND subagentReworkCount > 0")
+    suspend fun rollbackSubagentRework(id: String, parentId: String, previousStatus: String): Int
+
+    @Query("UPDATE chat_sessions SET subagentStatus = 'CANCELLED' WHERE parentId IS NOT NULL AND subagentStatus IN ('STARTING', 'RUNNING')")
+    suspend fun markRunningSubagentsCancelled()
+
     @Query("SELECT * FROM chat_sessions")
     suspend fun getAllOnce(): List<ChatSessionEntity>
 
@@ -79,4 +108,7 @@ interface ChatSessionDao {
 
     @Query("UPDATE chat_sessions SET lastInputTokens = :lastInputTokens WHERE id = :id")
     suspend fun updateLastInputTokens(id: String, lastInputTokens: Int)
+
+    @Query("UPDATE chat_sessions SET superAgentEnabled = :enabled WHERE id = :id AND parentId IS NULL")
+    suspend fun updateSuperAgentEnabled(id: String, enabled: Boolean)
 }

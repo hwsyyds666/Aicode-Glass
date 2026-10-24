@@ -81,6 +81,8 @@ import kotlin.math.roundToInt
 /** 工具卡片入场时长（ms）与上浮起点：略微下移再淡入到位，只走 draw 层不影响布局。 */
 private const val MESSAGE_ENTRY_ANIM_MS = 260
 private val MESSAGE_ENTRY_RISE = 10.dp
+private val BACKGROUND_STATUS_REGEX = Regex("<status>(.*?)</status>")
+private val BACKGROUND_SUMMARY_REGEX = Regex("<summary>(.*?)</summary>")
 
 /** 一轮任务的划分结果：轮起点 + 轮内所有助手消息（1 轮 n 步）+ 轮末那条。 */
 private data class AgentTurn(
@@ -509,8 +511,9 @@ internal fun AgentMessageItem(
 /**
  * 整轮任务折叠头（最外层）：一行「执行中 / 已完成 Xs + 箭头」，点一下展开/收起整轮过程。
  *
- * 收起态用右箭头（ChevronRight），展开态用下箭头（ChevronDown）——与参考图一致；
- * 运行中（[running]）只显示「执行中」，完成后显示本轮耗时。风格对齐 [ToolCallGroupHeader]。
+ * 收起态用右箭头（ChevronRight），展开态用下箭头（ChevronDown）——与参考图一致。
+ * 运行中只显示「执行中」，完成后显示本轮耗时。失败信息只在展开后的工具卡片里看，
+ * 不在这里堆「N 个步骤失败」的汇总条（用户明确反馈该汇总条多余且难看）。
  */
 @Composable
 internal fun TurnCollapseHeader(
@@ -520,39 +523,46 @@ internal fun TurnCollapseHeader(
     onToggle: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Row(
+    val completedDuration = durationMs?.let { formatTaskDuration(it) } ?: ""
+    val title = if (running) {
+        stringResource(R.string.chat_turn_running)
+    } else {
+        stringResource(R.string.chat_turn_completed, completedDuration)
+    }
+    Column(
         modifier = modifier
             .fillMaxWidth()
-            .heightIn(min = ChatStyle.toolRowMinHeight)
             .clip(ChatStyle.panelShape)
             .clickable(
                 onClickLabel = stringResource(
                     if (expanded) R.string.common_collapse_action else R.string.common_expand
                 ),
                 onClick = onToggle
-            ),
-        verticalAlignment = Alignment.CenterVertically
+            )
     ) {
-        Text(
-            text = if (running) {
-                stringResource(R.string.chat_turn_running)
-            } else {
-                stringResource(R.string.chat_turn_completed, durationMs?.let { formatTaskDuration(it) } ?: "")
-            },
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.Medium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-        Spacer(Modifier.width(Spacing.xs))
-        ExpandableChevronIcon(
-            expanded = expanded,
-            style = ChevronRotationStyle.RIGHT_DOWN,
-            contentDescription = if (expanded) stringResource(R.string.common_collapse_action) else stringResource(R.string.common_expand),
-            tint = Brand.IconGray,
-            size = 18.dp
-        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = ChatStyle.toolRowMinHeight),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = title,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.width(Spacing.xs))
+            ExpandableChevronIcon(
+                expanded = expanded,
+                style = ChevronRotationStyle.RIGHT_DOWN,
+                contentDescription = if (expanded) stringResource(R.string.common_collapse_action) else stringResource(R.string.common_expand),
+                tint = Brand.IconGray,
+                size = 18.dp
+            )
+        }
     }
 }
 
@@ -579,9 +589,9 @@ private fun MessageActionIconButton(
 @Composable
 private fun BackgroundNotificationBar(message: AgentUIMessage) {
     val content = message.content
-    val statuses = Regex("<status>(.*?)</status>")
+    val statuses = BACKGROUND_STATUS_REGEX
         .findAll(content).map { it.groupValues.getOrNull(1)?.trim()?.lowercase() }.filterNotNull().toList()
-    val summaries = Regex("<summary>(.*?)</summary>")
+    val summaries = BACKGROUND_SUMMARY_REGEX
         .findAll(content).map { it.groupValues.getOrNull(1)?.trim() }.filterNotNull().toList()
     val dotColor = when {
         // status 为 message 的是代理间消息（非失败），用主色；其余非 completed 视为失败。

@@ -52,13 +52,21 @@ internal fun decodeBackgroundBitmap(path: String, maxWidth: Int, maxHeight: Int)
     runCatching {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(path, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0 || maxWidth <= 0 || maxHeight <= 0) return null
         var sample = 1
-        while (bounds.outWidth / sample > maxWidth * 2 || bounds.outHeight / sample > maxHeight * 2) {
+        fun sampledDimension(dimension: Int): Long = (dimension.toLong() + sample - 1L) / sample
+        while (sampledDimension(bounds.outWidth) > maxWidth ||
+            sampledDimension(bounds.outHeight) > maxHeight ||
+            sampledDimension(bounds.outWidth) * sampledDimension(bounds.outHeight) > MAX_DECODE_PIXELS
+        ) {
+            if (sample >= (1 shl 29)) return null
             sample *= 2
         }
         val opts = BitmapFactory.Options().apply { inSampleSize = sample }
         BitmapFactory.decodeFile(path, opts)?.asImageBitmap()
     }.getOrNull()
+
+private const val MAX_DECODE_PIXELS = 16_777_216L
 
 /**
  * 自定义背景图设置弹窗：缩略图预览 + 透明度滑块 + 选图/移除。
