@@ -222,24 +222,6 @@ internal fun OpenAIAccountsSection(
                         Text(stringResource(R.string.openai_account_import_action))
                     }
                 }
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    OutlinedButton(onClick = {
-                        runCatching {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(OPENAI_USAGE_URL)))
-                        }
-                    }) {
-                        Icon(
-                            imageVector = FeatherIcons.ExternalLink,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(Modifier.width(Spacing.xs))
-                        Text(stringResource(R.string.openai_account_manage_usage))
-                    }
-                }
                 state.message?.let { notice ->
                     Text(
                         text = notice,
@@ -263,11 +245,6 @@ internal fun OpenAIAccountsSection(
                 onRefreshUsage = { viewModel.refreshUsage(account.id) },
                 onReauthorize = { viewModel.reauthorize(account.id) },
                 onSelectModel = { viewModel.selectModel(account.id, it) },
-                onOpenUsagePage = {
-                    runCatching {
-                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(OPENAI_USAGE_URL)))
-                    }
-                },
                 onRemove = { removeTarget = account }
             )
         }
@@ -500,7 +477,6 @@ private fun OpenAIAccountCard(
     onRefreshUsage: () -> Unit,
     onReauthorize: () -> Unit,
     onSelectModel: (String) -> Unit,
-    onOpenUsagePage: () -> Unit,
     onRemove: () -> Unit
 ) {
     var modelSheetVisible by remember { mutableStateOf(false) }
@@ -655,12 +631,6 @@ private fun OpenAIAccountCard(
                         onClick = onReauthorize
                     )
                 }
-                CardActionButton(
-                    icon = FeatherIcons.ExternalLink,
-                    contentDescription = stringResource(R.string.openai_account_manage_usage),
-                    enabled = true,
-                    onClick = onOpenUsagePage
-                )
                 Spacer(Modifier.weight(1f))
                 CardActionButton(
                     icon = FeatherIcons.Trash2,
@@ -942,4 +912,3 @@ private val QuotaOrange = Color(0xFFF97316)
 private const val FIVE_HOUR_WINDOW_MAX_SECONDS = 6 * 60 * 60L
 private const val WEEKLY_WINDOW_MIN_SECONDS = 24 * 60 * 60L
 
-private const val OPENAI_USAGE_URL = "https://chatgpt.com/settings/usage"

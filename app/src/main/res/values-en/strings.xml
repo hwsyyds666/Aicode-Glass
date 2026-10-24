@@ -69,6 +69,7 @@
     <string name="openai_error_auth_code_missing">The OpenAI callback did not include an authorization code.</string>
     <string name="openai_error_client_mismatch">The callback client registration does not match this account; the saved credentials were not changed.</string>
     <string name="openai_error_client_id_missing">OpenAI did not return a registered client ID; the account was not saved.</string>
+    <string name="openai_error_callback_port_busy">The local callback ports (%1$s) are busy, so login cannot start. Close the app occupying them and retry.</string>
     <string name="openai_error_identity_mismatch">Reauthorization returned a different OpenAI account; the saved credentials were not changed.</string>
     <string name="openai_error_refresh_token_missing">OpenAI did not issue a refresh credential. Reauthorize to use plan access.</string>
     <string name="openai_error_secure_storage_failed">OpenAI authorized the account, but secure local storage failed. Please retry. The access token was not logged.</string>
@@ -112,11 +113,11 @@
     <string name="openai_error_import_missing_token">The imported content has no access_token, so no account can be created.</string>
     <string name="openai_login_add_title">Add ChatGPT account</string>
     <string name="openai_login_reauthorize_title">Reauthorize ChatGPT account</string>
-    <string name="openai_login_oauth_summary">Sign in with OpenAI’s official OAuth flow. Tokens are encrypted on this device and requests go directly to OpenAI.</string>
+    <string name="openai_login_oauth_summary">Sign in through the official Codex channel (the authorization page shows “Sign in to Codex”). Tokens are encrypted on this device and requests go directly to OpenAI.</string>
     <string name="openai_login_authorize_url_label">Authorization link</string>
     <string name="openai_login_open_browser">Open browser to sign in</string>
     <string name="openai_login_manual_callback_label">Paste the callback link manually</string>
-    <string name="openai_login_manual_callback_placeholder">http://127.0.0.1:port/auth/callback?code=…</string>
+    <string name="openai_login_manual_callback_placeholder">http://localhost:1455/auth/callback?code=…</string>
     <string name="openai_login_submit">Finish sign-in</string>
     <string name="openai_login_waiting">Waiting for authorization…</string>
     <string name="openai_login_hint">If the browser cannot return to the app automatically, copy the full URL from the address bar after signing in, paste it above, then tap “Finish sign-in”.</string>

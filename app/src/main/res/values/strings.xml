@@ -69,6 +69,7 @@
     <string name="openai_error_auth_code_missing">OpenAI 回调缺少授权码。</string>
     <string name="openai_error_client_mismatch">回调账号注册标识与所选账号不一致；原账号凭据未更改。</string>
     <string name="openai_error_client_id_missing">OpenAI 没有返回已注册的客户端标识；账号未保存。</string>
+    <string name="openai_error_callback_port_busy">本地回调端口（%1$s）被占用，无法发起登录。请关闭占用端口的程序后重试。</string>
     <string name="openai_error_identity_mismatch">重新授权返回了另一 OpenAI 账号；原账号凭据未更改。</string>
     <string name="openai_error_refresh_token_missing">OpenAI 未签发可续期凭据；计划用量暂不可用，请重新授权。</string>
     <string name="openai_error_secure_storage_failed">OpenAI 已授权，但本机安全存储失败；请重试。访问令牌未写入日志。</string>
@@ -112,11 +113,11 @@
     <string name="openai_error_import_missing_token">导入内容缺少 access_token，无法建立账号。</string>
     <string name="openai_login_add_title">添加 ChatGPT 账号</string>
     <string name="openai_login_reauthorize_title">重新登录 ChatGPT 账号</string>
-    <string name="openai_login_oauth_summary">通过 OpenAI 官方 OAuth 登录；令牌只加密保存在本机，请求直连 OpenAI。</string>
+    <string name="openai_login_oauth_summary">使用官方 Codex 渠道登录（授权页显示“登录到 Codex”）。令牌只加密保存在本机，请求直连 OpenAI。</string>
     <string name="openai_login_authorize_url_label">授权链接</string>
     <string name="openai_login_open_browser">打开浏览器登录</string>
     <string name="openai_login_manual_callback_label">手动粘贴回调链接</string>
-    <string name="openai_login_manual_callback_placeholder">http://127.0.0.1:端口/auth/callback?code=…</string>
+    <string name="openai_login_manual_callback_placeholder">http://localhost:1455/auth/callback?code=…</string>
     <string name="openai_login_submit">完成登录</string>
     <string name="openai_login_waiting">等待授权完成…</string>
     <string name="openai_login_hint">如果浏览器不能自动跳回应用，请复制登录完成后地址栏里的完整链接，粘贴到上面的输入框再点「完成登录」。</string>

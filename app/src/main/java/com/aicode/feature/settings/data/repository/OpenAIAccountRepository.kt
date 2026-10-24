@@ -131,9 +131,7 @@ class OpenAIAccountRepository @Inject constructor(
     private data class PendingLogin(
         val server: ServerSocket,
         val state: String,
-        val nonce: String,
         val pkce: OpenAIOAuthProtocol.Pkce,
-        val hostId: String,
         val discovery: Discovery,
         val previous: OpenAIAccountEntity?,
         val previousIsBackupPlaceholder: Boolean,
@@ -197,41 +195,33 @@ class OpenAIAccountRepository @Inject constructor(
         }
         val discovery = loadDiscovery()
         val state = OpenAIOAuthProtocol.newOpaqueValue()
-        val nonce = OpenAIOAuthProtocol.newOpaqueValue()
         val pkce = OpenAIOAuthProtocol.newPkce()
-        // The OAuth client registration is account-scoped, but ext_agent_host_id is installation-scoped.
-        // Reuse one persisted ID across all account registrations and reauthorizations on this device.
+        // The OAuth client registration is account-scoped, but the host id is installation-scoped.
         val hostId = stableHostId()
         val previousIsBackupPlaceholder = previous?.let {
             it.encryptedAccessToken.isBlank() && it.encryptedRefreshToken.isBlank()
         } == true
 
-        val server = ServerSocket()
+        // Official Codex Desktop contract: fixed loopback callback ports, "localhost" in the URI.
+        val server = bindLoopbackCallbackServer()
         var registered = false
         val sessionId = UUID.randomUUID().toString()
         try {
-            server.reuseAddress = false
-            server.bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0), 1)
-            server.soTimeout = CALLBACK_TIMEOUT_MS
-            val redirectUri = "http://127.0.0.1:${server.localPort}${OpenAIOAuthProtocol.CALLBACK_PATH}"
-            val knownClientId = previous?.clientId ?: OpenAIOAuthProtocol.DYNAMIC_CLIENT_ID
+            val redirectUri = "http://localhost:${server.localPort}${OpenAIOAuthProtocol.CALLBACK_PATH}"
+            val knownClientId = previous?.clientId
+                ?.takeUnless { it == OpenAIOAuthProtocol.DYNAMIC_CLIENT_ID }
+                ?: OpenAIOAuthProtocol.CODEX_DESKTOP_CLIENT_ID
             val authUrl = OpenAIOAuthProtocol.authorizationUrl(
                 redirectUri = redirectUri,
                 state = state,
-                nonce = nonce,
                 challenge = pkce.challenge,
-                hostId = hostId,
-                clientId = knownClientId,
-                accountName = if (previous == null) APP_NAME else null,
-                loginHint = previous?.email
+                clientId = knownClientId
             )
             val expiresAt = System.currentTimeMillis() + LOGIN_SESSION_WINDOW_MS
             pendingLogins[sessionId] = PendingLogin(
                 server = server,
                 state = state,
-                nonce = nonce,
                 pkce = pkce,
-                hostId = hostId,
                 discovery = discovery,
                 previous = previous,
                 previousIsBackupPlaceholder = previousIsBackupPlaceholder,
@@ -250,6 +240,31 @@ class OpenAIAccountRepository @Inject constructor(
         } finally {
             if (!registered) runCatching { server.close() }
         }
+    }
+
+    /**
+     * Binds the loopback callback listener on the official Codex ports (1455, fallback 1457).
+     * The browser on the same device reaches 127.0.0.1 directly, so the redirect lands in-app.
+     */
+    private fun bindLoopbackCallbackServer(): ServerSocket {
+        var lastError: Exception? = null
+        for (port in CALLBACK_PORTS) {
+            val server = ServerSocket()
+            try {
+                server.reuseAddress = false
+                server.bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), port), 1)
+                server.soTimeout = CALLBACK_TIMEOUT_MS
+                return server
+            } catch (error: Exception) {
+                lastError = error
+                runCatching { server.close() }
+            }
+        }
+        FileLogger.w(TAG, "Codex callback ports ${CALLBACK_PORTS.joinToString("/")} unavailable")
+        throw OpenAIAccountException(
+            text(R.string.openai_error_callback_port_busy, CALLBACK_PORTS.joinToString("/"))
+                .ifBlank { lastError?.message.orEmpty() }
+        )
     }
 
     /** Legacy one-shot login: opens the browser itself and blocks until the loopback callback lands. */
@@ -442,9 +457,8 @@ class OpenAIAccountRepository @Inject constructor(
     ): OpenAIAccountSummary {
         val previous = pending.previous
         val previousIsBackupPlaceholder = pending.previousIsBackupPlaceholder
-        val hostId = pending.hostId
+        val hostId = stableHostId()
         val discovery = pending.discovery
-        val nonce = pending.nonce
         val pkce = pending.pkce
         val redirectUri = pending.redirectUri
         try {
@@ -464,10 +478,10 @@ class OpenAIAccountRepository @Inject constructor(
                     previous.clientId
                 }
                 else -> issuedClientId?.takeIf { it != OpenAIOAuthProtocol.DYNAMIC_CLIENT_ID }
-                    ?: throw OpenAIAccountException(text(R.string.openai_error_client_id_missing))
+                    ?: pending.knownClientId
             }
             val tokens = exchangeAuthorizationCode(discovery.tokenEndpoint, clientId, code, pkce.verifier, redirectUri)
-            val identity = verifyIdentity(tokens.idToken, clientId, nonce, discovery.jwksUri)
+            val identity = verifyIdentity(tokens.idToken, clientId, null, discovery.jwksUri)
             if (previous != null && !previousIsBackupPlaceholder && identity.subject != previous.subject) {
                 throw OpenAIAccountException(text(R.string.openai_error_identity_mismatch))
             }
@@ -725,7 +739,9 @@ class OpenAIAccountRepository @Inject constructor(
         val modelSet = provider.models.toSet().ifEmpty {
             decodeModelCatalog(account.modelCatalogJson).map(OpenAIAccountModel::slug).toSet()
         }
-        if (model !in modelSet || !OpenAIOAuthProtocol.planUsageGranted(account.scopesAsSet())) return null
+        // An empty catalog (e.g. the model list endpoint was unreachable at login) must not
+        // block chatting: accept the requested model and let the upstream call fail if it is real.
+        if ((modelSet.isNotEmpty() && model !in modelSet) || !OpenAIOAuthProtocol.planUsageGranted(account.scopesAsSet())) return null
         val token = try {
             accessToken(account.id)
         } catch (cancelled: CancellationException) {
@@ -848,7 +864,13 @@ class OpenAIAccountRepository @Inject constructor(
                 .add("grant_type", "refresh_token")
                 .add("client_id", account.clientId)
                 .add("refresh_token", refreshToken)
-                .add("resource", OpenAIOAuthProtocol.RESOURCE)
+                .apply {
+                    // Same contract split as the code exchange: legacy dynamic clients
+                    // require `resource`, official Codex clients reject the extra field.
+                    if (account.clientId == OpenAIOAuthProtocol.DYNAMIC_CLIENT_ID) {
+                        add("resource", OpenAIOAuthProtocol.RESOURCE)
+                    }
+                }
                 .build()
             val response = postForm(discovery.tokenEndpoint, body)
             if (response.code !in 200..299) {
@@ -970,7 +992,11 @@ class OpenAIAccountRepository @Inject constructor(
             .add("code", code)
             .add("code_verifier", verifier)
             .add("redirect_uri", redirectUri)
-            .add("resource", OpenAIOAuthProtocol.RESOURCE)
+            .apply {
+                // Official Codex clients never send `resource`; only the legacy dynamic
+                // registration contract requires it. Sending it there breaks the exchange.
+                if (clientId == OpenAIOAuthProtocol.DYNAMIC_CLIENT_ID) add("resource", OpenAIOAuthProtocol.RESOURCE)
+            }
             .build()
         val response = postForm(endpoint, form)
         if (response.code !in 200..299) {
@@ -1261,7 +1287,8 @@ class OpenAIAccountRepository @Inject constructor(
         const val PROVIDER_ID_PREFIX = "openai_account_"
         private const val OPENAI_BASE_URL = "https://api.openai.com/"
         private const val OPENAI_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
-        private const val APP_NAME = "Aicode-Glass"
+        /** Official Codex login callback ports; 1455 primary, 1457 is Codex's own fallback. */
+        private val CALLBACK_PORTS = intArrayOf(1455, 1457)
         private const val CALLBACK_TIMEOUT_MS = 180_000
         private const val LOGIN_SESSION_WINDOW_MS = 180_000L
         private const val CALLBACK_CLIENT_READ_TIMEOUT_MS = 5_000

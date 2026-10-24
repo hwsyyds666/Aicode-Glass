@@ -1,5 +1,6 @@
 package com.aicode.feature.settings.data.repository
 
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -22,23 +23,41 @@ class OpenAIOAuthProtocolTest {
     }
 
     @Test
-    fun authorizationUrlUsesOfficialLoopbackContractAndScopes() {
+    fun authorizationUrlMatchesOfficialCodexDesktopContract() {
         val url = OpenAIOAuthProtocol.authorizationUrl(
-            redirectUri = "http://127.0.0.1:54321/auth/callback",
+            redirectUri = "http://localhost:1455/auth/callback",
             state = "state-value",
-            nonce = "nonce-value",
-            challenge = "challenge-value",
-            hostId = "urn:uuid:test",
-            accountName = "Aicode-Glass"
+            challenge = "challenge-value"
         )
-        assertEquals("auth.openai.com", url.host)
-        assertEquals("dynamic_agent_client", url.queryParameter("client_id"))
-        assertEquals("http://127.0.0.1:54321/auth/callback", url.queryParameter("redirect_uri"))
-        assertTrue(url.queryParameter("scope").orEmpty().contains(OpenAIOAuthProtocol.PLAN_USAGE_SCOPE))
-        assertEquals("S256", url.queryParameter("code_challenge_method"))
-        assertEquals("Aicode-Glass", url.queryParameter("agent_name_hint"))
-        assertNull(url.queryParameter("access_token"))
-        assertNull(url.queryParameter("id_token_hint"))
+        // 与 cockpit-tools codex_oauth.rs 一致：授权地址包在官方 hosted login 里，
+        // 内层才是 auth.openai.com/oauth/authorize；固定 Codex client 显示“登录到 Codex”。
+        assertEquals("chatgpt.com", url.host)
+        assertEquals("/codex/desktop-auth", url.encodedPath)
+        assertEquals("true", url.queryParameter("codex_streamlined_login"))
+        assertEquals("1", url.queryParameter("no_universal_links"))
+        val authorize = OpenAIOAuthProtocol.HOSTED_AUTH_ENDPOINT.toHttpUrl().newBuilder().build()
+        assertNotNull(authorize)
+        val inner = url.queryParameter("authorize_url")!!.toHttpUrl()
+        assertEquals("auth.openai.com", inner.host)
+        assertEquals("/oauth/authorize", inner.encodedPath)
+        assertEquals(OpenAIOAuthProtocol.CODEX_DESKTOP_CLIENT_ID, inner.queryParameter("client_id"))
+        assertEquals("http://localhost:1455/auth/callback", inner.queryParameter("redirect_uri"))
+        assertEquals("state-value", inner.queryParameter("state"))
+        assertEquals("S256", inner.queryParameter("code_challenge_method"))
+        assertEquals("challenge-value", inner.queryParameter("code_challenge"))
+        assertEquals("Codex Desktop", inner.queryParameter("originator"))
+        assertEquals("true", inner.queryParameter("codex_cli_simplified_flow"))
+        assertEquals("true", inner.queryParameter("codex_streamlined_login"))
+        assertEquals(
+            OpenAIOAuthProtocol.CODEX_SCOPES,
+            inner.queryParameter("scope")
+        )
+        assertTrue(inner.queryParameterNames.containsAll(setOf("id_token_add_organizations")))
+        // 旧 SiWC 动态注册参数必须彻底消失，否则授权页又变成注册第三方应用
+        assertEquals(setOf("authorize_url", "codex_streamlined_login", "no_universal_links"), url.queryParameterNames)
+        assertFalse("nonce" in inner.queryParameterNames)
+        assertFalse("agent_name_hint" in inner.queryParameterNames)
+        assertFalse("ext_agent_host_id" in inner.queryParameterNames)
     }
 
     @Test
@@ -69,6 +88,12 @@ class OpenAIOAuthProtocolTest {
             "resource.invoke",
             "offline_access"
         )))
+        // Codex Desktop 授权拿到的 scope（不含 SiWC 专属 scope）同样视为可用
+        assertTrue(OpenAIOAuthProtocol.planUsageGranted(setOf(
+            "openid", "profile", "email", "offline_access",
+            "api.connectors.read", "api.connectors.invoke"
+        )))
+        assertFalse(OpenAIOAuthProtocol.planUsageGranted(setOf("openid", "api.connectors.read")))
     }
 
     @Test
