@@ -184,3 +184,24 @@ HEAD `c9a14f8b`。用户反馈：容器模式 search 正常、真机（DEVICE_RO
 - `:app:assembleUniversalDebug` / `:app:assembleUniversalRelease` BUILD SUCCESSFUL。
 - 单测 **1,300 通过 / 0 失败 / 0 错误 / 12 跳过**（Windows 平台 POSIX 路径假设与 Robolectric/Conscrypt 环境跳过）。
 - 仓库无 `OpenAIAccountRepository` / `OpenAIAccountsViewModel` 单测，本轮改动未破坏既有测试（`GitHubOAuthRepositoryTest` 仍只覆盖设备流与 PR）。
+
+## 2026-10-24 第六轮（ChatGPT 登录照抄 cockpit-tools 的 Codex 官方 OAuth）
+
+用户反馈：①授权页显示 AiCode 而不是"登录到 Codex"；②"打开用量面板"不该有；③登录 bug——浏览器显示完成后 App 却报"授权码失效"，要求直接照抄 cockpit-tools 源码（`src-tauri/src/modules/codex_oauth.rs`）。
+
+### 根因与修复
+- **根因（登录页显示 AiCode + 授权码失效）**：原实现走 SiWC 动态客户端注册（`dynamic_agent_client` + `agent_name_hint`），授权页因此显示应用名；token 交换时 OpenAI 返回 400 → 报 openai_error_auth_code_expired。
+- **照抄 cockpit 的契约**（`OpenAIOAuthProtocol.kt` / `OpenAIAccountRepository.kt`）：
+  - 固定官方 Codex Desktop client_id `app_EMoamEEZ73f0CkXaXp7hrann`（授权页显示"登录到 Codex"）。
+  - 授权 URL：`auth.openai.com/oauth/authorize`（response_type=code、S256 PKCE、`codex_cli_simplified_flow=true`、`codex_streamlined_login=true`、`originator=Codex Desktop`），外层包 `chatgpt.com/codex/desktop-auth?authorize_url=…` hosted 登录页；不再发 nonce/agent_name_hint/ext_agent_host_id/resource。
+  - 回调端口固定 1455、占用回退 1457（与 Codex 一致），redirect_uri 用 `http://localhost:<port>/auth/callback`；`bindLoopbackCallbackServer()` 替换随机端口。
+  - token 交换与 refresh：官方 Codex client 不带 `resource`（仅 legacy dynamic client 保留），与 cockpit 完全一致。
+  - scope 改为 Codex 官方 `openid profile email offline_access api.connectors.read api.connectors.invoke`；`planUsageGranted` 放宽接受 `api.connectors.invoke`。
+  - verifyIdentity 不再要求 nonce；aud 仍校验 client_id。
+- **移除"打开用量面板"**：账号区顶部按钮与账号卡的 ExternalLink 动作整链删除（含 OPENAI_USAGE_URL 常量）。
+- 文案：登录弹层说明改为"使用官方 Codex 渠道登录"；手动回调占位改 `http://localhost:1455/auth/callback?code=…`。
+
+### 验证
+- `:app:compileUniversalDebugKotlin`、`:app:testUniversalDebugUnitTest`、`:app:assembleUniversalRelease` 均 BUILD SUCCESSFUL；单测 1,300 通过 / 0 失败 / 0 错误 / 12 跳过。
+- 新测试：`OpenAIOAuthProtocolTest.authorizationUrlMatchesOfficialCodexDesktopContract`（校验 hosted 包装、内层 authorize 参数、Codex client、无动态注册残留）与 Codex scope 用例。
+- 提交 `15163e47`。
