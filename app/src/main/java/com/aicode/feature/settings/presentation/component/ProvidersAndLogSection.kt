@@ -73,7 +73,13 @@ internal fun ProvidersSection(
 
     val lazyListState = rememberLazyListState()
     val reorderableState = rememberReorderableLazyListState(lazyListState) { from, to ->
-        localProviders = localProviders.toMutableList().apply { add(to.index, removeAt(from.index)) }
+        // reorderable 在拖到列表末尾时会给出 to.index == size，直接 add 会 IndexOutOfBounds 崩溃，
+        // 必须收敛到合法区间。
+        val current = localProviders
+        if (current.isEmpty()) return@rememberReorderableLazyListState
+        val fromIndex = from.index.coerceIn(current.indices)
+        val moved = current.toMutableList().apply { add(to.index.coerceIn(0, size), removeAt(fromIndex)) }
+        localProviders = moved
     }
     val hapticFeedback = LocalHapticFeedback.current
     LazyColumn(

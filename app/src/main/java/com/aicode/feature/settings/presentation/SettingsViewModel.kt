@@ -2243,12 +2243,17 @@ class SettingsViewModel @Inject constructor(
      *
      * 拖拽过程中只更新调用方的本地顺序（不走进这里）：若每移动一格就写库，
      * Room 的 flow 会立刻回灌并覆盖 UI 顺序，拖拽状态与 item 位置错位后手势就卡住了。
+     *
+     * UI 传入的可能是过滤后的列表（例如隐藏 ChatGPT 账号专属 provider），
+     * 这里把没出现的项补到末尾，保证落库的排序值连续、不会把隐藏项挤到前面。
      */
     fun reorderProviders(ordered: List<AIProviderConfig>) {
         if (ordered.isEmpty()) return
-        _providers.value = ordered
+        val orderedIds = ordered.mapTo(mutableSetOf()) { it.id }
+        val merged = ordered + _providers.value.filterNot { it.id in orderedIds }
+        _providers.value = merged
         viewModelScope.launch {
-            runCatching { repository.reorderProviders(ordered) }
+            runCatching { repository.reorderProviders(merged) }
                 .onFailure { FileLogger.w(TAG, "持久化提供商顺序失败: ${it.message}") }
         }
     }

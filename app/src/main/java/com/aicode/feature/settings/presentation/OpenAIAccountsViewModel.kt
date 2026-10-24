@@ -106,17 +106,22 @@ class OpenAIAccountsViewModel @Inject constructor(
                     return@launch
                 }
                 var failed = 0
+                val warnings = mutableListOf<String>()
                 accountIds.forEach { accountId ->
                     val ok = runCatching { repository.refreshUsage(accountId) }.isSuccess
                     if (!ok) failed++
                     if (repository.modelsOf(accountId).isEmpty()) {
                         runCatching { repository.refreshModels(accountId) }
+                            .onSuccess { result -> result.warning?.let { warnings += it } }
                     }
                 }
-                message.value = if (failed == 0) {
-                    context.getString(R.string.openai_notice_usage_refreshed)
-                } else {
-                    context.getString(R.string.openai_warning_usage_refresh_partial, failed, accountIds.size)
+                message.value = buildString {
+                    if (failed == 0) {
+                        append(context.getString(R.string.openai_notice_usage_refreshed))
+                    } else {
+                        append(context.getString(R.string.openai_warning_usage_refresh_partial, failed, accountIds.size))
+                    }
+                    if (warnings.isNotEmpty()) append("；").append(warnings.distinct().joinToString("；"))
                 }
                 messageIsError.value = failed != 0
             } catch (cancelled: CancellationException) {

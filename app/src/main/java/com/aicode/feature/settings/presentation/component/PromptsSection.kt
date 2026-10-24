@@ -132,7 +132,13 @@ private fun PromptList(
 
     val listState = rememberLazyListState()
     val reorderableState = rememberReorderableLazyListState(listState) { from, to ->
-        localFragments = localFragments.toMutableList().apply { add(to.index, removeAt(from.index)) }
+        // 拖到末尾时 to.index 可能等于 size，直接 add 会 IndexOutOfBounds 崩溃，先收敛区间
+        val current = localFragments
+        if (current.isEmpty()) return@rememberReorderableLazyListState
+        val fromIndex = from.index.coerceIn(current.indices)
+        localFragments = current.toMutableList().apply {
+            add(to.index.coerceIn(0, size), removeAt(fromIndex))
+        }
     }
     val hapticFeedback = LocalHapticFeedback.current
 

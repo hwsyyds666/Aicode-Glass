@@ -24,6 +24,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import com.aicode.core.ui.AdaptiveModalBottomSheet
 import androidx.compose.material3.Surface
@@ -68,6 +69,7 @@ import compose.icons.feathericons.Minimize2
 import compose.icons.feathericons.Shield
 import compose.icons.feathericons.Sliders
 import compose.icons.feathericons.Type
+import compose.icons.feathericons.X
 import compose.icons.feathericons.Zap
 import compose.icons.feathericons.Cpu
 import compose.icons.feathericons.GitBranch
@@ -746,7 +748,10 @@ internal fun ModelSelectionSheet(
     AdaptiveModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        sheetGesturesEnabled = true,
+        // 关掉拖拽手势：用户反馈「点开后快速往上拖动，选择器自己收回去」。
+        // 关闭改为点遮罩 / 返回键 / 右上角关闭按钮，滚动选模型时不会再被误关。
+        sheetGesturesEnabled = false,
+        dragHandle = null,
         containerColor = settingsPageBackground()
     ) {
         Column(
@@ -776,6 +781,15 @@ internal fun ModelSelectionSheet(
                         modifier = Modifier.clickable { onClear() }
                     )
                 }
+                // 拖拽手势已关，给一个明确的关闭按钮
+                IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
+                    Icon(
+                        imageVector = FeatherIcons.X,
+                        contentDescription = stringResource(R.string.common_close),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
             }
 
             ModelSearchField(
@@ -784,7 +798,12 @@ internal fun ModelSelectionSheet(
                 placeholder = stringResource(R.string.provider_filter_models_hint)
             )
 
-            val activeProviders = providers.filter { it.isEnabled && it.models.isNotEmpty() }
+            // ChatGPT 账号对应的 provider 即使还没拉到模型目录也要显示（账号本身可用），
+            // 否则用户会在模型选择器里看不到自己刚添加的官方账号。
+            val activeProviders = providers.filter {
+                it.isEnabled && (it.models.isNotEmpty() ||
+                    com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(it))
+            }
             if (activeProviders.isEmpty()) {
                 SettingsGroup {
                     Box(

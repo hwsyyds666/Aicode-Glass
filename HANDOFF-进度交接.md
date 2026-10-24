@@ -249,3 +249,29 @@ HEAD `c9a14f8b`。用户反馈：容器模式 search 正常、真机（DEVICE_RO
 ### 验证
 - `:app:compileUniversalDebugKotlin` BUILD SUCCESSFUL；`:app:testUniversalDebugUnitTest` **1,300 通过 / 0 失败 / 0 错误 / 12 跳过**。
 - 提交 `bfa0e3e2`。
+
+## 2026-10-24 第八轮（真机回归：崩溃 / 供应商列表 / 模型选择器 / 模型目录 403）
+
+用户带真机截图与崩溃栈回归，4 个问题逐一定位并修复。
+
+### 1. 崩溃：IndexOutOfBoundsException Index: 6, Size: 5
+- **根因**：`reorderable` 库在把卡片拖到列表末尾时会给出 `to.index == size`，而 `ProvidersSection` / `PromptsSection` 的 onMove 直接 `add(to.index, removeAt(from.index))`，越界即崩。栈里的 `ArrayList.add` + `invokeSuspend` 正是这两处 lambda。
+- **修复**：onMove 内先 `coerceIn` 收敛 from/to 到合法区间，空列表直接 return（`ProvidersAndLogSection.kt`、`PromptsSection.kt` 同步修）。
+
+### 2. 添加 ChatGPT 账号后供应商列表多出一条
+- **修复**：`SettingsScreen` 传给 `ProvidersSection` 前 `filterNot { isAccountProvider(it) }`——ChatGPT 账号只归「ChatGPT 账号」入口管理，不作为独立供应商。
+- 同时 `SettingsViewModel.reorderProviders` 把 UI 没传到的项（被过滤的账号 provider）补到末尾再落库，保证排序值连续、不会把隐藏项挤到前面。
+
+### 3. 模型选择器「上滑就收起」+「滑动划不动」
+- **「划不动」是我上一轮修错了**：给 `rememberSheetFlingFix` 加的 `onPostScroll` 会把向上的剩余位移吃掉并回报给子级，内层 LazyColumn 于是以为自己已滚到目标位置，表现为「划不动、要抬手等一下」。已回退该改动，只保留 fling 阶段拦截。
+- **「上滑收起」改为从根上禁用**：`ModelSelectionSheet` 的 `AdaptiveModalBottomSheet` 传 `sheetGesturesEnabled = false` + `dragHandle = null`，关闭改为点遮罩 / 返回键 / 标题行新增的关闭按钮。
+
+### 4. 模型选择器看不到 OpenAI 官方账号的模型（HTTP 403）
+- **根因**：模型目录走 `https://api.openai.com/v1/models`，而 Sign in with ChatGPT 拿到的是 ChatGPT 订阅 OAuth token，该端点面向 API platform，实测返回 **403**（额度接口 `chatgpt.com/backend-api/wham/usage` 同时是 200，证明 token 本身有效）。
+- **修复**：
+  - 新增 `OpenAIAccountRepository.DEFAULT_ACCOUNT_MODELS`：内置 Codex 模型目录（gpt-5.3-codex / -spark、gpt-5.2-codex、gpt-5.1-codex(-mini)、gpt-5-codex(-mini)、gpt-5(-mini)）。
+  - 登录、导入、`refreshModels` 三条路径在目录拉取失败时回退该列表；`refreshModels` 同时把失败原因作为 warning 透出，`refreshAll` 汇总进提示，避免误以为官方只有这些模型。
+  - `ModelSelectionSheet` 不再把「模型列表为空」的账号 provider 过滤掉，保证账号本身始终可见可选。
+
+### 验证
+- `:app:compileUniversalDebugKotlin` BUILD SUCCESSFUL；`:app:testUniversalDebugUnitTest` 与 `:app:assembleUniversalRelease` 见本轮构建日志。

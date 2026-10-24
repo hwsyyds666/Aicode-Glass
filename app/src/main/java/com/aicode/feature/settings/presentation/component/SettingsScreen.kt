@@ -697,7 +697,10 @@ fun SettingsScreen(
                 SettingsSection.Menu -> if (expanded) SettingsDetailPlaceholder() else menuBody()
                 SettingsSection.General -> GeneralSettingsSectionHost(viewModel)
                 SettingsSection.Providers -> ProvidersSection(
-                    providers = providers,
+                    // ChatGPT 账号由「ChatGPT 账号」入口管理，不作为独立供应商出现在列表里
+                    providers = providers.filterNot {
+                        com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(it)
+                    },
                     onEdit = {
                         if (!com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(it)) {
                             editingProvider = it
