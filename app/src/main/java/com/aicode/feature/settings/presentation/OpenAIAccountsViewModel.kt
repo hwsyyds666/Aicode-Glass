@@ -29,6 +29,14 @@ data class OpenAIAccountsUiState(
     /** 进行中的登录会话：非空时 UI 展示授权链接 / 手动回调入口。 */
     val loginSession: OpenAILoginSession? = null,
     val loginPreparing: Boolean = false,
+    /** 登录弹层是否显示：失败时保持显示，方便就地重试。 */
+    val loginVisible: Boolean = false,
+    /** 正在刷新全部账号的额度/模型。 */
+    val refreshing: Boolean = false,
+    /** 登录弹层内的错误提示（弹层会盖住页面下方的提示，必须就地显示）。 */
+    val loginError: String? = null,
+    /** 导出账号得到的 JSON；非空时展示导出对话框。 */
+    val exportJson: String? = null,
     val message: String? = null,
     val messageIsError: Boolean = false
 )
@@ -44,7 +52,12 @@ class OpenAIAccountsViewModel @Inject constructor(
     private val loginPreparing = MutableStateFlow(false)
     private val message = MutableStateFlow<String?>(null)
     private val messageIsError = MutableStateFlow(false)
+    private val refreshing = MutableStateFlow(false)
+    private val loginError = MutableStateFlow<String?>(null)
+    private val exportJson = MutableStateFlow<String?>(null)
+    private val loginVisible = MutableStateFlow(false)
     private var loginJob: Job? = null
+    private var refreshJob: Job? = null
 
     @Suppress("UNCHECKED_CAST")
     val state: StateFlow<OpenAIAccountsUiState> = combine(
@@ -53,8 +66,12 @@ class OpenAIAccountsViewModel @Inject constructor(
         busyAccountId,
         loginSession,
         loginPreparing,
+        refreshing,
+        loginError,
+        exportJson,
         message,
-        messageIsError
+        messageIsError,
+        loginVisible
     ) { values ->
         OpenAIAccountsUiState(
             accounts = values[0] as List<OpenAIAccountSummary>,
@@ -62,10 +79,53 @@ class OpenAIAccountsViewModel @Inject constructor(
             busyAccountId = values[2] as String?,
             loginSession = values[3] as OpenAILoginSession?,
             loginPreparing = values[4] as Boolean,
-            message = values[5] as String?,
-            messageIsError = values[6] as Boolean
+            refreshing = values[5] as Boolean,
+            loginError = values[6] as String?,
+            exportJson = values[7] as String?,
+            message = values[8] as String?,
+            messageIsError = values[9] as Boolean,
+            loginVisible = values[10] as Boolean
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), OpenAIAccountsUiState())
+
+    /**
+     * 刷新全部账号的额度（并对还没有模型目录的账号顺带刷新模型）。
+     * 进入 ChatGPT 账号页时自动调用一次，用户也能通过刷新按钮手动触发。
+     */
+    fun refreshAll() {
+        if (refreshJob?.isActive == true) return
+        if (busyAccountId.value != null) return
+        refreshJob = viewModelScope.launch {
+            refreshing.value = true
+            loginError.value = null
+            try {
+                val accountIds = repository.snapshotAccountIds()
+                if (accountIds.isEmpty()) {
+                    message.value = context.getString(R.string.openai_notice_no_accounts)
+                    messageIsError.value = false
+                    return@launch
+                }
+                var failed = 0
+                accountIds.forEach { accountId ->
+                    val ok = runCatching { repository.refreshUsage(accountId) }.isSuccess
+                    if (!ok) failed++
+                    if (repository.modelsOf(accountId).isEmpty()) {
+                        runCatching { repository.refreshModels(accountId) }
+                    }
+                }
+                message.value = if (failed == 0) {
+                    context.getString(R.string.openai_notice_usage_refreshed)
+                } else {
+                    context.getString(R.string.openai_warning_usage_refresh_partial, failed, accountIds.size)
+                }
+                messageIsError.value = failed != 0
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } finally {
+                refreshing.value = false
+            }
+        }
+    }
 
     /**
      * 开始一次登录（新增账号 accountId=null，或对已有账号重新授权）。
@@ -77,6 +137,8 @@ class OpenAIAccountsViewModel @Inject constructor(
         cancelLoginInternal()
         message.value = null
         messageIsError.value = false
+        loginError.value = null
+        loginVisible.value = true
         loginPreparing.value = true
         loginJob = viewModelScope.launch {
             val session = try {
@@ -84,8 +146,10 @@ class OpenAIAccountsViewModel @Inject constructor(
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
                 loginPreparing.value = false
-                message.value = error.message?.takeIf(String::isNotBlank)
+                val text = error.message?.takeIf(String::isNotBlank)
                     ?: context.getString(R.string.openai_error_action_failed)
+                loginError.value = text
+                message.value = text
                 messageIsError.value = true
                 return@launch
             }
@@ -94,6 +158,8 @@ class OpenAIAccountsViewModel @Inject constructor(
             try {
                 repository.awaitLoginCompletion(session.sessionId)
                 loginSession.value = null
+                loginError.value = null
+                loginVisible.value = false
                 message.value = context.getString(
                     if (accountId == null) R.string.openai_notice_connected else R.string.openai_notice_reauthorized
                 )
@@ -102,23 +168,49 @@ class OpenAIAccountsViewModel @Inject constructor(
                 throw cancelled
             } catch (error: Exception) {
                 loginSession.value = null
-                message.value = error.message?.takeIf(String::isNotBlank)
+                val text = error.message?.takeIf(String::isNotBlank)
                     ?: context.getString(R.string.openai_error_action_failed)
+                loginError.value = text
+                message.value = text
                 messageIsError.value = true
             }
         }
     }
 
-    /** 用浏览器最终停留的回调链接完成登录（自动回跳失败时的兜底）。 */
+    /** 登录失败后重试：清空错误并重新发起一次授权。 */
+    fun retryLogin(accountId: String?) {
+        startLogin(accountId)
+    }
+
+    /**
+     * 用浏览器最终停留的回调链接完成登录（自动回跳失败时的兜底）。
+     *
+     * 兼容三种粘贴形态：完整 URL、`?code=…&state=…` 片段、以及单独的 code。
+     * 无论成败都在弹层内给出提示——之前失败提示落在被弹层盖住的页面上，看起来像「点了没反应」。
+     */
     fun submitLoginCallback(raw: String) = viewModelScope.launch {
-        val session = loginSession.value ?: return@launch
-        try {
+        val session = loginSession.value
+        if (session == null) {
+            loginError.value = context.getString(R.string.openai_error_no_pending_login)
+            return@launch
+        }
+        loginError.value = null
+        val accepted = try {
             repository.submitLoginCallback(session.sessionId, raw)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
-            message.value = error.message?.takeIf(String::isNotBlank)
+            val text = error.message?.takeIf(String::isNotBlank)
                 ?: context.getString(R.string.openai_error_callback_invalid)
+            loginError.value = text
+            message.value = text
+            messageIsError.value = true
+            return@launch
+        }
+        if (!accepted) {
+            // 回调已被自动回跳抢先完成，或本次粘贴重复提交
+            val text = context.getString(R.string.openai_error_login_expired)
+            loginError.value = text
             messageIsError.value = true
         }
     }
@@ -133,16 +225,43 @@ class OpenAIAccountsViewModel @Inject constructor(
         loginSession.value?.let { repository.cancelLogin(it.sessionId) }
         loginSession.value = null
         loginPreparing.value = false
+        loginVisible.value = false
+        loginError.value = null
     }
 
     fun reauthorize(accountId: String) {
         startLogin(accountId)
     }
 
-    fun importAccount(rawJson: String) = runAccountAction(IMPORTING) {
-        repository.importAccountFromJson(rawJson)
-        message.value = context.getString(R.string.openai_notice_imported)
-        messageIsError.value = false
+    /**
+     * 批量导入：一次粘贴可包含多个账号（JSON 数组或换行分隔），结果按「成功 N 个 / 待登录邮箱 / 失败原因」汇总。
+     */
+    fun importAccount(rawText: String) = runAccountAction(IMPORTING) {
+        val outcome = repository.importAccountsFromText(rawText)
+        val parts = mutableListOf<String>()
+        if (outcome.imported.isNotEmpty()) {
+            parts += context.getString(R.string.openai_notice_import_result, outcome.imported.size)
+        }
+        if (outcome.pendingEmails.isNotEmpty()) {
+            parts += context.getString(
+                R.string.openai_notice_import_pending,
+                outcome.pendingEmails.joinToString(", ")
+            )
+        }
+        parts += outcome.failures
+        message.value = parts.joinToString("；").ifBlank {
+            context.getString(R.string.openai_error_import_invalid)
+        }
+        messageIsError.value = outcome.imported.isEmpty()
+    }
+
+    /** 导出全部账号为可再次导入的 JSON。 */
+    fun exportAccounts() = runAccountAction(EXPORTING) {
+        exportJson.value = repository.exportAccounts()
+    }
+
+    fun clearExportJson() {
+        exportJson.value = null
     }
 
     fun refreshModels(accountId: String) = runAccountAction(accountId) {
@@ -217,5 +336,6 @@ class OpenAIAccountsViewModel @Inject constructor(
     private companion object {
         const val CONNECTING = "__connecting__"
         const val IMPORTING = "__importing__"
+        const val EXPORTING = "__exporting__"
     }
 }

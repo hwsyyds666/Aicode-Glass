@@ -709,9 +709,7 @@ fun SettingsScreen(
                             viewModel.deleteProvider(it.id)
                         }
                     },
-                    onReorder = { fromIndex, toIndex ->
-                        viewModel.reorderProviders(fromIndex, toIndex)
-                    },
+                    onReorder = { ordered -> viewModel.reorderProviders(ordered) },
                     onOpenOpenAIAccounts = { section = SettingsSection.OpenAIAccounts }
                 )
                 SettingsSection.OpenAIAccounts -> OpenAIAccountsSection()

@@ -22,8 +22,10 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalConfiguration
@@ -47,12 +49,24 @@ import com.aicode.core.theme.Spacing
 fun rememberSheetFlingFix(sheetState: SheetState): NestedScrollConnection =
     remember(sheetState) {
         object : NestedScrollConnection {
+            // 拖拽阶段同样要拦截：手指快速上滑时，内容滚到边界后剩余的向上位移会流向
+            // sheet 的 AnchoredDraggable，表现为「往上滑一下弹层就自己收回去」。
+            // 这里把向上的剩余量全部吃掉（向下方向原样放行，保证下滑关闭手势可用）。
+            override fun onPostScroll(
+                consumed: Offset,
+                available: Offset,
+                source: NestedScrollSource
+            ): Offset = if (isExpanded() && available.y < 0f) available else Offset.Zero
+
             override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity =
-                if ((sheetState.currentValue == SheetValue.Expanded || sheetState.targetValue == SheetValue.Expanded) && available.y < 0f) {
+                if (isExpanded() && available.y < 0f) {
                     available
                 } else {
                     Velocity.Zero
                 }
+
+            private fun isExpanded(): Boolean =
+                sheetState.currentValue == SheetValue.Expanded || sheetState.targetValue == SheetValue.Expanded
         }
     }
 

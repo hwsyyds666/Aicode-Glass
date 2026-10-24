@@ -2003,4 +2003,25 @@
     <string name="checkpoint_rewind_workspace_restored">Workspace snapshot: restored %1$d files.</string>
     <string name="checkpoint_rewind_git_restored">Git snapshot: restored %1$d files.</string>
     <string name="chat_action_regenerate">Regenerate</string>
+    <string name="openai_import_tab_json">Paste JSON</string>
+    <string name="openai_import_tab_token">Access token</string>
+    <string name="openai_import_tab_lines">Batch text</string>
+    <string name="openai_import_json_hint">Accepts the Codex CLI auth.json, exported Web Session JSON, any object carrying id_token / access_token / refresh_token, or a JSON array to import several at once.</string>
+    <string name="openai_import_json_placeholder">{"tokens":{"id_token":"...","access_token":"...","refresh_token":"..."}}</string>
+    <string name="openai_import_token_hint">Create an account from a bare access token with a display name, for cases where only the token is available.</string>
+    <string name="openai_import_token_name_label">Account name (optional)</string>
+    <string name="openai_import_token_value_placeholder">Paste the access token here</string>
+    <string name="openai_import_lines_hint">One entry per line: a JSON object, a bare token, or email----password----2FA secret----mail url (3 segments work too). Pending rows only record the email and need a login to activate.</string>
+    <string name="openai_import_lines_placeholder">user@example.com----password----2FAKEY----mail@example.com</string>
+    <string name="openai_notice_no_accounts">No accounts yet. Add or import one first.</string>
+    <string name="openai_warning_usage_refresh_partial">%1$d of %2$d accounts failed to refresh; the rest are updated.</string>
+    <string name="openai_error_no_pending_login">No login in progress. Tap "Add account" again.</string>
+    <string name="openai_error_import_empty">Import content is empty.</string>
+    <string name="openai_error_import_line_failed">Entry %1$s failed: %2$s</string>
+    <string name="openai_account_export_action">Export</string>
+    <string name="openai_account_export_title">Export accounts</string>
+    <string name="openai_account_export_hint">Re-importable JSON below, including tokens. Keep it safe and do not share it.</string>
+    <string name="openai_notice_export_copied">Export copied to clipboard</string>
+    <string name="openai_notice_import_result">Imported %1$d accounts</string>
+    <string name="openai_notice_import_pending">Pending logins: %1$s</string>
 </resources>

@@ -558,9 +558,10 @@ internal fun ChatInputBar(
                                 modifier = Modifier
                                     .size(48.dp)
                                     .clip(RoundedCornerShape(Radius.md))
+                                    // 未开启时保持透明，只留描边：有底色会让人误以为已开启
                                     .background(
                                         if (superAgentEnabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
-                                        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f)
+                                        else Color.Transparent
                                     )
                                     .border(
                                         BorderStroke(

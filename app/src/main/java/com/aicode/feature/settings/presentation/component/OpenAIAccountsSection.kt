@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import org.json.JSONObject
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -26,7 +27,9 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -35,6 +38,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -49,6 +53,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.widget.Toast
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aicode.R
@@ -72,6 +77,7 @@ import compose.icons.feathericons.RefreshCw
 import compose.icons.feathericons.Settings
 import compose.icons.feathericons.Star
 import compose.icons.feathericons.Trash2
+import compose.icons.feathericons.Upload
 import compose.icons.feathericons.User
 import compose.icons.feathericons.Zap
 import java.text.DateFormat
@@ -147,6 +153,9 @@ internal fun OpenAIAccountsSection(
     val context = LocalContext.current
     val isConnecting = state.loginPreparing || state.loginSession != null
 
+    // 每次打开本页自动刷新一次全部账号额度，避免看到过期的配额数据
+    LaunchedEffect(Unit) { viewModel.refreshAll() }
+
     Column(verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
         Card(
             shape = RoundedCornerShape(14.dp),
@@ -169,19 +178,25 @@ internal fun OpenAIAccountsSection(
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        Spacer(Modifier.width(Spacing.xs))
                     }
-                }
-                Text(
-                    text = stringResource(R.string.openai_accounts_description),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                if (state.accounts.isNotEmpty()) {
-                    Text(
-                        text = stringResource(R.string.openai_accounts_multi_hint),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    // 手动刷新入口：进页面已自动刷一次，这里给用户随时再刷的按钮
+                    IconButton(
+                        onClick = viewModel::refreshAll,
+                        enabled = !state.refreshing && state.busyAccountId == null && !isConnecting,
+                        modifier = Modifier.size(34.dp)
+                    ) {
+                        if (state.refreshing) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(
+                                imageVector = FeatherIcons.RefreshCw,
+                                contentDescription = stringResource(R.string.openai_account_refresh_usage),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
                 }
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
@@ -220,6 +235,20 @@ internal fun OpenAIAccountsSection(
                         )
                         Spacer(Modifier.width(Spacing.xs))
                         Text(stringResource(R.string.openai_account_import_action))
+                    }
+                    if (state.accounts.isNotEmpty()) {
+                        OutlinedButton(
+                            onClick = viewModel::exportAccounts,
+                            enabled = state.busyAccountId == null && !isConnecting && !state.refreshing
+                        ) {
+                            Icon(
+                                imageVector = FeatherIcons.Upload,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(Spacing.xs))
+                            Text(stringResource(R.string.openai_account_export_action))
+                        }
                     }
                 }
                 state.message?.let { notice ->
@@ -277,12 +306,14 @@ internal fun OpenAIAccountsSection(
         )
     }
 
-    if (state.loginSession != null || state.loginPreparing) {
+    if (state.loginVisible) {
         ChatGptLoginSheet(
             session = state.loginSession,
             preparing = state.loginPreparing,
             isNewAccount = state.loginSession?.accountId == null,
+            error = state.loginError,
             onDismiss = viewModel::cancelLogin,
+            onRetry = { viewModel.retryLogin(state.loginSession?.accountId) },
             onSubmitCallback = viewModel::submitLoginCallback
         )
     }
@@ -294,6 +325,13 @@ internal fun OpenAIAccountsSection(
                 showImport = false
                 viewModel.importAccount(raw)
             }
+        )
+    }
+
+    state.exportJson?.let { json ->
+        ExportAccountsDialog(
+            json = json,
+            onDismiss = viewModel::clearExportJson
         )
     }
 }
@@ -308,7 +346,9 @@ private fun ChatGptLoginSheet(
     session: OpenAILoginSession?,
     preparing: Boolean,
     isNewAccount: Boolean,
+    error: String?,
     onDismiss: () -> Unit,
+    onRetry: () -> Unit,
     onSubmitCallback: (String) -> Unit
 ) {
     val context = LocalContext.current
@@ -324,11 +364,21 @@ private fun ChatGptLoginSheet(
                 ),
                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
             )
-            Text(
-                text = stringResource(R.string.openai_login_oauth_summary),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            // 错误就地显示：弹层会盖住页面下方的提示条，用户看不到就等于「点了没反应」
+            error?.let { message ->
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.error.copy(alpha = 0.10f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(Spacing.sm)
+                    )
+                }
+            }
 
             if (session == null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -338,6 +388,12 @@ private fun ChatGptLoginSheet(
                         text = stringResource(R.string.openai_login_preparing),
                         style = MaterialTheme.typography.bodySmall
                     )
+                }
+                // 登录失败后保留弹层，让用户直接重试，而不是回到页面再点一次
+                error?.let {
+                    Button(onClick = onRetry, enabled = !preparing) {
+                        Text(stringResource(R.string.openai_login_retry))
+                    }
                 }
             } else {
                 Text(
@@ -430,40 +486,169 @@ private fun ChatGptLoginSheet(
     }
 }
 
-/** 导入账号：粘贴 Codex CLI 的 auth.json（或任意含 access_token 的 JSON）。 */
+/**
+ * 导入账号：对齐 cockpit-tools 的多种导入来源，用分段控件切换。
+ *
+ *  - 粘贴 JSON：Codex CLI `auth.json` / Web Session / 顶层 token 对象 / JSON 数组（批量）
+ *  - Access Token：给一段 token 起个名字直接建号
+ *  - 批量文本：每行一个 JSON、一个裸 token，或 `邮箱----密码----2FA秘钥----邮件地址`
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ImportAccountDialog(onDismiss: () -> Unit, onImport: (String) -> Unit) {
+    var tab by remember { mutableStateOf(ImportTab.JSON) }
     var raw by remember { mutableStateOf("") }
+    var displayName by remember { mutableStateOf("") }
+    var token by remember { mutableStateOf("") }
+
+    val canSubmit = when (tab) {
+        ImportTab.JSON, ImportTab.LINES -> raw.isNotBlank()
+        ImportTab.TOKEN -> token.isNotBlank()
+    }
+    val hint = stringResource(
+        when (tab) {
+            ImportTab.JSON -> R.string.openai_import_json_hint
+            ImportTab.TOKEN -> R.string.openai_import_token_hint
+            ImportTab.LINES -> R.string.openai_import_lines_hint
+        }
+    )
+    val placeholder = stringResource(
+        when (tab) {
+            ImportTab.JSON -> R.string.openai_import_json_placeholder
+            ImportTab.TOKEN -> R.string.openai_import_token_value_placeholder
+            ImportTab.LINES -> R.string.openai_import_lines_placeholder
+        }
+    )
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.openai_account_import_title)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
+                    FilterChip(
+                        selected = tab == ImportTab.JSON,
+                        onClick = { tab = ImportTab.JSON },
+                        label = { Text(stringResource(R.string.openai_import_tab_json)) }
+                    )
+                    FilterChip(
+                        selected = tab == ImportTab.TOKEN,
+                        onClick = { tab = ImportTab.TOKEN },
+                        label = { Text(stringResource(R.string.openai_import_tab_token)) }
+                    )
+                    FilterChip(
+                        selected = tab == ImportTab.LINES,
+                        onClick = { tab = ImportTab.LINES },
+                        label = { Text(stringResource(R.string.openai_import_tab_lines)) }
+                    )
+                }
                 Text(
-                    text = stringResource(R.string.openai_account_import_hint),
+                    text = hint,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                OutlinedTextField(
-                    value = raw,
-                    onValueChange = { raw = it },
-                    placeholder = { Text(stringResource(R.string.openai_account_import_placeholder), maxLines = 2) },
-                    minLines = 5,
-                    maxLines = 10,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                if (tab == ImportTab.TOKEN) {
+                    OutlinedTextField(
+                        value = displayName,
+                        onValueChange = { displayName = it },
+                        label = { Text(stringResource(R.string.openai_import_token_name_label)) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = token,
+                        onValueChange = { token = it },
+                        placeholder = { Text(placeholder, maxLines = 2) },
+                        minLines = 3,
+                        maxLines = 6,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                } else {
+                    OutlinedTextField(
+                        value = raw,
+                        onValueChange = { raw = it },
+                        placeholder = { Text(placeholder, maxLines = 2) },
+                        minLines = 5,
+                        maxLines = 10,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             }
         },
         confirmButton = {
-            TextButton(enabled = raw.isNotBlank(), onClick = { onImport(raw) }) {
-                Text(stringResource(R.string.openai_account_import_action))
-            }
+            TextButton(
+                enabled = canSubmit,
+                onClick = {
+                    onImport(
+                        when (tab) {
+                            ImportTab.TOKEN -> importTokenPayload(displayName, token)
+                            else -> raw
+                        }
+                    )
+                }
+            ) { Text(stringResource(R.string.openai_account_import_action)) }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         }
     )
 }
+
+/** Access Token 导入也走统一的文本解析入口，内部统一包成 JSON。 */
+private fun importTokenPayload(displayName: String, token: String): String = JSONObject()
+    .put("email", displayName.trim())
+    .put("access_token", token.trim())
+    .toString()
+
+/** 导出结果：直接展示 JSON，并给「复制」把内容放进剪贴板。 */
+@Composable
+private fun ExportAccountsDialog(json: String, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.openai_account_export_title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                Text(
+                    text = stringResource(R.string.openai_account_export_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = json,
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 12,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(Spacing.sm)
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                copyToClipboard(context, "aicode-openai-accounts", json)
+                Toast.makeText(context, R.string.openai_notice_export_copied, Toast.LENGTH_SHORT).show()
+            }) { Text(stringResource(R.string.common_copy)) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) }
+        }
+    )
+}
+
+private fun copyToClipboard(context: Context, label: String, value: String) {
+    val manager = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+    manager?.setPrimaryClip(ClipData.newPlainText(label, value))
+}
+
+private enum class ImportTab { JSON, TOKEN, LINES }
+
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

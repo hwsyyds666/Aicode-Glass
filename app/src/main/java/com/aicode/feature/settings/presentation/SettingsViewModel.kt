@@ -329,6 +329,7 @@ class SettingsViewModel @Inject constructor(
     private val proxySettingsRepository: ProxySettingsRepository
 ) : ViewModel() {
     private companion object {
+        const val TAG = "SettingsViewModel"
         const val MAX_LOG_LINES = 1200
         const val CALLS_PAGE_SIZE = 10
         const val STATS_PAGE_SIZE = 5
@@ -2237,16 +2238,18 @@ class SettingsViewModel @Inject constructor(
     }
 
     /** 提供商列表长按拖拽排序：同步更新内存顺序（reorderable 库要求 onMove 返回前列表已更新，否则拖拽项闪烁），再异步持久化 sortOrder。 */
-    fun reorderProviders(fromIndex: Int, toIndex: Int) {
-        if (fromIndex == toIndex) return
-        val current = _providers.value
-        if (fromIndex !in current.indices || toIndex !in current.indices) return
-        val reordered = current.toMutableList().apply {
-            add(toIndex, removeAt(fromIndex))
-        }
-        _providers.value = reordered
+    /**
+     * 按 UI 拖拽后的最终顺序整体落盘一次。
+     *
+     * 拖拽过程中只更新调用方的本地顺序（不走进这里）：若每移动一格就写库，
+     * Room 的 flow 会立刻回灌并覆盖 UI 顺序，拖拽状态与 item 位置错位后手势就卡住了。
+     */
+    fun reorderProviders(ordered: List<AIProviderConfig>) {
+        if (ordered.isEmpty()) return
+        _providers.value = ordered
         viewModelScope.launch {
-            repository.reorderProviders(reordered)
+            runCatching { repository.reorderProviders(ordered) }
+                .onFailure { FileLogger.w(TAG, "持久化提供商顺序失败: ${it.message}") }
         }
     }
 

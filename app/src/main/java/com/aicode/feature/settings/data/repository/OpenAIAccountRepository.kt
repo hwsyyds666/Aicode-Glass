@@ -89,6 +89,24 @@ data class OpenAIAccountSummary(
     val localOutputTokens: Long = 0
 )
 
+/** 批量导入结果：成功导入的账号、逐条失败原因、以及只登记了邮箱待登录的条目。 */
+data class OpenAIAccountImportOutcome(
+    val imported: List<OpenAIAccountSummary> = emptyList(),
+    val failures: List<String> = emptyList(),
+    val pendingEmails: List<String> = emptyList()
+)
+
+/** 从某条导入来源解析出的凭据（至少需要 access_token 或 refresh_token）。 */
+private data class ImportedCredential(
+    val idToken: String = "",
+    val accessToken: String = "",
+    val refreshToken: String = "",
+    val clientId: String = "",
+    val email: String = "",
+    val accountId: String = "",
+    val displayName: String = ""
+)
+
 data class OpenAIAccountModel(val slug: String, val displayName: String)
 data class OpenAIAccountRefreshResult(val models: List<OpenAIAccountModel>, val warning: String? = null)
 
@@ -178,6 +196,22 @@ class OpenAIAccountRepository @Inject constructor(
         }
     }
 
+    /**
+     * 一次性快照：返回当前已连接（有凭据）的账号 id。
+     * 供进入 ChatGPT 账号页时批量刷新额度使用，避免为了拿列表而常驻订阅。
+     */
+    suspend fun snapshotAccountIds(): List<String> = accountDao.getAllOnce()
+        .filter { it.encryptedAccessToken.isNotBlank() || it.encryptedRefreshToken.isNotBlank() }
+        .map { it.id }
+
+    /** 某个账号当前可用的模型 slug 列表（用于判断是否需要刷新模型目录）。 */
+    suspend fun modelsOf(accountId: String): List<String> {
+        val account = accountDao.getById(accountId) ?: return emptyList()
+        val catalog = decodeModelCatalog(account.modelCatalogJson)
+        if (catalog.isNotEmpty()) return catalog.map { it.slug }
+        return providerRepository.getProviderById(account.providerId)?.models.orEmpty()
+    }
+
     fun usageLimitMessage(): String = text(R.string.openai_error_usage_limit)
     fun noAvailableAccountMessage(model: String): String = text(R.string.openai_error_no_available_account, model)
     fun invalidProviderTypeMessage(): String = text(R.string.openai_error_missing_provider_type)
@@ -252,8 +286,10 @@ class OpenAIAccountRepository @Inject constructor(
             val server = ServerSocket()
             try {
                 server.reuseAddress = false
-                server.bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), port), 1)
-                server.soTimeout = CALLBACK_TIMEOUT_MS
+                // backlog 给足：浏览器会先建预连接/探针连接，队列太短会把真正的回调挤掉
+                server.bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), port), CALLBACK_BACKLOG)
+                // 不设 accept 超时：等待窗口由调用方的 withTimeout 控制，超时后关闭 socket 中断 accept
+                server.soTimeout = 0
                 return server
             } catch (error: Exception) {
                 lastError = error
@@ -310,16 +346,33 @@ class OpenAIAccountRepository @Inject constructor(
         }
     }
 
-    /** Completes a pending login from the URL the browser finally landed on (or just its query part). */
+    /**
+     * Completes a pending login from whatever the user pasted: the full URL the browser finally
+     * landed on, just its `?code=…&state=…` part, or a bare authorization code.
+     *
+     * A bare code is accepted because some browsers collapse the address bar and users only manage
+     * to copy the code itself; the pending session's state is filled in for it. When the pasted text
+     * carries a state, it is still checked, so a code from another session cannot be replayed.
+     */
     suspend fun submitLoginCallback(sessionId: String, rawInput: String): Boolean {
         val pending = pendingLogins[sessionId]
             ?: throw OpenAIAccountException(text(R.string.openai_error_login_expired))
         val raw = rawInput.trim()
         val query = raw.substringAfter('?', raw).substringBefore('#').trim()
         if (query.isBlank()) throw OpenAIAccountException(text(R.string.openai_error_callback_invalid))
-        val callback = OpenAIOAuthProtocol.parseCallbackTarget("${OpenAIOAuthProtocol.CALLBACK_PATH}?$query")
-            ?: throw OpenAIAccountException(text(R.string.openai_error_callback_invalid))
-        if (!OpenAIOAuthProtocol.constantTimeEquals(callback.value("state").orEmpty(), pending.state)) {
+
+        val values: Map<String, String> = if (query.contains('=')) {
+            OpenAIOAuthProtocol.parseCallbackTarget("${OpenAIOAuthProtocol.CALLBACK_PATH}?$query")?.values
+                ?: throw OpenAIAccountException(text(R.string.openai_error_callback_invalid))
+        } else {
+            mapOf("code" to query, "state" to pending.state)
+        }
+        val callback = OpenAIOAuthProtocol.Callback(values)
+
+        val pastedState = callback.value("state").orEmpty()
+        if (pastedState.isNotBlank() &&
+            !OpenAIOAuthProtocol.constantTimeEquals(pastedState, pending.state)
+        ) {
             throw OpenAIAccountException(text(R.string.openai_error_auth_state_mismatch))
         }
         callback.value("error")?.takeIf(String::isNotBlank)?.let { error ->
@@ -330,6 +383,9 @@ class OpenAIAccountRepository @Inject constructor(
                     error
                 )
             )
+        }
+        if (callback.value("code").isNullOrBlank()) {
+            throw OpenAIAccountException(text(R.string.openai_error_auth_code_missing))
         }
         return pending.callback.complete(callback)
     }
@@ -344,17 +400,192 @@ class OpenAIAccountRepository @Inject constructor(
      * Imports an existing ChatGPT credential (Codex CLI `auth.json`, or a JSON object carrying
      * id_token / access_token / refresh_token). No browser round-trip is involved.
      */
+    /**
+     * Imports one existing ChatGPT credential (Codex CLI `auth.json`, a Web Session export, or a
+     * JSON object carrying id_token / access_token / refresh_token). No browser round-trip.
+     */
     suspend fun importAccountFromJson(raw: String): OpenAIAccountSummary {
-        val json = runCatching { JSONObject(raw) }.getOrNull()
-            ?: throw OpenAIAccountException(text(R.string.openai_error_import_invalid))
-        val tokens = json.optJSONObject("tokens") ?: json
-        val idToken = tokens.optString("id_token").ifBlank { json.optString("id_token") }
-        val accessToken = tokens.optString("access_token").ifBlank { json.optString("access_token") }
-        val refreshToken = tokens.optString("refresh_token").ifBlank { json.optString("refresh_token") }
-        val clientId = tokens.optString("client_id").ifBlank { json.optString("client_id") }
-            .ifBlank { OpenAIOAuthProtocol.CODEX_CLI_CLIENT_ID }
-        if (accessToken.isBlank()) throw OpenAIAccountException(text(R.string.openai_error_import_missing_token))
+        val outcome = importAccountsFromText(raw)
+        return outcome.imported.firstOrNull()
+            ?: throw OpenAIAccountException(
+                outcome.failures.firstOrNull() ?: text(R.string.openai_error_import_invalid)
+            )
+    }
 
+    /**
+     * 批量导入入口，自动识别与 cockpit-tools 一致的各类凭据来源：
+     *
+     *  - Codex CLI `auth.json`：`{"tokens": {"id_token"/"access_token"/"refresh_token"}}`
+     *  - Web Session 导出：`{"session": {...}}`，或顶层 `{"accessToken": ...}`
+     *  - 顶层就是凭据的 JSON 对象（snake_case / camelCase 都收）
+     *  - JSON 数组，或逐行一个 JSON（可混合）——一次导入多个账号
+     *  - 纯文本 token 行（按 access token 处理）
+     *  - 快速待授权行：`邮箱----密码----2FA秘钥----邮件地址`（3 段也可，仅登记邮箱）
+     */
+    suspend fun importAccountsFromText(raw: String): OpenAIAccountImportOutcome {
+        val content = raw.trim()
+        val imported = mutableListOf<OpenAIAccountSummary>()
+        val failures = mutableListOf<String>()
+        val pendingEmails = linkedSetOf<String>()
+        if (content.isEmpty()) {
+            failures += text(R.string.openai_error_import_empty)
+            return OpenAIAccountImportOutcome(imported, failures, pendingEmails.toList())
+        }
+        for ((index, source) in splitImportSources(content).withIndex()) {
+            val email = pendingEmailFromLine(source)
+            if (email != null) {
+                pendingEmails += email
+                continue
+            }
+            val credential = parseCredentialFromSource(source)
+            if (credential == null) {
+                failures += text(R.string.openai_error_import_line_failed, (index + 1).toString(), "")
+                continue
+            }
+            val summary = runCatching { persistImportedAccount(credential) }.getOrElse { error ->
+                if (error is CancellationException) throw error
+                val reason = error.message?.takeIf(String::isNotBlank).orEmpty()
+                failures += text(R.string.openai_error_import_line_failed, (index + 1).toString(), reason)
+                null
+            }
+            if (summary != null) imported += summary
+        }
+        return OpenAIAccountImportOutcome(imported, failures, pendingEmails.toList())
+    }
+
+    /** 用 access token 直接建号（对应 cockpit 的「命名 token 导入」）。 */
+    suspend fun importAccessTokenAccount(displayName: String, accessToken: String): OpenAIAccountSummary {
+        val token = accessToken.trim()
+        if (!looksLikeToken(token)) throw OpenAIAccountException(text(R.string.openai_error_import_missing_token))
+        return persistImportedAccount(
+            ImportedCredential(
+                idToken = "",
+                accessToken = token,
+                refreshToken = "",
+                clientId = OpenAIOAuthProtocol.CODEX_CLI_CLIENT_ID,
+                email = "",
+                accountId = "",
+                displayName = displayName.trim()
+            )
+        )
+    }
+
+    /** 导出全部账号为 JSON，可直接再次导入回本应用。 */
+    suspend fun exportAccounts(): String {
+        val array = JSONArray()
+        accountDao.getAllOnce().forEach { account ->
+            array.put(
+                JSONObject()
+                    .put("email", account.email)
+                    .put("displayName", account.displayName)
+                    .put("planType", account.planType.orEmpty())
+                    .put("clientId", account.clientId)
+                    .put("scopes", account.scopes)
+                    .put(
+                        "tokens",
+                        JSONObject()
+                            .put("id_token", decryptToken(account.encryptedIdToken))
+                            .put("access_token", decryptToken(account.encryptedAccessToken))
+                            .put("refresh_token", decryptToken(account.encryptedRefreshToken))
+                    )
+            )
+        }
+        return array.toString(2)
+    }
+
+    /** 把一段文本切成若干可导入来源：JSON 数组展开、逐行 JSON、或整行 token。 */
+    private fun splitImportSources(content: String): List<String> = when {
+        content.startsWith("[") -> {
+            val array = runCatching { JSONArray(content) }.getOrNull()
+            if (array == null) {
+                listOf(content)
+            } else {
+                (0 until array.length()).map { index -> array.opt(index)?.toString().orEmpty() }
+        }
+        }
+        content.startsWith("{") -> listOf(content)
+        else -> content.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
+    }
+
+    /** 解析一条来源：优先按 JSON 凭据对象处理，否则整段当 access token。 */
+    private fun parseCredentialFromSource(source: String): ImportedCredential? {
+        val json = runCatching { JSONObject(source) }.getOrNull()
+        if (json != null) return parseCredentialJson(json)
+        return parseCredentialText(source)
+    }
+
+    /**
+     * 从一个凭据 JSON 里取出 token 三元组。
+     * 兼容 Codex CLI 的 `tokens` 容器、Web Session 的 `session` 容器，以及顶层的
+     * snake_case / camelCase 字段。
+     */
+    private fun parseCredentialJson(json: JSONObject): ImportedCredential? {
+        val container = json.optJSONObject("tokens")
+            ?: json.optJSONObject("session")
+            ?: json.optJSONObject("auth")
+            ?: json
+
+        fun read(vararg keys: String): String = keys.firstNotNullOfOrNull { key ->
+            container.optString(key).takeIf { it.isNotBlank() }
+                ?: json.optString(key).takeIf { it.isNotBlank() }
+        }.orEmpty()
+
+        val idToken = read("id_token", "idToken")
+        val accessToken = read("access_token", "accessToken")
+        val refreshToken = read("refresh_token", "refreshToken")
+        if (idToken.isBlank() && accessToken.isBlank() && refreshToken.isBlank()) return null
+        return ImportedCredential(
+            idToken = idToken,
+            accessToken = accessToken,
+            refreshToken = refreshToken,
+            clientId = read("client_id", "clientId").ifBlank { OpenAIOAuthProtocol.CODEX_CLI_CLIENT_ID },
+            email = read("email", "chatgpt_user_email"),
+            accountId = read("account_id", "chatgpt_account_id"),
+            displayName = ""
+        )
+    }
+
+    /** 裸 token 文本：长度够且不含空白即按 access token 收下。 */
+    private fun parseCredentialText(value: String): ImportedCredential? {
+        val token = value.trim()
+        if (!looksLikeToken(token)) return null
+        return ImportedCredential(
+            idToken = "",
+            accessToken = token,
+            refreshToken = "",
+            clientId = OpenAIOAuthProtocol.CODEX_CLI_CLIENT_ID,
+            email = "",
+            accountId = "",
+            displayName = ""
+        )
+    }
+
+    private fun looksLikeToken(value: String): Boolean =
+        value.length >= 20 && value.none { it.isWhitespace() }
+
+    /**
+     * 快速待授权行：`邮箱----账号密码----2FA秘钥----邮件地址`，3 段（无邮件地址）也可。
+     * 命中后返回邮箱；这类条目没有可用 token，需用户登录后才生效。
+     */
+    private fun pendingEmailFromLine(line: String): String? {
+        if (!line.contains("----")) return null
+        val parts = line.split("----").map { it.trim() }
+        if (parts.size !in 3..4) return null
+        val email = parts[0]
+        if (!email.contains('@')) return null
+        val (local, domain) = email.split('@', limit = 2).let {
+            it.getOrNull(0).orEmpty() to it.getOrNull(1).orEmpty()
+        }
+        if (local.isEmpty() || !domain.contains('.')) return null
+        return email
+    }
+
+
+    /** 把解析出的凭据写入本机加密存储，并建好配套 provider。 */
+    private suspend fun persistImportedAccount(credential: ImportedCredential): OpenAIAccountSummary {
+        if (credential.accessToken.isBlank() && credential.refreshToken.isBlank()) {
+            throw OpenAIAccountException(text(R.string.openai_error_import_missing_token))
+        }
         val savedIds = accountDao.getAllOnce().mapTo(mutableSetOf(), OpenAIAccountEntity::id)
         if (!OpenAIAccountSelectionPolicy.canConnect(savedIds, null)) {
             throw OpenAIAccountException(
@@ -363,38 +594,47 @@ class OpenAIAccountRepository @Inject constructor(
         }
         val hostId = stableHostId()
         val now = System.currentTimeMillis()
-        val claims = decodeIdTokenClaims(idToken)
+        val claims = decodeIdTokenClaims(credential.idToken)
         val auth = claims?.optJSONObject("https://api.openai.com/auth")
         val subject = claims?.optString("sub")?.takeIf(String::isNotBlank)
-            ?: tokens.optString("account_id").takeIf(String::isNotBlank)
-            ?: json.optString("account_id").takeIf(String::isNotBlank)
+            ?: credential.accountId.takeIf(String::isNotBlank)
             ?: "imported-${UUID.randomUUID()}"
         val email = claims?.optString("email")?.takeIf(String::isNotBlank)
             ?: auth?.optString("chatgpt_user_email")
-            ?: ""
+            ?: credential.email
         val name = claims?.optString("name")?.takeIf(String::isNotBlank)
-            ?: email.ifBlank { text(R.string.openai_account_default_name) }
+            ?: email.ifBlank { credential.displayName.ifBlank { text(R.string.openai_account_default_name) } }
         val existing = accountDao.getAllOnce().firstOrNull { it.subject == subject }
         val accountId = existing?.id ?: UUID.randomUUID().toString()
         val providerId = existing?.providerId ?: "$PROVIDER_ID_PREFIX$accountId"
-        val models = runCatching { fetchModelCatalog(accessToken) }.getOrDefault(emptyList())
-        val scopes = listOf("openid", "profile", "email", "offline_access", "resource.invoke", OpenAIOAuthProtocol.PLAN_USAGE_SCOPE)
-            .sorted().joinToString(" ")
+        val models = if (credential.accessToken.isBlank()) {
+            emptyList()
+        } else {
+            runCatching { fetchModelCatalog(credential.accessToken) }.getOrDefault(emptyList())
+        }
+        val scopes = listOf(
+            "openid", "profile", "email", "offline_access",
+            "resource.invoke", OpenAIOAuthProtocol.PLAN_USAGE_SCOPE
+        ).sorted().joinToString(" ")
         val account = OpenAIAccountEntity(
             id = accountId,
             providerId = providerId,
             subject = subject,
             email = email,
             displayName = name,
-            clientId = clientId,
-            encryptedAccessToken = KeystoreCipher.encryptString(accessToken),
-            encryptedRefreshToken = KeystoreCipher.encryptString(refreshToken),
-            encryptedIdToken = KeystoreCipher.encryptString(idToken),
+            clientId = credential.clientId,
+            encryptedAccessToken = KeystoreCipher.encryptString(credential.accessToken),
+            encryptedRefreshToken = KeystoreCipher.encryptString(credential.refreshToken),
+            encryptedIdToken = KeystoreCipher.encryptString(credential.idToken),
             scopes = scopes,
             accessTokenExpiresAt = now + TimeUnit.HOURS.toMillis(1),
             hostId = hostId,
             modelCatalogJson = encodeModelCatalog(models),
-            status = OpenAIAccountEntity.STATUS_CONNECTED,
+            status = if (credential.refreshToken.isBlank()) {
+                OpenAIAccountEntity.STATUS_NEEDS_LOGIN
+            } else {
+                OpenAIAccountEntity.STATUS_CONNECTED
+            },
             lastError = null,
             chatgptAccountId = auth?.optString("chatgpt_account_id")?.takeIf(String::isNotBlank),
             createdAt = existing?.createdAt ?: now,
@@ -402,7 +642,8 @@ class OpenAIAccountRepository @Inject constructor(
         )
         val oldProvider = providerRepository.getProviderById(providerId)
         val modelSlugs = models.map(OpenAIAccountModel::slug)
-        val selected = oldProvider?.effectiveModel?.takeIf { it in modelSlugs } ?: modelSlugs.firstOrNull().orEmpty()
+        val selected = oldProvider?.effectiveModel?.takeIf { it in modelSlugs }
+            ?: modelSlugs.firstOrNull().orEmpty()
         val provider = AIProviderConfig(
             id = providerId,
             name = accountProviderName(account),
@@ -412,7 +653,7 @@ class OpenAIAccountRepository @Inject constructor(
             defaultModel = selected,
             models = modelSlugs,
             selectedModel = selected,
-            isEnabled = oldProvider?.isEnabled ?: true,
+            isEnabled = credential.refreshToken.isNotBlank() && (oldProvider?.isEnabled ?: true),
             useResponseApi = true,
             sortOrder = oldProvider?.sortOrder ?: -1
         )
@@ -435,12 +676,13 @@ class OpenAIAccountRepository @Inject constructor(
             displayName = account.displayName,
             status = account.status,
             lastError = account.lastError,
-            planUsageAuthorized = true,
+            planUsageAuthorized = credential.refreshToken.isNotBlank(),
             enabled = provider.isEnabled,
             models = models,
             selectedModel = selected
         )
     }
+
 
     private fun decodeIdTokenClaims(idToken: String): JSONObject? {
         if (idToken.isBlank()) return null
@@ -1139,25 +1381,52 @@ class OpenAIAccountRepository @Inject constructor(
         }
     }
 
+    /**
+     * Accepts loopback connections until the real OAuth callback arrives.
+     *
+     * Chrome and WebView open speculative connections (and send `/favicon.ico`) before or around
+     * the redirect. Those must not abort the login: any unusable connection is answered and skipped,
+     * and only a callback whose `state` matches completes the wait.
+     */
     private suspend fun awaitCallback(server: ServerSocket, expectedState: String): OpenAIOAuthProtocol.Callback {
         while (true) {
-            val socket = server.accept()
-            socket.use { client ->
-                client.soTimeout = CALLBACK_CLIENT_READ_TIMEOUT_MS
-                if (!client.inetAddress.isLoopbackAddress) return@use
-                val requestTarget = readHttpRequestTarget(client)
-                if (requestTarget == null) {
-                    writeCallbackResponse(client, 400)
-                    return@use
-                }
-                val callback = OpenAIOAuthProtocol.parseCallbackTarget(requestTarget)
-                if (callback == null || !OpenAIOAuthProtocol.constantTimeEquals(callback.value("state").orEmpty(), expectedState)) {
-                    writeCallbackResponse(client, 400)
-                    return@use
-                }
-                writeCallbackResponse(client, 200)
-                return callback
+            val socket = try {
+                server.accept()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                FileLogger.w(TAG, "Codex callback accept aborted: ${error.message}")
+                throw OpenAIAccountException(text(R.string.openai_error_callback_failed))
             }
+            val handled = try {
+                socket.use { client ->
+                    client.soTimeout = CALLBACK_CLIENT_READ_TIMEOUT_MS
+                    if (!client.inetAddress.isLoopbackAddress) return@use null
+                    val requestTarget = readHttpRequestTarget(client)
+                    if (requestTarget == null) {
+                        writeCallbackResponse(client, 400)
+                        return@use null
+                    }
+                    if (requestTarget.substringBefore('?') != OpenAIOAuthProtocol.CALLBACK_PATH) {
+                        // 浏览器预取 /favicon.ico 之类的探针请求
+                        writeCallbackResponse(client, 404)
+                        return@use null
+                    }
+                    val callback = OpenAIOAuthProtocol.parseCallbackTarget(requestTarget)
+                    if (callback == null ||
+                        !OpenAIOAuthProtocol.constantTimeEquals(callback.value("state").orEmpty(), expectedState)
+                    ) {
+                        writeCallbackResponse(client, 400)
+                        return@use null
+                    }
+                    writeCallbackResponse(client, 200)
+                    callback
+                }
+            } catch (error: Exception) {
+                FileLogger.w(TAG, "Codex callback connection failed: ${error.message}")
+                null
+            }
+            if (handled != null) return handled
         }
     }
 
@@ -1290,6 +1559,7 @@ class OpenAIAccountRepository @Inject constructor(
         /** Official Codex login callback ports; 1455 primary, 1457 is Codex's own fallback. */
         private val CALLBACK_PORTS = intArrayOf(1455, 1457)
         private const val CALLBACK_TIMEOUT_MS = 180_000
+        private const val CALLBACK_BACKLOG = 32
         private const val LOGIN_SESSION_WINDOW_MS = 180_000L
         private const val CALLBACK_CLIENT_READ_TIMEOUT_MS = 5_000
         private const val MAX_CALLBACK_REQUEST_BYTES = 16 * 1024

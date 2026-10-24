@@ -27,6 +27,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
@@ -59,12 +63,17 @@ internal fun ProvidersSection(
     providers: List<AIProviderConfig>,
     onEdit: (AIProviderConfig) -> Unit,
     onDelete: (AIProviderConfig) -> Unit,
-    onReorder: (fromIndex: Int, toIndex: Int) -> Unit,
+    onReorder: (List<AIProviderConfig>) -> Unit,
     onOpenOpenAIAccounts: () -> Unit
 ) {
+    // 拖拽期间顺序完全由本地 state 掌控（与提示词页一致）：若每移动一格就落盘，
+    // Room 的 flow 回灌会覆盖 UI 顺序，AnchoredDraggable 的位置与实际 item 错位后手势就卡住。
+    var localProviders by remember { mutableStateOf(providers) }
+    LaunchedEffect(providers) { localProviders = providers }
+
     val lazyListState = rememberLazyListState()
     val reorderableState = rememberReorderableLazyListState(lazyListState) { from, to ->
-        onReorder(from.index, to.index)
+        localProviders = localProviders.toMutableList().apply { add(to.index, removeAt(from.index)) }
     }
     val hapticFeedback = LocalHapticFeedback.current
     LazyColumn(
@@ -85,7 +94,7 @@ internal fun ProvidersSection(
             }
         }
         itemsIndexed(
-            items = providers,
+            items = localProviders,
             key = { _, provider -> provider.id }
         ) { _, provider ->
             val managedProfile = OpenAIAccountRepository.isAccountProvider(provider)
@@ -123,7 +132,10 @@ internal fun ProvidersSection(
                         managedProfile = managedProfile,
                         dragModifier = if (managedProfile) Modifier else Modifier.longPressDraggableHandle(
                             onDragStarted = { hapticFeedback.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate) },
-                            onDragStopped = { hapticFeedback.performHapticFeedback(HapticFeedbackType.GestureEnd) }
+                            onDragStopped = {
+                                hapticFeedback.performHapticFeedback(HapticFeedbackType.GestureEnd)
+                                onReorder(localProviders)
+                            }
                         )
                     )
                 }

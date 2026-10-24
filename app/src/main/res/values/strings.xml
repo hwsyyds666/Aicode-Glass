@@ -2002,4 +2002,25 @@
     <string name="checkpoint_rewind_workspace_restored">工作区快照：已还原 %1$d 个文件。</string>
     <string name="checkpoint_rewind_git_restored">Git 快照：已还原 %1$d 个文件。</string>
     <string name="chat_action_regenerate">重新生成</string>
+    <string name="openai_import_tab_json">粘贴 JSON</string>
+    <string name="openai_import_tab_token">Access Token</string>
+    <string name="openai_import_tab_lines">批量文本</string>
+    <string name="openai_import_json_hint">支持 Codex CLI 的 auth.json、Web Session 导出的 session JSON、顶层带 id_token/access_token/refresh_token 的对象，以及 JSON 数组（一次导入多个）。</string>
+    <string name="openai_import_json_placeholder">{"tokens":{"id_token":"…","access_token":"…","refresh_token":"…"}}</string>
+    <string name="openai_import_token_hint">给一段 access token 起个名字直接建号，适合只有 token、没有完整配置文件的场景。</string>
+    <string name="openai_import_token_name_label">账号名（可选）</string>
+    <string name="openai_import_token_value_placeholder">在此粘贴 access token</string>
+    <string name="openai_import_lines_hint">每行一条：一个 JSON、一个裸 token，或「邮箱----密码----2FA秘钥----邮件地址」（3 段也可）。待授权行只登记邮箱，需登录后生效。</string>
+    <string name="openai_import_lines_placeholder">user@example.com----password----2FAKEY----mail@example.com</string>
+    <string name="openai_notice_no_accounts">还没有账号，请先添加或导入。</string>
+    <string name="openai_warning_usage_refresh_partial">%1$d/%2$d 个账号刷新失败，其余已更新。</string>
+    <string name="openai_error_no_pending_login">当前没有进行中的登录，请重新点击「添加账号」。</string>
+    <string name="openai_error_import_empty">导入内容为空。</string>
+    <string name="openai_error_import_line_failed">第 %1$s 条导入失败：%2$s</string>
+    <string name="openai_account_export_action">导出账号</string>
+    <string name="openai_account_export_title">导出账号</string>
+    <string name="openai_account_export_hint">下面是可再次导入的 JSON，含各账号的令牌；请妥善保管，不要分享给他人。</string>
+    <string name="openai_notice_export_copied">导出内容已复制到剪贴板</string>
+    <string name="openai_notice_import_result">成功导入 %1$d 个账号</string>
+    <string name="openai_notice_import_pending">待登录邮箱：%1$s</string>
 </resources>
