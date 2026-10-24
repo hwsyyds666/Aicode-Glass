@@ -54,7 +54,9 @@ internal fun ModelIconButton(
     modifier: Modifier = Modifier,
     forceOpenSheet: Boolean = false,
     onSelectSuccessInOnboarding: (() -> Unit)? = null,
-    onSheetDismiss: (() -> Unit)? = null
+    onSheetDismiss: (() -> Unit)? = null,
+    accountModelInfo: Map<String, com.aicode.feature.settings.presentation.component.AccountModelInfo> = emptyMap(),
+    onOpenRefresh: (() -> Unit)? = null
 ) {
     var showSheet by remember { mutableStateOf(false) }
     val effectiveShowSheet = showSheet || forceOpenSheet
@@ -69,6 +71,8 @@ internal fun ModelIconButton(
             currentProviderId = provider?.id ?: "",
             currentModel = provider?.effectiveModel ?: "",
             modelMetadata = modelMetadata,
+            accountModelInfo = accountModelInfo,
+            onOpenRefresh = onOpenRefresh,
             onSelect = { pId, model ->
                 onSelectModel(pId, model)
                 showSheet = false
@@ -185,6 +189,7 @@ private fun ReasoningEffort.labelRes(): Int = when (this) {
 
 /**
  * 模型选择弹窗：复用设置页默认模型的 [ModelSelectionSheet]（iOS 胶囊搜索框、提供商分组卡片、能力 Tag）。
+ * ChatGPT 账号 provider 按订阅等级排在顶部，组标题带档位徽章；打开时顺带做一次模型目录 TTL 刷新。
  */
 @Composable
 internal fun ModelSheet(
@@ -193,7 +198,9 @@ internal fun ModelSheet(
     currentModel: String,
     modelMetadata: Map<String, ModelMetadata>,
     onSelect: (String, String) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    accountModelInfo: Map<String, com.aicode.feature.settings.presentation.component.AccountModelInfo> = emptyMap(),
+    onOpenRefresh: (() -> Unit)? = null
 ) {
     ModelSelectionSheet(
         title = stringResource(R.string.common_model),
@@ -202,6 +209,8 @@ internal fun ModelSheet(
         currentProviderId = currentProviderId,
         currentModel = currentModel,
         modelMetadata = modelMetadata,
+        accountModelInfo = accountModelInfo,
+        onOpenRefresh = onOpenRefresh,
         onSelect = onSelect,
         onClear = null,
         onDismiss = onDismiss

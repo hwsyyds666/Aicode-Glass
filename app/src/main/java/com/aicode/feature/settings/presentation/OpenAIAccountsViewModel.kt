@@ -115,6 +115,8 @@ class OpenAIAccountsViewModel @Inject constructor(
                             .onSuccess { result -> result.warning?.let { warnings += it } }
                     }
                 }
+                // 模型目录 TTL 刷新：官方上/下架模型后，打开账号页顺带更新列表（静默，失败保留旧列表）
+                runCatching { repository.refreshStaleAccountModels() }
                 message.value = buildString {
                     if (failed == 0) {
                         append(context.getString(R.string.openai_notice_usage_refreshed))

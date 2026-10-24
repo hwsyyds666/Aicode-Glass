@@ -44,6 +44,7 @@ import com.aicode.feature.settings.data.remote.ModelMetadataService
 import com.aicode.feature.settings.data.remote.ModelTestResult
 import com.aicode.feature.settings.data.remote.UpdateCheckResult
 import com.aicode.feature.settings.data.remote.UpdateCheckService
+import com.aicode.feature.settings.data.repository.OpenAIAccountRepository
 import com.aicode.feature.settings.data.repository.UpdateCheckSettingsRepository
 import com.aicode.feature.settings.data.repository.UpdateChannel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -81,6 +82,7 @@ import com.aicode.feature.settings.data.repository.ImageGenModelSettingsReposito
 import com.aicode.feature.settings.data.repository.VisionModelSettingsRepository
 import com.aicode.feature.workspace.domain.model.RemoteConnection
 import com.aicode.feature.workspace.domain.repository.RemoteRepository
+import com.aicode.feature.settings.presentation.component.AccountModelInfo
 import com.aicode.feature.settings.domain.model.AIProviderConfig
 import com.aicode.feature.settings.domain.model.DashboardContext
 import com.aicode.feature.settings.domain.model.ModelMetadata
@@ -326,7 +328,8 @@ class SettingsViewModel @Inject constructor(
     private val updateCheckService: UpdateCheckService,
     private val providerDashboardRunner: ProviderDashboardRunner,
     private val terminalSettingsRepository: TerminalSettingsRepository,
-    private val proxySettingsRepository: ProxySettingsRepository
+    private val proxySettingsRepository: ProxySettingsRepository,
+    private val openAIAccountRepository: OpenAIAccountRepository
 ) : ViewModel() {
     private companion object {
         const val TAG = "SettingsViewModel"
@@ -367,6 +370,28 @@ class SettingsViewModel @Inject constructor(
 
     /** 全局代理配置快照（SharedPreferences 即时读写，改即对新连接生效）。 */
     val proxyConfig: StateFlow<ProxyConfig> = proxySettingsRepository.config
+
+    // ── ChatGPT 账号模型目录（模型选择器排序 / 免费付费标签 / TTL 刷新）──
+
+    /**
+     * ChatGPT 账号 provider 的档位信息：providerId → [AccountModelInfo]。
+     * 由账号目录实时推导，账号刷新后自动更新。
+     */
+    val accountModelInfo: StateFlow<Map<String, AccountModelInfo>> = openAIAccountRepository.observeAccounts()
+        .map { accounts ->
+            accounts.associate { account ->
+                account.providerId to AccountModelInfo(
+                    planType = account.planType,
+                    paidOnlyBySlug = account.models.associate { it.slug to it.paidOnly }
+                )
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
+    /** 打开模型选择器时调用：目录超过 TTL 的账号静默重新拉取官方模型列表。 */
+    fun refreshAccountModelsIfStale() {
+        viewModelScope.launch { openAIAccountRepository.refreshStaleAccountModels() }
+    }
 
     /** 代理连通性测试状态。 */
     sealed interface ProxyTestUiState {

@@ -89,7 +89,9 @@ data class ChatGptAccountTarget(
     val accountId: String,
     val providerId: String,
     val accessToken: String,
-    val email: String
+    val email: String,
+    /** ChatGPT 账号 ID（id_token 的 chatgpt_account_id），Codex 后端据此定位账号；为空时请求头不带该字段。 */
+    val chatgptAccountId: String? = null
 )
 
 /**

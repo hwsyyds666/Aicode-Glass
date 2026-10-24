@@ -116,7 +116,11 @@ internal fun DefaultModelsSection(
     /** 上下文窗口统一值是否生效（仅用于副标题展示，开关本身在二级页里）。 */
     contextWindowEnabled: Boolean,
     /** 点击整行进入二级设置页（开关与三个窗口值都在二级页里配置）。 */
-    onOpenContextWindow: () -> Unit
+    onOpenContextWindow: () -> Unit,
+    /** ChatGPT 账号 provider 的档位信息（providerId → 档位）；选择器排序与免费/付费标签用。 */
+    accountModelInfo: Map<String, AccountModelInfo> = emptyMap(),
+    /** 打开模型选择器时触发账号模型目录 TTL 刷新。 */
+    onOpenRefresh: (() -> Unit)? = null
 ) {
     var showVisionSheet by remember { mutableStateOf(false) }
     var showCompactionSheet by remember { mutableStateOf(false) }
@@ -414,7 +418,9 @@ internal fun DefaultModelsSection(
                 onClearVisionModel()
                 showVisionSheet = false
             },
-            onDismiss = { showVisionSheet = false }
+            onDismiss = { showVisionSheet = false },
+            accountModelInfo = accountModelInfo,
+            onOpenRefresh = onOpenRefresh
         )
     }
 
@@ -434,7 +440,9 @@ internal fun DefaultModelsSection(
                 onClearCompactionModel()
                 showCompactionSheet = false
             },
-            onDismiss = { showCompactionSheet = false }
+            onDismiss = { showCompactionSheet = false },
+            accountModelInfo = accountModelInfo,
+            onOpenRefresh = onOpenRefresh
         )
     }
 
@@ -454,7 +462,9 @@ internal fun DefaultModelsSection(
                 onClearTitleModel()
                 showTitleSheet = false
             },
-            onDismiss = { showTitleSheet = false }
+            onDismiss = { showTitleSheet = false },
+            accountModelInfo = accountModelInfo,
+            onOpenRefresh = onOpenRefresh
         )
     }
 
@@ -474,7 +484,9 @@ internal fun DefaultModelsSection(
                 onClearImageGenModel()
                 showImageGenSheet = false
             },
-            onDismiss = { showImageGenSheet = false }
+            onDismiss = { showImageGenSheet = false },
+            accountModelInfo = accountModelInfo,
+            onOpenRefresh = onOpenRefresh
         )
     }
 
@@ -494,7 +506,9 @@ internal fun DefaultModelsSection(
                 onClearReviewerModel()
                 showReviewerSheet = false
             },
-            onDismiss = { showReviewerSheet = false }
+            onDismiss = { showReviewerSheet = false },
+            accountModelInfo = accountModelInfo,
+            onOpenRefresh = onOpenRefresh
         )
     }
 
@@ -508,7 +522,9 @@ internal fun DefaultModelsSection(
             modelMetadata = modelMetadata,
             onSelect = { pid, model -> onSelectSubAgentModel(SubAgentModelTier.FAST, pid, model); showFastSubAgentSheet = false },
             onClear = { onClearSubAgentModel(SubAgentModelTier.FAST); showFastSubAgentSheet = false },
-            onDismiss = { showFastSubAgentSheet = false }
+            onDismiss = { showFastSubAgentSheet = false },
+            accountModelInfo = accountModelInfo,
+            onOpenRefresh = onOpenRefresh
         )
     }
 
@@ -522,7 +538,9 @@ internal fun DefaultModelsSection(
             modelMetadata = modelMetadata,
             onSelect = { pid, model -> onSelectSubAgentModel(SubAgentModelTier.POWER, pid, model); showPowerSubAgentSheet = false },
             onClear = { onClearSubAgentModel(SubAgentModelTier.POWER); showPowerSubAgentSheet = false },
-            onDismiss = { showPowerSubAgentSheet = false }
+            onDismiss = { showPowerSubAgentSheet = false },
+            accountModelInfo = accountModelInfo,
+            onOpenRefresh = onOpenRefresh
         )
     }
 }
@@ -723,8 +741,50 @@ private fun reasoningEffortLabel(value: String): Int = when (value.lowercase()) 
 }
 
 /**
+ * ChatGPT 账号 provider 的档位信息（模型选择器排序与免费/付费标签用）。
+ *
+ * @param planType 账号订阅档位（free/plus/pro/team/business/enterprise…），未知为 null
+ * @param paidOnlyBySlug slug → 是否付费专属模型
+ */
+data class AccountModelInfo(
+    val planType: String?,
+    val paidOnlyBySlug: Map<String, Boolean>
+)
+
+/** 订阅档位排序权重：付费号按等级排在页面顶上，免费号沉底；未知档位按中低档处理。 */
+internal fun planTierRank(planType: String?): Int = when (planType?.trim()?.lowercase()) {
+    "enterprise" -> 60
+    "business" -> 50
+    "education" -> 45
+    "pro" -> 40
+    "team" -> 30
+    "plus" -> 20
+    "go" -> 10
+    "free" -> 0
+    else -> 15
+}
+
+/** 账号 provider 档位徽章文案（未知档位显示「Unknown」）。 */
+@Composable
+internal fun planBadgeLabel(planType: String?): String = when (planType?.trim()?.lowercase()) {
+    "free" -> stringResource(R.string.openai_quota_plan_free)
+    "go" -> stringResource(R.string.openai_quota_plan_go)
+    "plus" -> stringResource(R.string.openai_quota_plan_plus)
+    "pro" -> stringResource(R.string.openai_quota_plan_pro)
+    "team" -> stringResource(R.string.openai_quota_plan_team)
+    "business" -> stringResource(R.string.openai_quota_plan_business)
+    "enterprise" -> stringResource(R.string.openai_quota_plan_enterprise)
+    "education" -> stringResource(R.string.openai_quota_plan_education)
+    else -> stringResource(R.string.openai_quota_plan_unknown)
+}
+
+/**
  * 模型选择弹窗：风格与拉取模型弹窗保持一致（iOS 胶囊搜索框、提供商分组卡片、能力 Tag）。
  * 识图模型、压缩模型与主页聊天模型共用此组件，仅文案不同；右上角「重置」清除专用模型配置（回退跟随聊天模型），主页场景传 null 不显示。
+ *
+ * ChatGPT 账号 provider 恒驻列表顶部并按订阅等级降序（付费号在上），组标题带档位徽章；
+ * 付费账号下的免费档模型带「免费可用」标签（提示可改走免费号省付费额度），付费专属模型带「付费专属」标签。
+ * [onOpenRefresh] 在弹窗打开时触发一次账号模型目录 TTL 刷新（官方上/下架模型后列表随之更新）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -737,13 +797,18 @@ internal fun ModelSelectionSheet(
     modelMetadata: Map<String, ModelMetadata>,
     onSelect: (providerId: String, model: String) -> Unit,
     onClear: (() -> Unit)?,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    accountModelInfo: Map<String, AccountModelInfo> = emptyMap(),
+    onOpenRefresh: (() -> Unit)? = null
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val context = LocalContext.current
     val collapseStore = remember { ModelSheetCollapseStore(context.applicationContext) }
     var searchQuery by remember { mutableStateOf("") }
     var collapsedProviderIds by remember { mutableStateOf(collapseStore.collapsedProviderIds()) }
+
+    // 打开即刷新：目录超过 TTL 的账号重新拉取官方 Codex 模型列表（静默，失败保留旧列表）
+    LaunchedEffect(Unit) { onOpenRefresh?.invoke() }
 
     AdaptiveModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -800,9 +865,23 @@ internal fun ModelSelectionSheet(
 
             // ChatGPT 账号对应的 provider 即使还没拉到模型目录也要显示（账号本身可用），
             // 否则用户会在模型选择器里看不到自己刚添加的官方账号。
-            val activeProviders = providers.filter {
-                it.isEnabled && (it.models.isNotEmpty() ||
-                    com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(it))
+            // 账号 provider 恒驻顶部并按订阅等级降序（付费号在上）；其余 provider 保持原相对顺序（稳定排序）。
+            val activeProviders = remember(providers, accountModelInfo) {
+                providers
+                    .filter {
+                        it.isEnabled && (it.models.isNotEmpty() ||
+                            com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(it))
+                    }
+                    .sortedWith { a, b ->
+                        val accountA = com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(a)
+                        val accountB = com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(b)
+                        when {
+                            accountA != accountB -> if (accountA) -1 else 1
+                            accountA -> planTierRank(accountModelInfo[a.id]?.planType) -
+                                planTierRank(accountModelInfo[b.id]?.planType)
+                            else -> 0
+                        }
+                    }
             }
             if (activeProviders.isEmpty()) {
                 SettingsGroup {
@@ -832,11 +911,18 @@ internal fun ModelSelectionSheet(
                             searchQuery.isBlank() || it.contains(searchQuery, ignoreCase = true)
                         }
                         if (filteredModels.isNotEmpty()) {
+                            val accountInfo = accountModelInfo[provider.id]
                             // 搜索时强制展开，否则用折叠状态：用户搜到名字却看不到结果会很困惑。
                             val expanded = searchQuery.isNotBlank() || provider.id !in collapsedProviderIds
                             item(key = "header_${provider.id}") {
+                                // 账号 provider 的组标题带订阅档位徽章（Plus/Pro/Free…）
+                                val headerText = if (accountInfo != null) {
+                                    "${provider.name} (${filteredModels.size}) · ${planBadgeLabel(accountInfo.planType)}"
+                                } else {
+                                    "${provider.name} (${filteredModels.size})"
+                                }
                                 CollapsibleGroupHeader(
-                                    text = "${provider.name} (${filteredModels.size})",
+                                    text = headerText,
                                     expanded = expanded,
                                     onToggle = {
                                         val updated = if (provider.id in collapsedProviderIds) {
@@ -856,10 +942,19 @@ internal fun ModelSelectionSheet(
                                             if (index > 0) {
                                                 SettingsDivider()
                                             }
+                                            // 付费账号才标「免费可用」：免费号整个列表都是免费档，标了反而是噪音
+                                            val paidOnly = accountInfo?.paidOnlyBySlug?.get(model)
+                                            val tierTag = when {
+                                                paidOnly == true -> stringResource(R.string.model_tag_paid_only)
+                                                paidOnly == false && accountInfo?.planType?.equals("free", ignoreCase = true) == false ->
+                                                    stringResource(R.string.model_tag_free_tier)
+                                                else -> null
+                                            }
                                             ModelSelectionRow(
                                                 model = model,
                                                 selected = provider.id == currentProviderId && model == currentModel,
                                                 metadata = modelMetadata[modelMetadataKey(provider.id, model)],
+                                                tierTag = tierTag,
                                                 onClick = { onSelect(provider.id, model) }
                                             )
                                         }
@@ -880,7 +975,9 @@ private fun ModelSelectionRow(
     selected: Boolean,
     metadata: ModelMetadata?,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** 档位标签（「免费可用」/「付费专属」），非账号模型为 null。 */
+    tierTag: String? = null
 ) {
     Row(
         modifier = modifier
@@ -900,7 +997,7 @@ private fun ModelSelectionRow(
                 overflow = TextOverflow.Ellipsis
             )
             Spacer(Modifier.height(4.dp))
-            ModelMetadataTags(metadata)
+            ModelMetadataTags(metadata, tierTag)
         }
         if (selected) {
             Spacer(Modifier.width(Spacing.sm))
@@ -916,11 +1013,16 @@ private fun ModelSelectionRow(
 
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
-private fun ModelMetadataTags(metadata: ModelMetadata?) {
+private fun ModelMetadataTags(metadata: ModelMetadata?, tierTag: String? = null) {
     FlowRow(
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
+        // 档位标签排最前：免费/付费归属比能力 Tag 更影响账号选择
+        if (tierTag != null) {
+            val freeTierLabel = stringResource(R.string.model_tag_free_tier)
+            ModelTag(text = tierTag, isHighlight = tierTag == freeTierLabel)
+        }
         if (metadata != null) {
             if (metadata.supportsVision) {
                 ModelTag(text = "Image", isHighlight = true)

@@ -151,6 +151,7 @@ class AIAgentViewModel @Inject constructor(
     private val agentNotificationCenter: AgentNotificationCenter,
     private val legacySubAgentMigration: LegacySubAgentMigration,
     private val todoItemDao: TodoItemDao,
+    private val openAIAccountRepository: com.aicode.feature.settings.data.repository.OpenAIAccountRepository,
     val fileAccess: FileAccessProvider,
     private val rootNetworkGuard: RootNetworkGuard,
     @param:ApplicationContext private val context: Context
@@ -180,6 +181,27 @@ class AIAgentViewModel @Inject constructor(
 
     private val _currentSessionId = MutableStateFlow<String?>(null)
     val currentSessionId: StateFlow<String?> = _currentSessionId.asStateFlow()
+
+    /**
+     * ChatGPT 账号 provider 的档位信息：providerId → [AccountModelInfo]。
+     * 供模型选择器按订阅等级排序、显示免费/付费标签。
+     */
+    val accountModelInfo: StateFlow<Map<String, com.aicode.feature.settings.presentation.component.AccountModelInfo>> =
+        openAIAccountRepository.observeAccounts()
+            .map { accounts ->
+                accounts.associate { account ->
+                    account.providerId to com.aicode.feature.settings.presentation.component.AccountModelInfo(
+                        planType = account.planType,
+                        paidOnlyBySlug = account.models.associate { it.slug to it.paidOnly }
+                    )
+                }
+            }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
+    /** 打开模型选择器时调用：目录超过 TTL 的账号静默重新拉取官方模型列表。 */
+    fun refreshAccountModelsIfStale() {
+        viewModelScope.launch { openAIAccountRepository.refreshStaleAccountModels() }
+    }
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     val currentSessionTodoItems: StateFlow<List<TodoItem>> = _currentSessionId

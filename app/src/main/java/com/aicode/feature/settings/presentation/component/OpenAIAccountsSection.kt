@@ -12,6 +12,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -54,6 +57,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aicode.R
@@ -72,6 +77,7 @@ import compose.icons.feathericons.ChevronRight
 import compose.icons.feathericons.Copy
 import compose.icons.feathericons.Download
 import compose.icons.feathericons.ExternalLink
+import compose.icons.feathericons.FileText
 import compose.icons.feathericons.Plus
 import compose.icons.feathericons.RefreshCw
 import compose.icons.feathericons.Settings
@@ -140,10 +146,13 @@ internal fun OpenAIAccountsEntryCard(onClick: () -> Unit) {
 /**
  * ChatGPT 账号管理主区域。
  *
- * 视觉对齐 cockpit-tools 的账号卡：计划徽章 + 状态pill + 5h/每周额度迷你条（剩余比例着色）
- * + 本地用量 + 图标动作行；模型选择改用与全局一致的 [AdaptiveModalBottomSheet]。
+ * 视觉对齐 cockpit-tools 的账号卡并重排为整齐分区：头部（账号 + 档位/状态徽章 + 开关）、
+ * 额度区（5h / 每周双列迷你条，灰色容器收拢）、本地用量、模型行（行内刷新）、
+ * 文字标签动作行（窄屏自动换行）、底部标识。账号按订阅等级降序（付费号在上）。
+ * 模型选择改用与全局一致的 [AdaptiveModalBottomSheet]。
  */
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 internal fun OpenAIAccountsSection(
     viewModel: OpenAIAccountsViewModel = hiltViewModel()
 ) {
@@ -198,14 +207,17 @@ internal fun OpenAIAccountsSection(
                         }
                     }
                 }
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
-                    verticalAlignment = Alignment.CenterVertically
+                // 操作区：FlowRow 自动换行，窄屏也不会挤成一团
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
+                    verticalArrangement = Arrangement.spacedBy(Spacing.xs)
                 ) {
                     // 多账号：无论当前已有几个账号，「添加账号」始终可用
                     Button(
                         onClick = { viewModel.startLogin(null) },
-                        enabled = state.busyAccountId == null && !isConnecting
+                        enabled = state.busyAccountId == null && !isConnecting,
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
                     ) {
                         Icon(
                             imageVector = FeatherIcons.Plus,
@@ -214,7 +226,7 @@ internal fun OpenAIAccountsSection(
                         )
                         Spacer(Modifier.width(Spacing.xs))
                         if (isConnecting) {
-                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                             Spacer(Modifier.width(Spacing.sm))
                         }
                         Text(
@@ -226,7 +238,8 @@ internal fun OpenAIAccountsSection(
                     }
                     OutlinedButton(
                         onClick = { showImport = true },
-                        enabled = state.busyAccountId == null && !isConnecting
+                        enabled = state.busyAccountId == null && !isConnecting,
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
                     ) {
                         Icon(
                             imageVector = FeatherIcons.Download,
@@ -239,7 +252,8 @@ internal fun OpenAIAccountsSection(
                     if (state.accounts.isNotEmpty()) {
                         OutlinedButton(
                             onClick = viewModel::exportAccounts,
-                            enabled = state.busyAccountId == null && !isConnecting && !state.refreshing
+                            enabled = state.busyAccountId == null && !isConnecting && !state.refreshing,
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
                         ) {
                             Icon(
                                 imageVector = FeatherIcons.Upload,
@@ -262,7 +276,11 @@ internal fun OpenAIAccountsSection(
             }
         }
 
-        state.accounts.forEach { account ->
+        // 账号按订阅等级降序（付费号在上），与模型选择器的排序保持一致
+        val sortedAccounts = remember(state.accounts) {
+            state.accounts.sortedByDescending { planTierRank(it.planType) }
+        }
+        sortedAccounts.forEach { account ->
             OpenAIAccountCard(
                 account = account,
                 busy = state.busyAccountId == account.id,
@@ -492,14 +510,38 @@ private fun ChatGptLoginSheet(
  *  - 粘贴 JSON：Codex CLI `auth.json` / Web Session / 顶层 token 对象 / JSON 数组（批量）
  *  - Access Token：给一段 token 起个名字直接建号
  *  - 批量文本：每行一个 JSON、一个裸 token，或 `邮箱----密码----2FA秘钥----邮件地址`
+ *  - 选择文件：直接选 cockpit-tools 导出的 TXT / JSON 文件（读取后立即走同一套解析）
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun ImportAccountDialog(onDismiss: () -> Unit, onImport: (String) -> Unit) {
     var tab by remember { mutableStateOf(ImportTab.JSON) }
     var raw by remember { mutableStateOf("") }
     var displayName by remember { mutableStateOf("") }
     var token by remember { mutableStateOf("") }
+    var fileError by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+
+    // 文件选择： cockpit-tools 导出的 TXT 常被识别为 text/plain 或通用类型，MIME 放宽确保能选到
+    val filePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            val text = runCatching {
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    input.readBytes().toString(Charsets.UTF_8)
+                }
+            }.getOrNull()
+            if (text.isNullOrBlank()) {
+                fileError = context.getString(R.string.openai_import_file_read_failed)
+            } else if (text.length > MAX_IMPORT_FILE_CHARS) {
+                fileError = context.getString(R.string.openai_import_file_too_large)
+            } else {
+                // 读到的内容直接走统一解析入口（与粘贴完全相同）
+                onImport(text)
+            }
+        }
+    }
 
     val canSubmit = when (tab) {
         ImportTab.JSON, ImportTab.LINES -> raw.isNotBlank()
@@ -540,6 +582,31 @@ private fun ImportAccountDialog(onDismiss: () -> Unit, onImport: (String) -> Uni
                         selected = tab == ImportTab.LINES,
                         onClick = { tab = ImportTab.LINES },
                         label = { Text(stringResource(R.string.openai_import_tab_lines)) }
+                    )
+                }
+                // 文件导入入口：选中 TXT / JSON 文件后直接解析，无需手动粘贴
+                if (tab != ImportTab.TOKEN) {
+                    OutlinedButton(
+                        onClick = {
+                            fileError = null
+                            filePicker.launch(arrayOf("text/plain", "text/*", "application/json", "*/*"))
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            imageVector = FeatherIcons.FileText,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(Spacing.xs))
+                        Text(stringResource(R.string.openai_import_pick_file))
+                    }
+                }
+                fileError?.let { message ->
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
                     )
                 }
                 Text(
@@ -593,6 +660,9 @@ private fun ImportAccountDialog(onDismiss: () -> Unit, onImport: (String) -> Uni
         }
     )
 }
+
+/** 导入文件大小上限：防止误选超大文件把进程拖垮。 */
+private const val MAX_IMPORT_FILE_CHARS = 2 * 1024 * 1024
 
 /** Access Token 导入也走统一的文本解析入口，内部统一包成 JSON。 */
 private fun importTokenPayload(displayName: String, token: String): String = JSONObject()
@@ -650,7 +720,7 @@ private fun copyToClipboard(context: Context, label: String, value: String) {
 private enum class ImportTab { JSON, TOKEN, LINES }
 
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun OpenAIAccountCard(
     account: OpenAIAccountSummary,
@@ -674,19 +744,21 @@ private fun OpenAIAccountCard(
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // 顶部：账号 + 计划徽章 + 启用开关
+            // ① 头部：账号名 + 档位/状态徽章 + 启用开关
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f)) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
                     Text(
                         text = account.email.ifBlank { account.displayName },
                         style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    Spacer(Modifier.height(2.dp))
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(Spacing.xs)
@@ -696,6 +768,7 @@ private fun OpenAIAccountCard(
                         if (isDefault) DefaultBadge()
                     }
                 }
+                Spacer(Modifier.width(Spacing.sm))
                 if (busy) {
                     CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                 } else {
@@ -707,30 +780,51 @@ private fun OpenAIAccountCard(
                 }
             }
 
-            // 额度区：5h / 每周 迷你条
+            // ② 额度区：5h / 每周 双列排布（两个窗口时左右分栏，单窗口时通排）
             val quotas = quotaWindows(account)
             if (quotas.isEmpty()) {
                 Text(
-                    text = if (account.planUsageAuthorized) stringResource(R.string.openai_account_quota_window_unknown, stringResource(R.string.openai_quota_weekly))
-                    else stringResource(R.string.openai_account_plan_access_missing),
+                    text = if (account.planUsageAuthorized) {
+                        stringResource(R.string.openai_account_quota_window_unknown, stringResource(R.string.openai_quota_weekly))
+                    } else {
+                        stringResource(R.string.openai_account_plan_access_missing)
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             } else {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    quotas.forEach { quota ->
-                        QuotaMiniRow(quota = quota)
-                    }
-                    account.quotaUpdatedAt?.let { updatedAt ->
-                        Text(
-                            text = stringResource(
-                                R.string.openai_account_quota_updated,
-                                DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
-                                    .format(Date(updatedAt))
-                            ),
-                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        if (quotas.size >= 2) {
+                            // 双列：5 小时与每周额度并排，高度对齐更整齐
+                            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                                quotas.take(2).forEach { quota ->
+                                    Box(modifier = Modifier.weight(1f)) {
+                                        QuotaMiniRow(quota = quota)
+                                    }
+                                }
+                            }
+                        } else {
+                            QuotaMiniRow(quota = quotas.first())
+                        }
+                        account.quotaUpdatedAt?.let { updatedAt ->
+                            Text(
+                                text = stringResource(
+                                    R.string.openai_account_quota_updated,
+                                    DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
+                                        .format(Date(updatedAt))
+                                ),
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
             }
@@ -738,7 +832,7 @@ private fun OpenAIAccountCard(
                 Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             }
 
-            // 本地用量
+            // ③ 本地用量
             Text(
                 text = stringResource(
                     R.string.openai_account_local_usage,
@@ -750,13 +844,14 @@ private fun OpenAIAccountCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            // 使用模型（底部弹层选择）
+            // ④ 使用模型（底部弹层选择）+ 行内刷新模型
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
                     .clickable(enabled = account.models.isNotEmpty() && !busy) { modelSheetVisible = true }
-                    .padding(vertical = Spacing.xs),
+                    .padding(start = 10.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
@@ -774,6 +869,19 @@ private fun OpenAIAccountCard(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
+                // 刷新模型列表：从隐秘的闪电图标挪到模型行内，语义更直接
+                IconButton(
+                    onClick = onRefreshModels,
+                    enabled = !busy,
+                    modifier = Modifier.size(30.dp)
+                ) {
+                    Icon(
+                        imageVector = FeatherIcons.RefreshCw,
+                        contentDescription = stringResource(R.string.openai_account_refresh_models),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
                 Icon(
                     imageVector = FeatherIcons.ChevronRight,
                     contentDescription = null,
@@ -782,15 +890,15 @@ private fun OpenAIAccountCard(
                 )
             }
 
-            // 动作行：刷新额度 / 刷新模型 / 重新授权 / 打开用量 / 移除
-            Row(
+            // ⑤ 动作行：带文字标签的按钮，窄屏自动换行，不再是一排含义不明的圆图标
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
-                verticalAlignment = Alignment.CenterVertically
+                verticalArrangement = Arrangement.spacedBy(Spacing.xs)
             ) {
                 CardActionButton(
                     icon = FeatherIcons.Star,
-                    contentDescription = stringResource(R.string.openai_account_set_default),
+                    text = stringResource(R.string.openai_account_set_default),
                     enabled = !busy && !isDefault && account.planUsageAuthorized,
                     tint = if (isDefault) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -798,35 +906,28 @@ private fun OpenAIAccountCard(
                 )
                 CardActionButton(
                     icon = FeatherIcons.RefreshCw,
-                    contentDescription = stringResource(R.string.openai_account_refresh_usage),
+                    text = stringResource(R.string.openai_account_refresh_usage),
                     enabled = !busy && account.planUsageAuthorized,
                     onClick = onRefreshUsage
-                )
-                CardActionButton(
-                    icon = FeatherIcons.Zap,
-                    contentDescription = stringResource(R.string.openai_account_refresh_models),
-                    enabled = !busy,
-                    onClick = onRefreshModels
                 )
                 if (account.status != OpenAIAccountEntity.STATUS_CONNECTED || !account.planUsageAuthorized) {
                     CardActionButton(
                         icon = FeatherIcons.Settings,
-                        contentDescription = stringResource(R.string.openai_account_reauthorize),
+                        text = stringResource(R.string.openai_account_reauthorize),
                         enabled = !busy,
                         onClick = onReauthorize
                     )
                 }
-                Spacer(Modifier.weight(1f))
                 CardActionButton(
                     icon = FeatherIcons.Trash2,
-                    contentDescription = stringResource(R.string.common_delete),
+                    text = stringResource(R.string.common_delete),
                     enabled = !busy,
                     tint = MaterialTheme.colorScheme.error,
                     onClick = onRemove
                 )
             }
 
-            // 底部：账号标识
+            // ⑥ 底部：账号标识 + 错误
             Text(
                 text = stringResource(R.string.openai_account_identifier, account.id.take(8)),
                 style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
@@ -1050,28 +1151,35 @@ private fun QuotaMiniRow(quota: QuotaWindowUi) {
 
 private enum class QuotaLevel { HIGH, MEDIUM, LOW, CRITICAL }
 
-/** 圆形图标动作按钮（对齐 cockpit card-action-btn 的紧凑手感）。 */
+/** 胶囊动作按钮：图标 + 文字标签，语义自解释（替代原先含义不明的纯圆图标行）。 */
 @Composable
 private fun CardActionButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
-    contentDescription: String,
+    text: String,
     enabled: Boolean,
     onClick: () -> Unit,
     tint: Color = MaterialTheme.colorScheme.onSurfaceVariant
 ) {
-    Box(
+    Row(
         modifier = Modifier
-            .size(34.dp)
             .clip(CircleShape)
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
-            .clickable(enabled = enabled, onClick = onClick),
-        contentAlignment = Alignment.Center
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp)
     ) {
         Icon(
             imageVector = icon,
-            contentDescription = contentDescription,
+            contentDescription = text,
             tint = if (enabled) tint else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f),
-            modifier = Modifier.size(16.dp)
+            modifier = Modifier.size(14.dp)
+        )
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelMedium.copy(fontSize = 11.sp),
+            color = if (enabled) tint else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f),
+            maxLines = 1
         )
     }
 }

@@ -26,7 +26,13 @@ internal object OpenAIOAuthProtocol {
     const val CODEX_SCOPES = "openid profile email offline_access api.connectors.read api.connectors.invoke"
 
     data class Pkce(val verifier: String, val challenge: String)
-    data class ModelCatalogEntry(val slug: String, val displayName: String, val visibility: String)
+    data class ModelCatalogEntry(
+        val slug: String,
+        val displayName: String,
+        val visibility: String,
+        /** true = 需要付费订阅（available_in_plans 非空且不含 free）。 */
+        val paidOnly: Boolean = false
+    )
     data class Callback(val values: Map<String, String>) {
         fun value(name: String): String? = values[name]
     }
@@ -113,7 +119,7 @@ internal object OpenAIOAuthProtocol {
     fun visibleModels(entries: List<ModelCatalogEntry>): List<OpenAIAccountModel> = entries
         .asSequence()
         .filter { it.visibility == "list" }
-        .map { OpenAIAccountModel(it.slug.trim(), it.displayName.trim()) }
+        .map { OpenAIAccountModel(it.slug.trim(), it.displayName.trim(), it.paidOnly) }
         .filter { it.slug.isNotEmpty() && it.slug.length <= 200 && it.displayName.isNotEmpty() && it.displayName.length <= 200 }
         .distinctBy(OpenAIAccountModel::slug)
         .toList()

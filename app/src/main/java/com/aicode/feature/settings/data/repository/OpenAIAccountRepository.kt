@@ -109,7 +109,13 @@ private data class ImportedCredential(
     val displayName: String = ""
 )
 
-data class OpenAIAccountModel(val slug: String, val displayName: String)
+/**
+ * 账号目录里的一个模型。
+ *
+ * @param paidOnly true 表示需要付费订阅（官方 `available_in_plans` 非空且不含 free）。
+ *   用于额度调度：付费专属模型只路由给付费账号；免费模型优先消耗免费账号额度。
+ */
+data class OpenAIAccountModel(val slug: String, val displayName: String, val paidOnly: Boolean = false)
 data class OpenAIAccountRefreshResult(val models: List<OpenAIAccountModel>, val warning: String? = null)
 
 /**
@@ -136,6 +142,7 @@ class OpenAIAccountRepository @Inject constructor(
     private val accountDao: OpenAIAccountDao,
     private val providerRepository: AIProviderRepository,
     private val llmCallRecordDao: LlmCallRecordDao,
+    private val accountAffinity: ChatGptAccountAffinity,
     client: OkHttpClient
 ) {
     private fun text(resourceId: Int, vararg args: Any): String = context.getString(resourceId, *args)
@@ -218,6 +225,26 @@ class OpenAIAccountRepository @Inject constructor(
     fun noAvailableAccountMessage(model: String): String = text(R.string.openai_error_no_available_account, model)
     fun invalidProviderTypeMessage(): String = text(R.string.openai_error_missing_provider_type)
     fun missingCredentialsMessage(): String = text(R.string.openai_error_missing_credentials)
+
+    /** 免费订阅判定：档位缺失（还没拉到用量信息）时保守按非免费处理，避免误拦付费号。 */
+    private fun isFreePlan(planType: String?): Boolean =
+        planType?.trim()?.equals("free", ignoreCase = true) == true
+
+    /**
+     * 模型目录 TTL 刷新：打开模型选择器等入口时调用，目录超过 [MODEL_CATALOG_TTL_MS]
+     * 的已连接账号会重新拉取一次官方 Codex 目录（官方上/下架模型后本地列表随之更新）。
+     * 单个账号失败不影响其他账号；全程静默，不打断用户操作。
+     */
+    suspend fun refreshStaleAccountModels(maxAgeMs: Long = MODEL_CATALOG_TTL_MS) {
+        val now = System.currentTimeMillis()
+        val accounts = accountDao.getAllOnce()
+        for (account in accounts) {
+            if (account.status != OpenAIAccountEntity.STATUS_CONNECTED) continue
+            if (now - account.updatedAt <= maxAgeMs) continue
+            runCatching { refreshModels(account.id) }
+                .onFailure { FileLogger.w(TAG, "TTL 刷新模型目录失败(${account.id}): ${it.message}") }
+        }
+    }
 
     /** Creates an authorization session and returns the URL to open. Nothing is opened here. */
     suspend fun beginLogin(existingAccountId: String? = null): OpenAILoginSession {
@@ -495,18 +522,69 @@ class OpenAIAccountRepository @Inject constructor(
         return array.toString(2)
     }
 
-    /** 把一段文本切成若干可导入来源：JSON 数组展开、逐行 JSON、或整行 token。 */
-    private fun splitImportSources(content: String): List<String> = when {
-        content.startsWith("[") -> {
-            val array = runCatching { JSONArray(content) }.getOrNull()
-            if (array == null) {
-                listOf(content)
-            } else {
-                (0 until array.length()).map { index -> array.opt(index)?.toString().orEmpty() }
+    /**
+     * 把一段文本切成若干可导入来源（对齐 cockpit-tools 的导入入口）：
+     *
+     *  - 整个内容是 JSON 数组：展开为逐条
+     *  - 整个内容是 JSON 对象：sub2api 导出（`{"accounts":[…],"exported_at"/"proxies":…}`）展开
+     *    accounts 数组；否则整段作为一条
+     *  - 否则逐行：每行可以是 JSON 对象、JSON 数组（展开）、裸 token，
+     *    或 `邮箱----密码----2FA秘钥----邮件地址` 待授权行
+     */
+    private fun splitImportSources(content: String): List<String> {
+        val text = content.trim().removePrefix("\uFEFF").trim()
+        return when {
+            text.startsWith("[") -> {
+                val array = runCatching { JSONArray(text) }.getOrNull()
+                if (array == null) {
+                    listOf(text)
+                } else {
+                    (0 until array.length()).map { index -> array.opt(index)?.toString().orEmpty() }
+                        .filter { it.isNotBlank() }
+                }
+            }
+            text.startsWith("{") -> {
+                val json = runCatching { JSONObject(text) }.getOrNull()
+                val accounts = json?.optJSONArray("accounts")
+                if (json != null && accounts != null && looksLikeSub2ApiExport(json, accounts)) {
+                    (0 until accounts.length()).map { index -> accounts.opt(index)?.toString().orEmpty() }
+                        .filter { it.isNotBlank() }
+                        .ifEmpty { listOf(text) }
+                } else {
+                    listOf(text)
+                }
+            }
+            else -> text.lineSequence()
+                .map { it.trim().removePrefix("\uFEFF") }
+                .filter { it.isNotEmpty() }
+                // 单行内嵌 JSON 数组也要展开（cockpit 的 token 行导入同样逐行解析数组）
+                .flatMap { line ->
+                    if (line.startsWith("[")) {
+                        val array = runCatching { JSONArray(line) }.getOrNull()
+                        if (array != null && array.length() > 0) {
+                            (0 until array.length()).map { array.opt(it)?.toString().orEmpty() }
+                                .filter { it.isNotBlank() }
+                        } else {
+                            listOf(line)
+                        }
+                    } else {
+                        listOf(line)
+                    }
+                }
+                .toList()
         }
+    }
+
+    /**
+     * sub2api 导出识别（对齐 cockpit 的 `looks_like_sub2api_export`）：
+     * 带 `exported_at` 或 `proxies`，或 accounts 条目同时含 `credentials` 与 `platform`。
+     */
+    private fun looksLikeSub2ApiExport(json: JSONObject, accounts: JSONArray): Boolean {
+        if (json.has("exported_at") || json.has("proxies")) return true
+        return (0 until accounts.length()).any { index ->
+            val item = accounts.optJSONObject(index) ?: return@any false
+            item.has("credentials") && item.has("platform")
         }
-        content.startsWith("{") -> listOf(content)
-        else -> content.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
     }
 
     /** 解析一条来源：优先按 JSON 凭据对象处理，否则整段当 access token。 */
@@ -518,13 +596,14 @@ class OpenAIAccountRepository @Inject constructor(
 
     /**
      * 从一个凭据 JSON 里取出 token 三元组。
-     * 兼容 Codex CLI 的 `tokens` 容器、Web Session 的 `session` 容器，以及顶层的
-     * snake_case / camelCase 字段。
+     * 兼容 Codex CLI 的 `tokens` 容器、Web Session 的 `session` 容器、sub2api 导出的
+     * `credentials` 容器，以及顶层的 snake_case / camelCase 字段。
      */
     private fun parseCredentialJson(json: JSONObject): ImportedCredential? {
         val container = json.optJSONObject("tokens")
             ?: json.optJSONObject("session")
             ?: json.optJSONObject("auth")
+            ?: json.optJSONObject("credentials")
             ?: json
 
         fun read(vararg keys: String): String = keys.firstNotNullOfOrNull { key ->
@@ -542,7 +621,10 @@ class OpenAIAccountRepository @Inject constructor(
             refreshToken = refreshToken,
             clientId = read("client_id", "clientId").ifBlank { OpenAIOAuthProtocol.CODEX_CLI_CLIENT_ID },
             email = read("email", "chatgpt_user_email"),
-            accountId = read("account_id", "chatgpt_account_id"),
+            accountId = read(
+                "account_id", "chatgpt_account_id", "accountId", "chatgptAccountId",
+                "workspace_id", "workspaceId"
+            ),
             displayName = ""
         )
     }
@@ -588,6 +670,13 @@ class OpenAIAccountRepository @Inject constructor(
         if (credential.accessToken.isBlank() && credential.refreshToken.isBlank()) {
             throw OpenAIAccountException(text(R.string.openai_error_import_missing_token))
         }
+        // 仅带 refresh_token 的导入（cockpit TXT 导出的常见形态）：先拿它换一套完整令牌，
+        // 否则拉不到模型目录、账号也会以空模型列表落户（对齐 cockpit 的 refresh-token 导入）。
+        val resolved = if (credential.accessToken.isBlank()) {
+            refreshImportedCredential(credential)
+        } else {
+            credential
+        }
         val savedIds = accountDao.getAllOnce().mapTo(mutableSetOf(), OpenAIAccountEntity::id)
         if (!OpenAIAccountSelectionPolicy.canConnect(savedIds, null)) {
             throw OpenAIAccountException(
@@ -596,26 +685,26 @@ class OpenAIAccountRepository @Inject constructor(
         }
         val hostId = stableHostId()
         val now = System.currentTimeMillis()
-        val claims = decodeIdTokenClaims(credential.idToken)
+        val claims = decodeIdTokenClaims(resolved.idToken)
         val auth = claims?.optJSONObject("https://api.openai.com/auth")
         val subject = claims?.optString("sub")?.takeIf(String::isNotBlank)
-            ?: credential.accountId.takeIf(String::isNotBlank)
+            ?: resolved.accountId.takeIf(String::isNotBlank)
             ?: "imported-${UUID.randomUUID()}"
         val email = claims?.optString("email")?.takeIf(String::isNotBlank)
             ?: auth?.optString("chatgpt_user_email")
-            ?: credential.email
+            ?: resolved.email
         val name = claims?.optString("name")?.takeIf(String::isNotBlank)
-            ?: email.ifBlank { credential.displayName.ifBlank { text(R.string.openai_account_default_name) } }
+            ?: email.ifBlank { resolved.displayName.ifBlank { text(R.string.openai_account_default_name) } }
         val existing = accountDao.getAllOnce().firstOrNull { it.subject == subject }
         val accountId = existing?.id ?: UUID.randomUUID().toString()
         val providerId = existing?.providerId ?: "$PROVIDER_ID_PREFIX$accountId"
         // id_token 的 auth claims 里带订阅档位（chatgpt_plan_type）与账号 ID，模型目录按档位过滤
         val planType = auth?.optString("chatgpt_plan_type")?.takeIf(String::isNotBlank)
         val chatgptAccountId = auth?.optString("chatgpt_account_id")?.takeIf(String::isNotBlank)
-        val models = if (credential.accessToken.isBlank()) {
+        val models = if (resolved.accessToken.isBlank()) {
             emptyList()
         } else {
-            runCatching { fetchModelCatalog(credential.accessToken, planType, chatgptAccountId) }
+            runCatching { fetchModelCatalog(resolved.accessToken, planType, chatgptAccountId) }
                 .getOrElse { error ->
                     if (error is CancellationException) throw error
                     FileLogger.w(TAG, "导入账号模型目录拉取失败，改用内置列表: ${error.message}")
@@ -632,15 +721,15 @@ class OpenAIAccountRepository @Inject constructor(
             subject = subject,
             email = email,
             displayName = name,
-            clientId = credential.clientId,
-            encryptedAccessToken = KeystoreCipher.encryptString(credential.accessToken),
-            encryptedRefreshToken = KeystoreCipher.encryptString(credential.refreshToken),
-            encryptedIdToken = KeystoreCipher.encryptString(credential.idToken),
+            clientId = resolved.clientId,
+            encryptedAccessToken = KeystoreCipher.encryptString(resolved.accessToken),
+            encryptedRefreshToken = KeystoreCipher.encryptString(resolved.refreshToken),
+            encryptedIdToken = KeystoreCipher.encryptString(resolved.idToken),
             scopes = scopes,
             accessTokenExpiresAt = now + TimeUnit.HOURS.toMillis(1),
             hostId = hostId,
             modelCatalogJson = encodeModelCatalog(models),
-            status = if (credential.refreshToken.isBlank()) {
+            status = if (resolved.refreshToken.isBlank()) {
                 OpenAIAccountEntity.STATUS_NEEDS_LOGIN
             } else {
                 OpenAIAccountEntity.STATUS_CONNECTED
@@ -664,7 +753,7 @@ class OpenAIAccountRepository @Inject constructor(
             defaultModel = selected,
             models = modelSlugs,
             selectedModel = selected,
-            isEnabled = credential.refreshToken.isNotBlank() && (oldProvider?.isEnabled ?: true),
+            isEnabled = resolved.refreshToken.isNotBlank() && (oldProvider?.isEnabled ?: true),
             useResponseApi = true,
             sortOrder = oldProvider?.sortOrder ?: -1
         )
@@ -687,10 +776,49 @@ class OpenAIAccountRepository @Inject constructor(
             displayName = account.displayName,
             status = account.status,
             lastError = account.lastError,
-            planUsageAuthorized = credential.refreshToken.isNotBlank(),
+            planUsageAuthorized = resolved.refreshToken.isNotBlank(),
             enabled = provider.isEnabled,
             models = models,
             selectedModel = selected
+        )
+    }
+
+    /**
+     * 仅带 refresh_token 的导入凭据：走一次 refresh_token grant 换出完整令牌三元组
+     * （对齐 cockpit 的 `upsert_account_from_refresh_token`）。失败直接抛错，让该行导入
+     * 以明确原因失败，而不是落户一个令牌已失效的账号。
+     */
+    private suspend fun refreshImportedCredential(credential: ImportedCredential): ImportedCredential {
+        val discovery = loadDiscovery()
+        val body = FormBody.Builder()
+            .add("grant_type", "refresh_token")
+            .add("client_id", credential.clientId)
+            .add("refresh_token", credential.refreshToken)
+            .apply {
+                if (credential.clientId == OpenAIOAuthProtocol.DYNAMIC_CLIENT_ID) {
+                    add("resource", OpenAIOAuthProtocol.RESOURCE)
+                }
+            }
+            .build()
+        val response = postForm(discovery.tokenEndpoint, body)
+        if (response.code !in 200..299) {
+            val errorCode = oauthErrorCode(response.body)
+            if (response.code == 401 || errorCode in INVALID_REFRESH_TOKEN_CODES) {
+                throw OpenAIAccountException(text(R.string.openai_error_login_expired))
+            }
+            throw OpenAIAccountException(
+                text(R.string.openai_error_token_refresh_http, response.code, errorCode?.let { " ($it)" } ?: "")
+            )
+        }
+        val json = JSONObject(response.body)
+        val access = json.optString("access_token")
+        if (access.isBlank()) {
+            throw OpenAIAccountException(text(R.string.openai_error_token_response_incomplete))
+        }
+        return credential.copy(
+            accessToken = access,
+            refreshToken = json.optString("refresh_token").ifBlank { credential.refreshToken },
+            idToken = json.optString("id_token").ifBlank { credential.idToken }
         )
     }
 
@@ -995,22 +1123,76 @@ class OpenAIAccountRepository @Inject constructor(
     }
 
     /**
-     * Resolves only the account explicitly selected by the caller; never falls back to another one.
+     * 解析本次调用用哪个账号（两层路由 + 会话亲和，对齐 cockpit-tools 的默认调度模式）：
      *
-     * 本机可并存多个账号，但这里只认调用方显式指定的那个：账号被删掉/不存在即失败，
-     * 不会在账号间回退，也就不会变成"额度池"。
+     *  1. **显式选择优先**：[preferredAccountId] 能服务就用它，并把 (会话, 模型) 绑到它；
+     *  2. **能力回退**：显式账号服务不了该模型（目录里没有 / 档位不匹配 / 令牌失效）时，
+     *     先看同会话同模型的亲和绑定，再按额度调度顺序找其它账号——付费专属模型只找付费号，
+     *     免费档模型优先免费号（省付费额度）。
+     *
+     * 界线：额度暂停 / provider 停用 / 未连接这类**用户可见状态**绝不静默切换，直接返回 null
+     * 让调用方提示用户处理；只有"这个账号根本跑不了这个模型"才回退。
+     *
+     * @param sessionId 调用方会话 id（聊天会话 / 子代理会话）。为空则不启用亲和绑定。
      */
-    suspend fun routeForModel(preferredAccountId: String, model: String): ChatGptAccountTarget? {
-        val savedIds = accountDao.getAllOnce().mapTo(mutableSetOf(), OpenAIAccountEntity::id)
-        if (!OpenAIAccountSelectionPolicy.canRoute(savedIds, preferredAccountId)) return null
-        val account = accountDao.getById(preferredAccountId) ?: return null
-        val provider = providerRepository.getProviderById(account.providerId) ?: return null
-        val modelSet = provider.models.toSet().ifEmpty {
-            decodeModelCatalog(account.modelCatalogJson).map(OpenAIAccountModel::slug).toSet()
+    suspend fun routeForModel(
+        preferredAccountId: String,
+        model: String,
+        sessionId: String? = null
+    ): ChatGptAccountTarget? {
+        val accounts = accountDao.getAllOnce()
+        val caller = sessionId?.takeIf(String::isNotBlank)
+        val explicit = accounts.firstOrNull { it.id == preferredAccountId }
+        if (explicit != null) {
+            // 用户可见的停用状态：不回退，让用户自己处理（暂停额度/停用 provider/未连接/未授权）
+            if (isUserVisibleBlocked(explicit)) return null
+            val target = resolveAccountTarget(explicit, model)
+            if (target != null) {
+                caller?.let { accountAffinity.remember(it, model, it, target.accountId) }
+                return target
+            }
+            // 显式账号存在但跑不了这个模型：能力问题才允许回退
+            val tierBlocked = isTierBlocked(explicit, model)
+            val fallback = routeViaAffinityOrFallback(accounts, model, caller, excludeAccountId = explicit.id)
+            if (fallback != null) return fallback
+            if (tierBlocked) {
+                throw OpenAIAccountException(text(R.string.openai_error_model_requires_paid_plan, model))
+            }
+            return null
         }
+        // 显式账号不在档（被删除等）：按亲和 + 能力回退自愈，避免整个会话直接瘫掉
+        return routeViaAffinityOrFallback(accounts, model, caller, excludeAccountId = null)
+    }
+
+    /** 用户可见的停用状态（暂停额度 / provider 停用 / 未连接 / 未授权计划）：这些状态不回退账号。 */
+    private suspend fun isUserVisibleBlocked(account: OpenAIAccountEntity): Boolean {
+        val provider = providerRepository.getProviderById(account.providerId) ?: return true
+        return !provider.isEnabled ||
+            account.status != OpenAIAccountEntity.STATUS_CONNECTED ||
+            !OpenAIOAuthProtocol.planUsageGranted(account.scopesAsSet())
+    }
+
+    /** 档位硬约束命中：账号是免费档，而模型在它的目录里标记为付费专属。 */
+    private fun isTierBlocked(account: OpenAIAccountEntity, model: String): Boolean =
+        decodeModelCatalog(account.modelCatalogJson).firstOrNull { it.slug == model }?.paidOnly == true &&
+            isFreePlan(account.planType)
+
+    /**
+     * 单个账号能否服务该模型：目录包含（空目录放行）、档位匹配、授权范围够、令牌可获取、
+     * 且刷新后仍是已连接 + provider 启用。任何一条不过返回 null。
+     */
+    private suspend fun resolveAccountTarget(account: OpenAIAccountEntity, model: String): ChatGptAccountTarget? {
+        val provider = providerRepository.getProviderById(account.providerId) ?: return null
+        if (!provider.isEnabled) return null
+        if (account.status != OpenAIAccountEntity.STATUS_CONNECTED) return null
+        if (!OpenAIOAuthProtocol.planUsageGranted(account.scopesAsSet())) return null
+        val catalog = decodeModelCatalog(account.modelCatalogJson)
+        val modelSet = provider.models.toSet().ifEmpty { catalog.map(OpenAIAccountModel::slug).toSet() }
         // An empty catalog (e.g. the model list endpoint was unreachable at login) must not
         // block chatting: accept the requested model and let the upstream call fail if it is real.
-        if ((modelSet.isNotEmpty() && model !in modelSet) || !OpenAIOAuthProtocol.planUsageGranted(account.scopesAsSet())) return null
+        if (modelSet.isNotEmpty() && model !in modelSet) return null
+        // 付费专属模型不路由给免费账号（免费号打过去上游必然拒绝）
+        if (catalog.firstOrNull { it.slug == model }?.paidOnly == true && isFreePlan(account.planType)) return null
         val token = try {
             accessToken(account.id)
         } catch (cancelled: CancellationException) {
@@ -1018,15 +1200,50 @@ class OpenAIAccountRepository @Inject constructor(
         } catch (_: Exception) {
             return null
         }
-        val refreshedAccount = accountDao.getById(preferredAccountId) ?: return null
-        val refreshedProvider = providerRepository.getProviderById(refreshedAccount.providerId) ?: return null
-        if (!refreshedProvider.isEnabled || refreshedAccount.status != OpenAIAccountEntity.STATUS_CONNECTED) return null
+        val refreshed = accountDao.getById(account.id) ?: return null
+        val refreshedProvider = providerRepository.getProviderById(refreshed.providerId) ?: return null
+        if (!refreshedProvider.isEnabled || refreshed.status != OpenAIAccountEntity.STATUS_CONNECTED) return null
         return ChatGptAccountTarget(
-            refreshedAccount.id,
-            refreshedAccount.providerId,
+            refreshed.id,
+            refreshed.providerId,
             token,
-            refreshedAccount.email.ifBlank { refreshedAccount.displayName }
+            refreshed.email.ifBlank { refreshed.displayName },
+            refreshed.chatgptAccountId
         )
+    }
+
+    /** 亲和绑定优先，其次按额度调度顺序做能力回退；成功即写入亲和绑定。 */
+    private suspend fun routeViaAffinityOrFallback(
+        accounts: List<OpenAIAccountEntity>,
+        model: String,
+        caller: String?,
+        excludeAccountId: String?
+    ): ChatGptAccountTarget? {
+        if (caller != null) {
+            val boundId = accountAffinity.preferredAccountId(caller, model, caller)
+            if (boundId != null && boundId != excludeAccountId) {
+                val bound = accounts.firstOrNull { it.id == boundId }
+                if (bound != null && !isUserVisibleBlocked(bound)) {
+                    resolveAccountTarget(bound, model)?.let { return it }
+                }
+            }
+        }
+        val candidates = accounts.filter { it.id != excludeAccountId && !isUserVisibleBlocked(it) }
+        // 任一账号目录把该模型标为付费专属，就按付费专属调度（保守：避免路由到会被上游拒绝的免费号）
+        val modelPaidOnly = candidates.any { account ->
+            decodeModelCatalog(account.modelCatalogJson).firstOrNull { it.slug == model }?.paidOnly == true
+        }
+        val ordered = OpenAIAccountSelectionPolicy.orderFallbackCandidates(
+            candidates.map { OpenAIAccountSelectionPolicy.FallbackCandidate(it.id, isFreePlan(it.planType)) },
+            modelPaidOnly = modelPaidOnly
+        )
+        for (accountId in ordered) {
+            val account = accounts.firstOrNull { it.id == accountId } ?: continue
+            val target = resolveAccountTarget(account, model) ?: continue
+            caller?.let { accountAffinity.remember(it, model, it, target.accountId) }
+            return target
+        }
+        return null
     }
 
     suspend fun setEnabled(accountId: String, enabled: Boolean) {
@@ -1089,6 +1306,8 @@ class OpenAIAccountRepository @Inject constructor(
             accountDao.delete(account.id)
         }
         refreshLocks.remove(accountId)
+        // 清掉该账号的全部会话亲和绑定，防止路由层继续记住一个已不存在的账号
+        accountAffinity.forgetAccount(accountId)
         return revoked
     }
 
@@ -1335,18 +1554,21 @@ class OpenAIAccountRepository @Inject constructor(
                 // 内部模型（visibility=hide，如 codex-auto-review / 图像模型）不进入选择器
                 val visibility = model.optString("visibility").trim()
                 if (visibility.equals("hide", ignoreCase = true)) continue
-                // available_in_plans 为空 = 全档位可用；非空时账号档位必须命中（档位未知则不过滤）
+                // available_in_plans 为空 = 全档位可用；非空时账号档位必须命中（档位未知则不过滤）。
+                // 同时记录付费独占性：非空且不含 free = 付费专属模型（额度调度用）。
                 val plans = model.optJSONArray("available_in_plans")
                 val planRestricted = plans != null && plans.length() > 0
-                val planAllowed = !planRestricted || plan.isEmpty() ||
-                    (0 until plans.length()).any { plans.optString(it).trim().equals(plan, ignoreCase = true) }
+                val planNames = (0 until (plans?.length() ?: 0)).map { plans.optString(it).trim().lowercase() }
+                val planAllowed = !planRestricted || plan.isEmpty() || plan in planNames
                 if (!planAllowed) continue
                 add(OpenAIOAuthProtocol.ModelCatalogEntry(
                     slug = slug,
                     // 展示名缺失时退回 slug，避免被下游的合法性过滤整条丢掉
                     displayName = model.optString("display_name").trim().ifBlank { slug },
                     // 没写 visibility 的条目按可见处理（下游只认 "list"）
-                    visibility = visibility.ifBlank { "list" }
+                    visibility = visibility.ifBlank { "list" },
+                    // 免费号也能用的模型（含 free 或全档位）标记为免费档，其余为付费专属
+                    paidOnly = planRestricted && "free" !in planNames
                 ))
             }
         }
@@ -1529,7 +1751,9 @@ class OpenAIAccountRepository @Inject constructor(
     }
 
     private fun encodeModelCatalog(models: List<OpenAIAccountModel>): String = JSONArray().apply {
-        models.forEach { model -> put(JSONObject().put("slug", model.slug).put("display_name", model.displayName)) }
+        models.forEach { model ->
+            put(JSONObject().put("slug", model.slug).put("display_name", model.displayName).put("paid_only", model.paidOnly))
+        }
     }.toString()
 
     private fun decodeModelCatalog(json: String): List<OpenAIAccountModel> = runCatching {
@@ -1539,7 +1763,9 @@ class OpenAIAccountRepository @Inject constructor(
                 val item = items.optJSONObject(index) ?: continue
                 val slug = item.optString("slug").trim()
                 val display = item.optString("display_name").trim()
-                if (slug.isNotEmpty() && display.isNotEmpty()) add(OpenAIAccountModel(slug, display))
+                // 旧版目录没有 paid_only 字段：缺省按免费档处理（保守，避免误拦免费号）
+                val paidOnly = item.optBoolean("paid_only", false)
+                if (slug.isNotEmpty() && display.isNotEmpty()) add(OpenAIAccountModel(slug, display, paidOnly))
             }
         }.distinctBy(OpenAIAccountModel::slug)
     }.getOrDefault(emptyList())
@@ -1638,6 +1864,8 @@ class OpenAIAccountRepository @Inject constructor(
         private const val MAX_CALLBACK_REQUEST_BYTES = 16 * 1024
         private const val MAX_CALLBACK_REQUEST_LINE = 8 * 1024
         private const val HTTP_TIMEOUT_SECONDS = 30L
+        /** 模型目录 TTL：超过该时长未刷新过的账号，在打开模型选择器时自动重新拉取官方目录。 */
+        private const val MODEL_CATALOG_TTL_MS = 30 * 60 * 1000L
         private const val TOKEN_REFRESH_MARGIN_MS = 60_000L
         private const val CLOCK_SKEW_SECONDS = 30L
         private const val TAG = "OpenAIAccountRepository"
@@ -1655,27 +1883,31 @@ class OpenAIAccountRepository @Inject constructor(
          * 与官方按订阅等级开放模型的策略一致（真实可用集合以端点返回的 available_in_plans 为准）。
          */
         private val ACCOUNT_MODELS_PAID: List<OpenAIAccountModel> = listOf(
-            OpenAIAccountModel("gpt-6.1-sol", "GPT-6.1 Sol"),
-            OpenAIAccountModel("gpt-6-astra", "GPT-6 Astra"),
-            OpenAIAccountModel("gpt-6-sol", "GPT-6 Sol"),
-            OpenAIAccountModel("gpt-6-luna", "GPT-6 Luna"),
-            OpenAIAccountModel("gpt-5.6-sol", "GPT-5.6 Sol"),
-            OpenAIAccountModel("gpt-5.6-terra", "GPT-5.6 Terra"),
-            OpenAIAccountModel("gpt-5.6-luna", "GPT-5.6 Luna"),
-            OpenAIAccountModel("gpt-5.4", "GPT-5.4"),
-            OpenAIAccountModel("gpt-5.4-mini", "GPT-5.4 Mini"),
-            OpenAIAccountModel("gpt-5.3-codex", "GPT-5.3 Codex"),
-            OpenAIAccountModel("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
-            OpenAIAccountModel("gpt-reserve", "GPT Reserve")
+            OpenAIAccountModel("gpt-6.1-sol", "GPT-6.1 Sol", paidOnly = true),
+            OpenAIAccountModel("gpt-6-astra", "GPT-6 Astra", paidOnly = true),
+            OpenAIAccountModel("gpt-6-sol", "GPT-6 Sol", paidOnly = true),
+            OpenAIAccountModel("gpt-6-luna", "GPT-6 Luna", paidOnly = false),
+            OpenAIAccountModel("gpt-5.6-sol", "GPT-5.6 Sol", paidOnly = true),
+            OpenAIAccountModel("gpt-5.6-terra", "GPT-5.6 Terra", paidOnly = true),
+            OpenAIAccountModel("gpt-5.6-luna", "GPT-5.6 Luna", paidOnly = false),
+            OpenAIAccountModel("gpt-5.4", "GPT-5.4", paidOnly = false),
+            OpenAIAccountModel("gpt-5.4-mini", "GPT-5.4 Mini", paidOnly = false),
+            OpenAIAccountModel("gpt-5.3-codex", "GPT-5.3 Codex", paidOnly = false),
+            OpenAIAccountModel("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", paidOnly = false),
+            OpenAIAccountModel("gpt-reserve", "GPT Reserve", paidOnly = true)
         )
 
-        /** 免费订阅只能用到轻量子集（spark / mini / 日常款），前沿模型不开放。 */
+        /**
+         * 免费订阅可用模型：轻量子集 + Luna 日常款（官方对免费号开放 GPT-6 Luna / GPT-5.6 Luna），
+         * 前沿型号（sol / astra / terra / reserve）不开放。
+         */
         private val ACCOUNT_MODELS_FREE: List<OpenAIAccountModel> = listOf(
-            OpenAIAccountModel("gpt-5.4", "GPT-5.4"),
-            OpenAIAccountModel("gpt-5.4-mini", "GPT-5.4 Mini"),
-            OpenAIAccountModel("gpt-5.3-codex", "GPT-5.3 Codex"),
-            OpenAIAccountModel("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
-            OpenAIAccountModel("gpt-reserve", "GPT Reserve")
+            OpenAIAccountModel("gpt-6-luna", "GPT-6 Luna", paidOnly = false),
+            OpenAIAccountModel("gpt-5.6-luna", "GPT-5.6 Luna", paidOnly = false),
+            OpenAIAccountModel("gpt-5.4", "GPT-5.4", paidOnly = false),
+            OpenAIAccountModel("gpt-5.4-mini", "GPT-5.4 Mini", paidOnly = false),
+            OpenAIAccountModel("gpt-5.3-codex", "GPT-5.3 Codex", paidOnly = false),
+            OpenAIAccountModel("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", paidOnly = false)
         )
 
         /**

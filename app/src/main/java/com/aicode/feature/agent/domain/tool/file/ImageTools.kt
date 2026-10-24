@@ -326,7 +326,7 @@ class ViewImageTool @Inject constructor(
     private suspend fun createStandaloneProvider(config: AIProviderConfig, sessionId: String?): AIProvider {
         val openAIAccountId = OpenAIAccountRepository.accountIdFromProviderMarker(config.apiKey)
         val accountRoute = if (openAIAccountId != null) {
-            openAIAccountRepository.routeForModel(openAIAccountId, config.effectiveModel)
+            openAIAccountRepository.routeForModel(openAIAccountId, config.effectiveModel, sessionId)
                 ?: throw IllegalStateException(openAIAccountRepository.noAvailableAccountMessage(config.effectiveModel))
         } else null
         val provider: AIProvider = when (config.type) {
@@ -338,6 +338,7 @@ class ViewImageTool @Inject constructor(
                 it.chatCacheKeyEnabled = config.openaiChatCacheKey
                 if (openAIAccountId != null) {
                     it.chatGptPlanUsage = true
+                    it.chatGptAccountId = accountRoute?.chatgptAccountId
                     it.chatGptUsageLimitMessage = openAIAccountRepository.usageLimitMessage()
                 }
             }
@@ -347,7 +348,8 @@ class ViewImageTool @Inject constructor(
         } else {
             config.apiKey
         }
-        provider.baseUrl = if (accountRoute != null) "https://api.openai.com/" else config.baseUrl
+        // ChatGPT 订阅账号必须打官方 Codex 后端（api.openai.com 会 401 missing scopes）。
+        provider.baseUrl = if (accountRoute != null) "https://chatgpt.com/backend-api/codex/" else config.baseUrl
         provider.model = config.effectiveModel
         provider.useFullUrl = if (accountRoute != null) false else config.useFullUrl
         provider.useResponseApi = if (accountRoute != null) true else config.useResponseApi

@@ -613,6 +613,8 @@ fun AIChatPanel(
     val providerSnapshot = settingsViewModel?.providers?.collectAsStateWithLifecycle()?.value ?: emptyList()
     val providers = remember(providerSnapshot) { providerSnapshot.filter { it.isEnabled } }
     val modelMetadata = settingsViewModel?.modelMetadata?.collectAsStateWithLifecycle()?.value.orEmpty()
+    // ChatGPT 账号档位信息：模型选择器按订阅等级排序 + 免费/付费标签
+    val accountModelInfo by viewModel.accountModelInfo.collectAsStateWithLifecycle()
     val sessionProviderModel by viewModel.currentSessionProviderModel.collectAsStateWithLifecycle()
     val defaultProviderId = settingsViewModel?.defaultModelProviderId?.collectAsStateWithLifecycle()?.value ?: ""
     val defaultModelName = settingsViewModel?.defaultModel?.collectAsStateWithLifecycle()?.value ?: ""
@@ -1799,6 +1801,8 @@ fun AIChatPanel(
                 forceOpenModelSheet = onboardingStep == OnboardingStep.SIMULATE_CHOOSE_MODEL,
                 onSelectModelInOnboarding = onSelectModelInOnboarding,
                 onModelSheetDismiss = onDismissModelSheetInOnboarding,
+                accountModelInfo = accountModelInfo,
+                onOpenRefresh = viewModel::refreshAccountModelsIfStale,
                 modifier = Modifier
                     .fillMaxWidth()
                     .onboardingTarget(OnboardingStep.SEND_MESSAGE)

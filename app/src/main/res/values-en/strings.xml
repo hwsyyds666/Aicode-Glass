@@ -102,6 +102,7 @@
     <string name="openai_error_quota_network">The quota service is unavailable or its interface changed. Try again later or open OpenAI usage.</string>
     <string name="openai_error_quota_unavailable">The usage service returned no recognizable quota windows. Try again later.</string>
     <string name="openai_error_no_available_account">The connected OpenAI account is disabled or does not support model %1$s. Check that account and model settings.</string>
+    <string name="openai_error_model_requires_paid_plan">Model %1$s requires a paid subscription and is unavailable on the current ChatGPT account. Switch to a paid account or pick another model in the model picker.</string>
     <string name="openai_error_account_limit">This device keeps at most %1$d ChatGPT accounts. Remove an unused account before adding another.</string>
     <string name="openai_error_access_token_decrypt">The local access token could not be decrypted. Sign in again.</string>
     <string name="openai_error_refresh_token_decrypt">The local refresh credential could not be decrypted. Sign in again.</string>
@@ -129,7 +130,7 @@
     <string name="openai_account_import_placeholder">{"tokens":{"access_token":"…","refresh_token":"…"}}</string>
     <string name="openai_notice_imported">Account imported.</string>
     <string name="openai_error_request_id">Request ID: %1$s</string>
-    <string name="openai_account_provider_name">OpenAI · %1$s</string>
+    <string name="openai_account_provider_name">ChatGPT · %1$s</string>
     <string name="openai_account_default_name">OpenAI account</string>
     <string name="openai_callback_title">OpenAI sign-in</string>
     <string name="openai_callback_success">Authorization complete. Return to Aicode-Glass.</string>
@@ -1465,6 +1466,8 @@
     <string name="provider_model_capability_tools">Tool Calling</string>
     <string name="provider_model_capability_reasoning">Reasoning</string>
     <string name="provider_filter_models_hint">Filter models by name</string>
+    <string name="model_tag_free_tier">Free tier</string>
+    <string name="model_tag_paid_only">Paid only</string>
     <string name="provider_fetch_failed">Fetch failed: %1$s</string>
     <string name="provider_no_matching_models">No matching models</string>
     <string name="provider_models_aligned_removed">Removed %1$d model(s) no longer offered by the vendor</string>
@@ -2006,13 +2009,16 @@
     <string name="openai_import_tab_json">Paste JSON</string>
     <string name="openai_import_tab_token">Access token</string>
     <string name="openai_import_tab_lines">Batch text</string>
-    <string name="openai_import_json_hint">Accepts the Codex CLI auth.json, exported Web Session JSON, any object carrying id_token / access_token / refresh_token, or a JSON array to import several at once.</string>
+    <string name="openai_import_json_hint">Accepts the Codex CLI auth.json, exported Web Session JSON, sub2api exports (accounts/credentials), any object carrying id_token / access_token / refresh_token, or a JSON array to import several at once. Refresh-token-only entries are exchanged for a full token set automatically.</string>
     <string name="openai_import_json_placeholder">{"tokens":{"id_token":"...","access_token":"...","refresh_token":"..."}}</string>
     <string name="openai_import_token_hint">Create an account from a bare access token with a display name, for cases where only the token is available.</string>
     <string name="openai_import_token_name_label">Account name (optional)</string>
     <string name="openai_import_token_value_placeholder">Paste the access token here</string>
     <string name="openai_import_lines_hint">One entry per line: a JSON object, a bare token, or email----password----2FA secret----mail url (3 segments work too). Pending rows only record the email and need a login to activate.</string>
     <string name="openai_import_lines_placeholder">user@example.com----password----2FAKEY----mail@example.com</string>
+    <string name="openai_import_pick_file">Pick a file (TXT / JSON)</string>
+    <string name="openai_import_file_read_failed">Could not read the file. Try another file or paste the content instead.</string>
+    <string name="openai_import_file_too_large">File too large (over 2 MB). Please split it into smaller batches.</string>
     <string name="openai_notice_no_accounts">No accounts yet. Add or import one first.</string>
     <string name="openai_warning_usage_refresh_partial">%1$d of %2$d accounts failed to refresh; the rest are updated.</string>
     <string name="openai_error_no_pending_login">No login in progress. Tap "Add account" again.</string>

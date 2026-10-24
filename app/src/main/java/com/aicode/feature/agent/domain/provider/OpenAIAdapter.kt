@@ -52,6 +52,11 @@ class OpenAIAdapter @Inject constructor(
 
     /** True only for OpenAI's official Sign in with ChatGPT plan-usage profile. */
     var chatGptPlanUsage: Boolean = false
+    /**
+     * ChatGPT 账号的 `chatgpt_account_id`（账号模式必填）。
+     * 官方 Codex 后端按它定位账号归属；缺失时请求会被判为无效账号标识。
+     */
+    var chatGptAccountId: String? = null
     /** Localized app-specific limit message supplied by the account repository for official account calls. */
     var chatGptUsageLimitMessage: String = "ChatGPT app usage limit reached"
 
@@ -71,17 +76,32 @@ class OpenAIAdapter @Inject constructor(
     // null 时请求体不带 temperature（Gson 跳过 null 字段），交由服务端默认。
     override var temperature: Float? = null
 
-    private fun extraHeaders(): Map<String, String> =
-        resolveCustomHeaders(customHeaders, logSessionId, apiKey)
+    private fun extraHeaders(): Map<String, String> = buildMap {
+        putAll(resolveCustomHeaders(customHeaders, logSessionId, apiKey))
+        if (chatGptPlanUsage) {
+            // 官方 Codex 后端（chatgpt.com/backend-api/codex）按账号头定位归属，
+            // originator 与官方 Codex 客户端保持一致，避免被当异常客户端拒识。
+            put("originator", "codex_cli_rs")
+            chatGptAccountId?.takeIf { it.isNotBlank() }?.let { put("chatgpt-account-id", it) }
+        }
+    }
 
     /**
      * 目标端点：Responses API 开启时用 `v1/responses`，否则用 chat/completions 路径（[defaultProviderApiPath]）。
      * useResponseApi 时请求体是 Responses 格式（`input`），若仍打到 chat/completions 会被服务端以
      * 「missing field `messages`」拒绝，故必须同步切端点。useFullUrl 时直接用用户填的完整 baseUrl。
+     *
+     * ChatGPT 账号模式（[chatGptPlanUsage]）例外：订阅 token 没有 api.openai.com 平台权限
+     * （打过去是 401 missing scopes / 403），必须走官方 Codex 后端
+     * `chatgpt.com/backend-api/codex/responses`，与官方 Codex 客户端同路径。
      */
     private fun resolveApiUrl(): String {
         if (useFullUrl) return baseUrl
-        val path = if (useResponseApi) "v1/responses" else defaultProviderApiPath(ProviderType.OPENAI)
+        val path = when {
+            useResponseApi && chatGptPlanUsage -> "responses"
+            useResponseApi -> "v1/responses"
+            else -> defaultProviderApiPath(ProviderType.OPENAI)
+        }
         return joinUrl(baseUrl, path)
     }
 

@@ -1000,7 +1000,8 @@ class BackupManagerImpl @Inject constructor(
         const val MAX_BACKUP_CLIENT_ID = 512
         const val MAX_BACKUP_ACCOUNT_TEXT = 256
         const val MAX_MODEL_CATALOG_BACKUP_CHARS = 64 * 1024
-        const val OPENAI_ACCOUNT_BASE_URL = "https://api.openai.com/"
+        // 与 StatefulAgentWorkflow 保持一致：账号模式走官方 Codex 后端。
+        const val OPENAI_ACCOUNT_BASE_URL = "https://chatgpt.com/backend-api/codex/"
         val OPENAI_ACCOUNT_ID = Regex("[A-Za-z0-9._-]{1,128}")
         val SAFE_MODEL_SLUG = Regex("[A-Za-z0-9._:-]{1,128}")
         const val FILE_METADATA = "metadata.json"

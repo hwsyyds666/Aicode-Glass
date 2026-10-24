@@ -91,6 +91,7 @@ internal fun DefaultModelsSectionHost(
     val subAgentTimeoutMinutes by viewModel.subAgentTimeoutMinutes.collectAsStateWithLifecycle()
     val modelMetadata by viewModel.modelMetadata.collectAsStateWithLifecycle()
     val contextWindowOverride by viewModel.contextWindowOverride.collectAsStateWithLifecycle()
+    val accountModelInfo by viewModel.accountModelInfo.collectAsStateWithLifecycle()
 
     DefaultModelsSection(
         providers = providers,
@@ -128,7 +129,9 @@ internal fun DefaultModelsSectionHost(
         onSetMaxSubAgentTotal = viewModel::setMaxSubAgentTotal,
         onSetSubAgentTimeoutMinutes = viewModel::setSubAgentTimeoutMinutes,
         contextWindowEnabled = contextWindowOverride.enabled,
-        onOpenContextWindow = onOpenContextWindow
+        onOpenContextWindow = onOpenContextWindow,
+        accountModelInfo = accountModelInfo,
+        onOpenRefresh = viewModel::refreshAccountModelsIfStale
     )
 }
 

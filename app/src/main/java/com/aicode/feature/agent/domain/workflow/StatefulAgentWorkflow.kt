@@ -141,7 +141,13 @@ class StatefulAgentWorkflow @Inject constructor(
 
     private companion object {
         const val TAG = "StatefulAgentWorkflow"
-        const val OPENAI_ACCOUNT_BASE_URL = "https://api.openai.com/"
+        /**
+         * ChatGPT 订阅账号的调用基址。
+         * 订阅 token 没有 api.openai.com 平台权限（401 missing scopes / 403），
+         * 必须打官方 Codex 后端 chatgpt.com/backend-api/codex（与官方 Codex 客户端同源），
+         * 由 OpenAIAdapter 在该基址后拼 responses 路径并附带 chatgpt-account-id 头。
+         */
+        const val OPENAI_ACCOUNT_BASE_URL = "https://chatgpt.com/backend-api/codex/"
         const val USER_REJECTED_CODE = "USER_REJECTED"
         const val TITLE_GENERATOR_FILE = "agent/title-generator.md"
         const val TITLE_MAX_CHARS = 50
@@ -301,7 +307,7 @@ class StatefulAgentWorkflow @Inject constructor(
             throw IllegalStateException(openAIAccountRepository.invalidProviderTypeMessage())
         }
         val accountRoute = if (isOpenAIAccount) {
-            openAIAccountRepository.routeForModel(openAIAccountId!!, config.effectiveModel)
+            openAIAccountRepository.routeForModel(openAIAccountId!!, config.effectiveModel, sessionId)
                 ?: throw IllegalStateException(openAIAccountRepository.noAvailableAccountMessage(config.effectiveModel))
         } else null
         val provider: AIProvider = when (config.type) {
@@ -313,6 +319,7 @@ class StatefulAgentWorkflow @Inject constructor(
                 it.chatCacheKeyEnabled = config.openaiChatCacheKey && !isOpenAIAccount
                 if (isOpenAIAccount) {
                     it.chatGptPlanUsage = true
+                    it.chatGptAccountId = accountRoute?.chatgptAccountId
                     it.chatGptUsageLimitMessage = openAIAccountRepository.usageLimitMessage()
                 }
             }

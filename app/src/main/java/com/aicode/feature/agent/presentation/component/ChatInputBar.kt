@@ -213,6 +213,10 @@ internal fun ChatInputBar(
     forceOpenModelSheet: Boolean = false,
     onSelectModelInOnboarding: (() -> Unit)? = null,
     onModelSheetDismiss: (() -> Unit)? = null,
+    /** ChatGPT 账号 provider 的档位信息（providerId → 档位）；模型选择器排序与免费/付费标签用。 */
+    accountModelInfo: Map<String, com.aicode.feature.settings.presentation.component.AccountModelInfo> = emptyMap(),
+    /** 打开模型选择器时触发账号模型目录 TTL 刷新。 */
+    onOpenRefresh: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val hasContent = value.isNotBlank() || pendingAttachments.isNotEmpty()
@@ -522,6 +526,8 @@ internal fun ChatInputBar(
                             forceOpenSheet = forceOpenModelSheet,
                             onSelectSuccessInOnboarding = onSelectModelInOnboarding,
                             onSheetDismiss = onModelSheetDismiss,
+                            accountModelInfo = accountModelInfo,
+                            onOpenRefresh = onOpenRefresh,
                             modifier = Modifier.onboardingTarget(OnboardingStep.OPEN_MODEL_PICKER)
                         )
 
