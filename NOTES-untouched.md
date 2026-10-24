@@ -5,7 +5,7 @@
 ## 用户拿到 Release 包后重点验收
 
 - Bash 修复验证：非 Git 仓库工作区连续执行多条命令，stdout/stderr 必须完整可见（曾经的 bug：只返回 warning）。
-- search 修复验证：容器无 rg 时用 alternation 模式（如 `pstore|ramoops`）搜索，结果应与 rg 一致（曾经的 bug：BRE 把 `|` 当字面量）。
+- search 修复验证：**真机（DEVICE_ROOT）模式**下搜索工作区内文件（如 `pstore|ramoops` 这类 alternation），结果应与容器模式一致；此模式下现在会翻译路径后交给容器执行。再单独验证搜索工作区外的 `/system`、`/data` 子树仍走真机执行且不报错。
 - terminal 验证：不传 tab_id 的 send 在只有一个运行中标签时自动命中；多标签时报错带候选清单。
 - 超级 Agent 设置区：快速/主力的模型与思考强度（底部弹层）、派发限制三项（底部弹层）；确认无「独立 reviewer / 大改动阈值」残留。
 - ChatGPT 账号页：计划徽章配色、5h/每周额度迷你条与重置时间、模型选择弹层、图标动作行；深浅色主题下均清晰。
@@ -17,7 +17,8 @@
 - 终态子代理返工两轮后第三次被拒；超级 Agent 关闭时不主动派发；开启时执行 6 文件/3 独立任务，检查并行状态、范围拒绝、返工。
 - 命令审查危险/模糊用例，断网/超时回退询问；删除家目录、工作区根、系统路径等均不能被“完全权限”或提权绕过。
 - 新目录缓存快速连续展开、SFTP 慢目录并发浏览、Agent 修改后精准刷新；观察滚动流畅度及切换目录时旧请求不覆盖新结果。
-- ripgrep 初次安装/缺失自愈；远程 SSH 无 rg 时 grep 兜底；测试 toybox grep 的实际选项兼容性。
+- ripgrep 初次安装/缺失自愈（含容器目标补装）；远程 SSH 无 rg 时 grep 兜底；测试 toybox grep 的实际选项兼容性。
+- **GitHub 连接（阻塞项，需仓库 owner 操作）**：`GitHubOAuthRepository.BUILT_IN_CLIENT_ID` 仍是空占位，未注册 OAuth App 前 Device Flow 无法发起。注册步骤见 `HANDOFF-进度交接.md` 第三轮「GitHub 连接缺什么」。填好后需重新编译。
 - GitHub OAuth Device Flow 真实登录、分页、克隆取消、限流/拒绝/过期；确认 token 不进入日志。
 - OpenAI 登录、凭据加密存储、退出/恢复授权及额度展示。不要将多账号轮换作为避开套餐/速率限制的测试目标。
 - sendFile 从容器/远程路径映射到本地，图片/大文件/重复文件/不存在路径，以及纯问答不应误发文件。
