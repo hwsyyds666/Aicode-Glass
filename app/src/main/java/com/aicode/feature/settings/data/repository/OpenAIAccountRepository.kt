@@ -20,6 +20,7 @@ import com.aicode.feature.settings.domain.model.ProviderType
 import com.aicode.feature.settings.domain.repository.AIProviderRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
@@ -92,6 +93,17 @@ data class OpenAIAccountModel(val slug: String, val displayName: String)
 data class OpenAIAccountRefreshResult(val models: List<OpenAIAccountModel>, val warning: String? = null)
 
 /**
+ * A pending ChatGPT login. [authorizeUrl] is opened by the UI; completion comes either from the
+ * loopback redirect or from the user pasting the callback URL back into the app.
+ */
+data class OpenAILoginSession(
+    val sessionId: String,
+    val authorizeUrl: String,
+    val expiresAtMillis: Long,
+    val accountId: String?
+)
+
+/**
  * Official Sign in with ChatGPT local profile store and Responses API provider bridge.
  * OAuth tokens are KeystoreCipher-encrypted in Room and never copied into provider settings,
  * logs, model context, backups, or browser URLs. Usage refresh uses the first-party but undocumented
@@ -114,6 +126,22 @@ class OpenAIAccountRepository @Inject constructor(
         .callTimeout(HTTP_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .build()
     private val refreshLocks = ConcurrentHashMap<String, Mutex>()
+    private val pendingLogins = ConcurrentHashMap<String, PendingLogin>()
+
+    private data class PendingLogin(
+        val server: ServerSocket,
+        val state: String,
+        val nonce: String,
+        val pkce: OpenAIOAuthProtocol.Pkce,
+        val hostId: String,
+        val discovery: Discovery,
+        val previous: OpenAIAccountEntity?,
+        val previousIsBackupPlaceholder: Boolean,
+        val knownClientId: String,
+        val redirectUri: String,
+        val expiresAtMillis: Long,
+        val callback: CompletableDeferred<OpenAIOAuthProtocol.Callback>
+    )
 
     fun observeAccounts(): Flow<List<OpenAIAccountSummary>> = combine(
         accountDao.observeAll(),
@@ -157,13 +185,15 @@ class OpenAIAccountRepository @Inject constructor(
     fun invalidProviderTypeMessage(): String = text(R.string.openai_error_missing_provider_type)
     fun missingCredentialsMessage(): String = text(R.string.openai_error_missing_credentials)
 
-    /** Connects one local ChatGPT plan-usage profile, or reauthorizes that same profile. */
-    suspend fun signIn(existingAccountId: String? = null): OpenAIAccountSummary {
+    /** Creates an authorization session and returns the URL to open. Nothing is opened here. */
+    suspend fun beginLogin(existingAccountId: String? = null): OpenAILoginSession {
         val previous = existingAccountId?.let { accountDao.getById(it) }
             ?: if (existingAccountId != null) throw OpenAIAccountException(text(R.string.openai_error_account_missing)) else null
         val savedIds = accountDao.getAllOnce().mapTo(mutableSetOf(), OpenAIAccountEntity::id)
         if (!OpenAIAccountSelectionPolicy.canConnect(savedIds, previous?.id)) {
-            throw OpenAIAccountException(text(R.string.openai_error_single_profile))
+            throw OpenAIAccountException(
+                text(R.string.openai_error_account_limit, OpenAIAccountSelectionPolicy.MAX_ACCOUNTS)
+            )
         }
         val discovery = loadDiscovery()
         val state = OpenAIOAuthProtocol.newOpaqueValue()
@@ -177,6 +207,8 @@ class OpenAIAccountRepository @Inject constructor(
         } == true
 
         val server = ServerSocket()
+        var registered = false
+        val sessionId = UUID.randomUUID().toString()
         try {
             server.reuseAddress = false
             server.bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0), 1)
@@ -193,23 +225,229 @@ class OpenAIAccountRepository @Inject constructor(
                 accountName = if (previous == null) APP_NAME else null,
                 loginHint = previous?.email
             )
+            val expiresAt = System.currentTimeMillis() + LOGIN_SESSION_WINDOW_MS
+            pendingLogins[sessionId] = PendingLogin(
+                server = server,
+                state = state,
+                nonce = nonce,
+                pkce = pkce,
+                hostId = hostId,
+                discovery = discovery,
+                previous = previous,
+                previousIsBackupPlaceholder = previousIsBackupPlaceholder,
+                knownClientId = knownClientId,
+                redirectUri = redirectUri,
+                expiresAtMillis = expiresAt,
+                callback = CompletableDeferred()
+            )
+            registered = true
+            return OpenAILoginSession(
+                sessionId = sessionId,
+                authorizeUrl = authUrl.toString(),
+                expiresAtMillis = expiresAt,
+                accountId = existingAccountId
+            )
+        } finally {
+            if (!registered) runCatching { server.close() }
+        }
+    }
 
-            val callback = coroutineScope {
-                val listener = async(Dispatchers.IO) { awaitCallback(server, state) }
-                try {
-                    context.startActivity(
-                        Intent(Intent.ACTION_VIEW, Uri.parse(authUrl.toString()))
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    )
-                    withTimeout(CALLBACK_TIMEOUT_MS.toLong()) { listener.await() }
-                } catch (cancelled: CancellationException) {
-                    runCatching { server.close() }
-                    listener.cancelAndJoin()
-                    throw cancelled
-                } finally {
-                    server.close()
-                }
+    /** Legacy one-shot login: opens the browser itself and blocks until the loopback callback lands. */
+    suspend fun signIn(existingAccountId: String? = null): OpenAIAccountSummary {
+        val session = beginLogin(existingAccountId)
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW, Uri.parse(session.authorizeUrl))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+        return try {
+            awaitLoginCompletion(session.sessionId)
+        } finally {
+            cancelLogin(session.sessionId)
+        }
+    }
+
+    /**
+     * Waits for the authorization callback. Either the browser's loopback redirect or a manually
+     * pasted callback URL (see [submitLoginCallback]) can complete it — browsers on some devices
+     * refuse to hit 127.0.0.1, and the manual path keeps login usable there.
+     */
+    suspend fun awaitLoginCompletion(sessionId: String): OpenAIAccountSummary {
+        val pending = pendingLogins[sessionId]
+            ?: throw OpenAIAccountException(text(R.string.openai_error_login_expired))
+        val callback = coroutineScope {
+            val listener = async(Dispatchers.IO) {
+                runCatching { awaitCallback(pending.server, pending.state) }
+                    .onSuccess { pending.callback.complete(it) }
             }
+            try {
+                withTimeout((pending.expiresAtMillis - System.currentTimeMillis()).coerceAtLeast(1_000L)) {
+                    pending.callback.await()
+                }
+            } finally {
+                listener.cancelAndJoin()
+                runCatching { pending.server.close() }
+            }
+        }
+        return try {
+            completeLogin(pending, callback)
+        } finally {
+            pendingLogins.remove(sessionId)
+        }
+    }
+
+    /** Completes a pending login from the URL the browser finally landed on (or just its query part). */
+    suspend fun submitLoginCallback(sessionId: String, rawInput: String): Boolean {
+        val pending = pendingLogins[sessionId]
+            ?: throw OpenAIAccountException(text(R.string.openai_error_login_expired))
+        val raw = rawInput.trim()
+        val query = raw.substringAfter('?', raw).substringBefore('#').trim()
+        if (query.isBlank()) throw OpenAIAccountException(text(R.string.openai_error_callback_invalid))
+        val callback = OpenAIOAuthProtocol.parseCallbackTarget("${OpenAIOAuthProtocol.CALLBACK_PATH}?$query")
+            ?: throw OpenAIAccountException(text(R.string.openai_error_callback_invalid))
+        if (!OpenAIOAuthProtocol.constantTimeEquals(callback.value("state").orEmpty(), pending.state)) {
+            throw OpenAIAccountException(text(R.string.openai_error_auth_state_mismatch))
+        }
+        callback.value("error")?.takeIf(String::isNotBlank)?.let { error ->
+            throw OpenAIAccountException(
+                text(
+                    if (error == "access_denied") R.string.openai_error_auth_cancelled
+                    else R.string.openai_error_auth_incomplete,
+                    error
+                )
+            )
+        }
+        return pending.callback.complete(callback)
+    }
+
+    fun cancelLogin(sessionId: String?) {
+        val pending = pendingLogins.remove(sessionId ?: return) ?: return
+        runCatching { pending.server.close() }
+        runCatching { pending.callback.cancel() }
+    }
+
+    /**
+     * Imports an existing ChatGPT credential (Codex CLI `auth.json`, or a JSON object carrying
+     * id_token / access_token / refresh_token). No browser round-trip is involved.
+     */
+    suspend fun importAccountFromJson(raw: String): OpenAIAccountSummary {
+        val json = runCatching { JSONObject(raw) }.getOrNull()
+            ?: throw OpenAIAccountException(text(R.string.openai_error_import_invalid))
+        val tokens = json.optJSONObject("tokens") ?: json
+        val idToken = tokens.optString("id_token").ifBlank { json.optString("id_token") }
+        val accessToken = tokens.optString("access_token").ifBlank { json.optString("access_token") }
+        val refreshToken = tokens.optString("refresh_token").ifBlank { json.optString("refresh_token") }
+        val clientId = tokens.optString("client_id").ifBlank { json.optString("client_id") }
+            .ifBlank { OpenAIOAuthProtocol.CODEX_CLI_CLIENT_ID }
+        if (accessToken.isBlank()) throw OpenAIAccountException(text(R.string.openai_error_import_missing_token))
+
+        val savedIds = accountDao.getAllOnce().mapTo(mutableSetOf(), OpenAIAccountEntity::id)
+        if (!OpenAIAccountSelectionPolicy.canConnect(savedIds, null)) {
+            throw OpenAIAccountException(
+                text(R.string.openai_error_account_limit, OpenAIAccountSelectionPolicy.MAX_ACCOUNTS)
+            )
+        }
+        val hostId = stableHostId()
+        val now = System.currentTimeMillis()
+        val claims = decodeIdTokenClaims(idToken)
+        val auth = claims?.optJSONObject("https://api.openai.com/auth")
+        val subject = claims?.optString("sub")?.takeIf(String::isNotBlank)
+            ?: tokens.optString("account_id").takeIf(String::isNotBlank)
+            ?: json.optString("account_id").takeIf(String::isNotBlank)
+            ?: "imported-${UUID.randomUUID()}"
+        val email = claims?.optString("email")?.takeIf(String::isNotBlank)
+            ?: auth?.optString("chatgpt_user_email")
+            ?: ""
+        val name = claims?.optString("name")?.takeIf(String::isNotBlank)
+            ?: email.ifBlank { text(R.string.openai_account_default_name) }
+        val existing = accountDao.getAllOnce().firstOrNull { it.subject == subject }
+        val accountId = existing?.id ?: UUID.randomUUID().toString()
+        val providerId = existing?.providerId ?: "$PROVIDER_ID_PREFIX$accountId"
+        val models = runCatching { fetchModelCatalog(accessToken) }.getOrDefault(emptyList())
+        val scopes = listOf("openid", "profile", "email", "offline_access", "resource.invoke", OpenAIOAuthProtocol.PLAN_USAGE_SCOPE)
+            .sorted().joinToString(" ")
+        val account = OpenAIAccountEntity(
+            id = accountId,
+            providerId = providerId,
+            subject = subject,
+            email = email,
+            displayName = name,
+            clientId = clientId,
+            encryptedAccessToken = KeystoreCipher.encryptString(accessToken),
+            encryptedRefreshToken = KeystoreCipher.encryptString(refreshToken),
+            encryptedIdToken = KeystoreCipher.encryptString(idToken),
+            scopes = scopes,
+            accessTokenExpiresAt = now + TimeUnit.HOURS.toMillis(1),
+            hostId = hostId,
+            modelCatalogJson = encodeModelCatalog(models),
+            status = OpenAIAccountEntity.STATUS_CONNECTED,
+            lastError = null,
+            chatgptAccountId = auth?.optString("chatgpt_account_id")?.takeIf(String::isNotBlank),
+            createdAt = existing?.createdAt ?: now,
+            updatedAt = now
+        )
+        val oldProvider = providerRepository.getProviderById(providerId)
+        val modelSlugs = models.map(OpenAIAccountModel::slug)
+        val selected = oldProvider?.effectiveModel?.takeIf { it in modelSlugs } ?: modelSlugs.firstOrNull().orEmpty()
+        val provider = AIProviderConfig(
+            id = providerId,
+            name = accountProviderName(account),
+            type = ProviderType.OPENAI,
+            apiKey = providerMarker(accountId),
+            baseUrl = OPENAI_BASE_URL,
+            defaultModel = selected,
+            models = modelSlugs,
+            selectedModel = selected,
+            isEnabled = oldProvider?.isEnabled ?: true,
+            useResponseApi = true,
+            sortOrder = oldProvider?.sortOrder ?: -1
+        )
+        try {
+            database.withTransaction {
+                accountDao.upsert(account)
+                providerRepository.saveProvider(provider)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            FileLogger.e(TAG, "OpenAI account import save failed", error)
+            throw OpenAIAccountException(text(R.string.openai_error_secure_storage_failed))
+        }
+        runCatching { refreshUsage(account.id) }
+        return OpenAIAccountSummary(
+            id = account.id,
+            providerId = providerId,
+            email = account.email,
+            displayName = account.displayName,
+            status = account.status,
+            lastError = account.lastError,
+            planUsageAuthorized = true,
+            enabled = provider.isEnabled,
+            models = models,
+            selectedModel = selected
+        )
+    }
+
+    private fun decodeIdTokenClaims(idToken: String): JSONObject? {
+        if (idToken.isBlank()) return null
+        val segments = idToken.split('.')
+        if (segments.size != 3) return null
+        return runCatching {
+            JSONObject(decodeBase64Url(segments[1]).toString(StandardCharsets.UTF_8))
+        }.getOrNull()
+    }
+
+    private suspend fun completeLogin(
+        pending: PendingLogin,
+        callback: OpenAIOAuthProtocol.Callback
+    ): OpenAIAccountSummary {
+        val previous = pending.previous
+        val previousIsBackupPlaceholder = pending.previousIsBackupPlaceholder
+        val hostId = pending.hostId
+        val discovery = pending.discovery
+        val nonce = pending.nonce
+        val pkce = pending.pkce
+        val redirectUri = pending.redirectUri
+        try {
             callback.value("error")?.let { error ->
                 throw OpenAIAccountException(
                     text(if (error == "access_denied") R.string.openai_error_auth_cancelled else R.string.openai_error_auth_incomplete, error)
@@ -362,8 +600,6 @@ class OpenAIAccountRepository @Inject constructor(
             )
         } catch (error: IOException) {
             throw OpenAIAccountException(text(R.string.openai_error_callback_failed))
-        } finally {
-            runCatching { server.close() }
         }
     }
 
@@ -475,10 +711,13 @@ class OpenAIAccountRepository @Inject constructor(
         return snapshot
     }
 
-    /** Resolves only the profile explicitly selected by the provider; never selects another account. */
+    /**
+     * Resolves only the account explicitly selected by the caller; never falls back to another one.
+     *
+     * 本机可并存多个账号，但这里只认调用方显式指定的那个：账号被删掉/不存在即失败，
+     * 不会在账号间回退，也就不会变成"额度池"。
+     */
     suspend fun routeForModel(preferredAccountId: String, model: String): ChatGptAccountTarget? {
-        // Fail closed when upgrading a database that already contains legacy multi-account rows.
-        // The supported SIWC integration is a single local profile and must never become a quota pool.
         val savedIds = accountDao.getAllOnce().mapTo(mutableSetOf(), OpenAIAccountEntity::id)
         if (!OpenAIAccountSelectionPolicy.canRoute(savedIds, preferredAccountId)) return null
         val account = accountDao.getById(preferredAccountId) ?: return null
@@ -507,9 +746,6 @@ class OpenAIAccountRepository @Inject constructor(
 
     suspend fun setEnabled(accountId: String, enabled: Boolean) {
         val account = accountDao.getById(accountId) ?: throw OpenAIAccountException(text(R.string.openai_error_account_missing))
-        if (enabled && accountDao.getAllOnce().any { it.id != accountId }) {
-            throw OpenAIAccountException(text(R.string.openai_error_single_profile))
-        }
         database.withTransaction {
             accountDao.upsert(account.copy(
                 restoreProviderEnabled = enabled,
@@ -532,6 +768,17 @@ class OpenAIAccountRepository @Inject constructor(
             }
             providerRepository.setProviderEnabled(account.providerId, enabled)
         }
+    }
+
+    /**
+     * 账号对应的 providerId 与当前选中模型，供「设为新会话默认」写入默认模型配置。
+     * 账号或 provider 不存在时返回 null。
+     */
+    suspend fun providerSelectionOf(accountId: String): Pair<String, String>? {
+        val account = accountDao.getById(accountId) ?: return null
+        val provider = providerRepository.getProviderById(account.providerId) ?: return null
+        val model = provider.effectiveModel.ifBlank { provider.models.firstOrNull().orEmpty() }
+        return account.providerId to model
     }
 
     suspend fun setSelectedModel(accountId: String, model: String) {
@@ -1016,6 +1263,7 @@ class OpenAIAccountRepository @Inject constructor(
         private const val OPENAI_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
         private const val APP_NAME = "Aicode-Glass"
         private const val CALLBACK_TIMEOUT_MS = 180_000
+        private const val LOGIN_SESSION_WINDOW_MS = 180_000L
         private const val CALLBACK_CLIENT_READ_TIMEOUT_MS = 5_000
         private const val MAX_CALLBACK_REQUEST_BYTES = 16 * 1024
         private const val MAX_CALLBACK_REQUEST_LINE = 8 * 1024

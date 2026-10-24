@@ -6,6 +6,8 @@
 
 - Bash 修复验证：非 Git 仓库工作区连续执行多条命令，stdout/stderr 必须完整可见（曾经的 bug：只返回 warning）。
 - search 修复验证：**真机（DEVICE_ROOT）模式**下搜索工作区内文件（如 `pstore|ramoops` 这类 alternation），结果应与容器模式一致；此模式下现在会翻译路径后交给容器执行。再单独验证搜索工作区外的 `/system`、`/data` 子树仍走真机执行且不报错。
+- search 内置 rg 验证：真机模式下 `-uu`、`--glob`、`-t` 等 rg 专有参数应返回真实命中（走内置静态 rg，结果 JSON 的 `backend` 为 `rg`）；若 `backend` 为 `grep`，确认 `warning`/`dropped_flags` 有说明、且不是"静默 0 结果"。
+- ChatGPT 多账号验证：连续添加 2 个以上账号（按钮应始终可点）、两账号额度分别刷新、启用/停用互不干扰、"设为默认"后新建会话确实用该账号、移除其中一个后另一个不受影响；确认聊天里选模型仍能指定任一账号。
 - terminal 验证：不传 tab_id 的 send 在只有一个运行中标签时自动命中；多标签时报错带候选清单。
 - 超级 Agent 设置区：快速/主力的模型与思考强度（底部弹层）、派发限制三项（底部弹层）；确认无「独立 reviewer / 大改动阈值」残留。
 - ChatGPT 账号页：计划徽章配色、5h/每周额度迷你条与重置时间、模型选择弹层、图标动作行；深浅色主题下均清晰。
@@ -18,8 +20,10 @@
 - 命令审查危险/模糊用例，断网/超时回退询问；删除家目录、工作区根、系统路径等均不能被“完全权限”或提权绕过。
 - 新目录缓存快速连续展开、SFTP 慢目录并发浏览、Agent 修改后精准刷新；观察滚动流畅度及切换目录时旧请求不覆盖新结果。
 - ripgrep 初次安装/缺失自愈（含容器目标补装）；远程 SSH 无 rg 时 grep 兜底；测试 toybox grep 的实际选项兼容性。
-- **GitHub 连接（阻塞项，需仓库 owner 操作）**：`GitHubOAuthRepository.BUILT_IN_CLIENT_ID` 仍是空占位，未注册 OAuth App 前 Device Flow 无法发起。注册步骤见 `HANDOFF-进度交接.md` 第三轮「GitHub 连接缺什么」。填好后需重新编译。
+- **GitHub Device Flow（需 owner 在 OAuth App 上勾选 Enable device flow）**：Client ID 已内置（`Ov23li…`），点击「GitHub」入口一键跳浏览器、**不再弹二次窗口**；授权码自动复制到剪贴板并 Toast 提示。若 GitHub 返回"设备流未启用"，需到 Settings → Developer settings → OAuth Apps → 该 App 勾选 **Enable device flow** 后重试。
 - GitHub OAuth Device Flow 真实登录、分页、克隆取消、限流/拒绝/过期；确认 token 不进入日志。
+- ChatGPT 添加账号：弹层里「打开浏览器登录」后，若浏览器**没有自动跳回**应用，需复制地址栏完整回调链接粘回「手动粘贴回调链接」并点「完成登录」——这是 cockpit-tools 同款兜底路径，必须真机验一遍。
+- ChatGPT 导入账号：粘贴 Codex CLI `auth.json` 全文（或含 access_token/refresh_token/id_token 的 JSON）应直接建立账号；注意导入账号的 refresh 依赖 `client_id`，auth.json 未带时回退到 Codex CLI 公开 client id，如续期失败请重新走浏览器登录。
 - OpenAI 登录、凭据加密存储、退出/恢复授权及额度展示。不要将多账号轮换作为避开套餐/速率限制的测试目标。
 - sendFile 从容器/远程路径映射到本地，图片/大文件/重复文件/不存在路径，以及纯问答不应误发文件。
 - 斜杠菜单：100+ 技能，竖/横屏、软键盘、分屏、外接键盘与窄屏。
@@ -39,4 +43,5 @@
 ## 有意延期
 
 - 17·P3-d 已新增 Macrobenchmark 模块，含冷启动与对话流式输出/滚动两个基准场景。当前无连接设备，基准代码尚未在实体设备运行；不要把模拟器结果当成性能结论。
-- OpenAI 多账号配额轮换未实现；已交付安全的账号/凭据管理与额度显示。遵守 Sign in with ChatGPT 的官方授权边界，不为规避订阅套餐或速率限制而在账号间自动切换。
+- 多账号**管理**已实现（2026-10-24 第四轮：可并存多个账号、分别查看额度、单独启停、设为默认、移除）。仍未实现且有意不做的是**自动轮换/故障转移**：请求只走用户显式选中的账号，某个账号额度触顶不会自动换号——这是遵守 Sign in with ChatGPT 官方授权边界的硬线，不为规避订阅套餐或速率限制而在账号间自动切换。
+- 内置 rg 为 musl 静态二进制（ripgrep 15.2.0，MIT/Unlicense），以 `librg.so` 形式随包分发；仅在真机通道启用。若将来升级，需同步替换 `app/src/main/jniLibs/<abi>/librg.so`。

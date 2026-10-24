@@ -1,6 +1,7 @@
 package com.aicode.feature.agent.domain.tool.explorer
 
 import com.aicode.core.util.FileLogger
+import com.aicode.feature.agent.domain.container.BundledRipgrep
 import com.aicode.feature.agent.domain.container.CommandResult
 import com.aicode.feature.agent.domain.container.DelegatingCommandEngine
 import com.aicode.feature.agent.domain.container.RipgrepProvisioner
@@ -43,7 +44,8 @@ class SearchCodeTool @Inject constructor(
     private val modeHolder: ExecutionModeHolder,
     private val workspaceRepository: WorkspaceRepository,
     private val pathHomeResolver: PathHomeResolver,
-    private val ripgrepProvisioner: RipgrepProvisioner
+    private val ripgrepProvisioner: RipgrepProvisioner,
+    private val bundledRipgrep: BundledRipgrep
 ) : AgentTool() {
 
     private companion object {
@@ -96,8 +98,12 @@ class SearchCodeTool @Inject constructor(
                 tokens
             }
             val home = if (useContainer) "/root" else pathHomeResolver.home()
+            // 真机通道没有包管理器、rg 永远装不上：优先改用随包内置的静态 rg，
+            // 有它就完全等价原生 rg（--glob / -uu / 忽略规则等全部行为一致）。
+            val rgBin = if (env == DelegatingCommandEngine.TargetEnv.DEVICE) bundledRipgrep.binaryPath() else null
+            if (rgBin != null) FileLogger.i(TAG, "使用内置 rg: $rgBin")
 
-            val command = buildSearchCommand(effectiveTokens, home)
+            val command = buildSearchCommand(effectiveTokens, home, rgBin = rgBin)
                 ?: return ToolResult.Error("search 仅支持 | head [-n N] 截断输出，不支持其它管道命令", "INVALID_PIPE")
 
             val startedAt = System.currentTimeMillis()
@@ -211,14 +217,16 @@ class SearchCodeTool @Inject constructor(
         startedAt: Long,
         reason: String
     ): ToolResult {
-        val fallbackCommand = buildFallbackSearchCommand(tokens, home)
+        val fallback = buildFallbackSearchCommand(tokens, home)
             ?: return ToolResult.Error(
                 "rg 不可用（自动安装失败：$reason），且当前参数无法用 grep 兜底。" +
                     "可进入终端执行 aicode 安装基础工具（本地容器内为 apk add ripgrep；远程服务器请用其包管理器安装 ripgrep）后重试；" +
                     "或将参数简化为 -i/-F/-w/-e/-g/-A/-B/-C 后重试。",
                 "RG_UNAVAILABLE"
             )
-        FileLogger.w(TAG, "rg 不可用，search 回退 grep 兜底: reason=$reason env=$env")
+        val fallbackCommand = fallback.command
+        val dropped = fallback.droppedFlags
+        FileLogger.w(TAG, "rg 不可用，search 回退 grep 兜底: reason=$reason env=$env dropped=$dropped")
         var result = runSearch(fallbackCommand, env, workspaceRepository.currentPath())
             ?: return ToolResult.Error("执行环境未就绪，无法执行搜索", "ENVIRONMENT_NOT_READY")
         // 退出码 2 = 用法错误（个别精简 grep 不认 --exclude-dir 等旗标；toybox 老版本常见）。
@@ -226,7 +234,7 @@ class SearchCodeTool @Inject constructor(
         // DeviceRootEngine.redirectErrorStream(true)），会非空。故同时要求输出中
         // 没有任何 `文件:行号:内容` 命中行才算纯错误，重试最小命令（仅 -rnI -E）。
         if (result.exitCode == 2 && looksLikePureErrorOutput(result.output)) {
-            val minimalCommand = buildFallbackSearchCommand(tokens, home, minimal = true)
+            val minimalCommand = buildFallbackSearchCommand(tokens, home, minimal = true)?.command
             if (minimalCommand != null) {
                 FileLogger.w(TAG, "grep 兜底用法错误，重试最小命令: $minimalCommand")
                 result = runSearch(minimalCommand, env, workspaceRepository.currentPath())
@@ -245,7 +253,14 @@ class SearchCodeTool @Inject constructor(
                     "truncated" to JsonPrimitive(false),
                     "elapsed_ms" to JsonPrimitive(System.currentTimeMillis() - startedAt),
                     "backend" to JsonPrimitive("grep"),
-                    "warning" to JsonPrimitive("部分文件无法读取（权限或不存在），结果可能不完整")
+                    "degraded" to JsonPrimitive(true),
+                    "dropped_flags" to JsonPrimitive(dropped.joinToString(" ")),
+                    "warning" to JsonPrimitive(
+                        buildString {
+                            append("部分文件无法读取（权限或不存在），结果可能不完整")
+                            if (dropped.isNotEmpty()) append("；已忽略 rg 专有参数：").append(dropped.joinToString(" "))
+                        }
+                    )
                 )))
             }
             return ToolResult.Error(result.output.ifBlank { "grep 兜底搜索失败" }, "SEARCH_ERROR")
@@ -256,7 +271,13 @@ class SearchCodeTool @Inject constructor(
             "matches" to JsonPrimitive(lines.size),
             "truncated" to JsonPrimitive(false),
             "elapsed_ms" to JsonPrimitive(System.currentTimeMillis() - startedAt),
-            "backend" to JsonPrimitive("grep")
+            "backend" to JsonPrimitive("grep"),
+            "degraded" to JsonPrimitive(true),
+            "dropped_flags" to JsonPrimitive(dropped.joinToString(" ")),
+            "warning" to JsonPrimitive(
+                if (dropped.isEmpty()) "rg 不可用，已用 grep 兜底：不读忽略规则，正则按 ERE 解释"
+                else "rg 不可用，已用 grep 兜底：不读忽略规则，正则按 ERE 解释；已忽略 rg 专有参数 ${dropped.joinToString(" ")}"
+            )
         )))
     }
 

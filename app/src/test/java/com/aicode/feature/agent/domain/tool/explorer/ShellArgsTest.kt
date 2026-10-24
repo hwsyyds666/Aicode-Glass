@@ -1,6 +1,7 @@
 package com.aicode.feature.agent.domain.tool.explorer
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -193,9 +194,9 @@ class ShellArgsTest {
         val command = buildFallbackSearchCommand(
             parseShellWords("-i -F -n \"fun main\" ~/workspace/app")!!,
             home = "/root"
-        )!!
+        )!!.command
         assertEquals(
-            "grep -rnI -E --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.gradle -i -F -e 'fun main' '/root/workspace/app'",
+            "grep -rnI -E -i -F --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.gradle -e 'fun main' '/root/workspace/app'",
             command
         )
     }
@@ -203,56 +204,123 @@ class ShellArgsTest {
     @Test
     fun buildFallbackSearchCommand_noPath_defaultsToDot() {
         // grep -r 不带路径会读 stdin，必须显式补 "."（命令 cwd 已是工作区）
-        val command = buildFallbackSearchCommand(parseShellWords("TODO")!!)!!
+        val command = buildFallbackSearchCommand(parseShellWords("TODO")!!)!!.command
         assertTrue(command.startsWith("grep -rnI -E"))
         assertTrue(command.endsWith("-e 'TODO' ."))
     }
 
     @Test
-    fun buildFallbackSearchCommand_globMapsToInclude_negativeGlobRejected() {
-        val command = buildFallbackSearchCommand(parseShellWords("-g '*.kt' foo src/")!!)!!
+    fun buildFallbackSearchCommand_globMapsToInclude_negativeGlobMapsToExclude() {
+        val command = buildFallbackSearchCommand(parseShellWords("-g '*.kt' foo src/")!!)!!.command
         assertTrue(command.contains("--include='*.kt'"))
         assertTrue(command.endsWith("-e 'foo' 'src/'"))
-        // 否定 glob（!）语义与 grep --include 不同，拒绝兜底
-        assertNull(buildFallbackSearchCommand(parseShellWords("-g '!*.min.js' foo src/")!!))
+        // 否定 glob（!）→ --exclude（grep 支持 --exclude=GLOB）
+        val excluded = buildFallbackSearchCommand(parseShellWords("-g '!*.min.js' foo src/")!!)!!.command
+        assertTrue(excluded.contains("--exclude='*.min.js'"))
+        assertTrue(excluded.endsWith("-e 'foo' 'src/'"))
     }
 
     @Test
     fun buildFallbackSearchCommand_multipleRegexpFlags_allPositionalArePaths() {
-        val command = buildFallbackSearchCommand(parseShellWords("-e foo -e bar src/")!!)!!
+        val command = buildFallbackSearchCommand(parseShellWords("-e foo -e bar src/")!!)!!.command
         assertTrue(command.contains("-e 'foo' -e 'bar'"))
         assertTrue(command.endsWith("'src/'"))
     }
 
     @Test
     fun buildFallbackSearchCommand_contextLines_mappedWithNumericValue() {
-        val command = buildFallbackSearchCommand(parseShellWords("-A 3 foo src/")!!)!!
+        val command = buildFallbackSearchCommand(parseShellWords("-A 3 foo src/")!!)!!.command
         assertTrue(command.contains("-A 3"))
-        assertNull(buildFallbackSearchCommand(parseShellWords("-A x foo src/")!!))
+        // 非数字值：按缺值丢弃（不拒绝兜底），仍能正常搜索
+        val dropped = buildFallbackSearchCommand(parseShellWords("-A x foo src/")!!)!!
+        assertFalse(dropped.command.contains("-A"))
+        assertTrue(dropped.droppedFlags.contains("-A"))
     }
 
     @Test
     fun buildFallbackSearchCommand_dashDash_allowsLeadingDashPattern() {
-        val command = buildFallbackSearchCommand(parseShellWords("-- -foo src/")!!)!!
+        val command = buildFallbackSearchCommand(parseShellWords("-- -foo src/")!!)!!.command
         assertTrue(command.contains("-e '-foo' 'src/'"))
     }
 
     @Test
-    fun buildFallbackSearchCommand_rejectsRgOnlyArgs() {
+    fun buildFallbackSearchCommand_toleratesRgOnlyFlagsInsteadOfFailing() {
+        // 核心回归：这些参数过去一律返回 null（→ 表现为搜索 0 结果 / RG_UNAVAILABLE）。
+        // grep 不读忽略规则，等价于 rg 的 -u/--no-ignore*，丢弃它们不改变搜索语义。
+        val uu = buildFallbackSearchCommand(parseShellWords("-uu -n PxConcreteType src/")!!)!!
+        assertTrue(uu.command.endsWith("-e 'PxConcreteType' 'src/'"))
+        assertFalse(uu.command.contains("-u "))
+        assertTrue(uu.droppedFlags.contains("-u"))
+
+        val hidden = buildFallbackSearchCommand(parseShellWords("--hidden -uu foo src/")!!)!!
+        assertTrue(hidden.command.endsWith("-e 'foo' 'src/'"))
+        assertTrue(hidden.droppedFlags.containsAll(listOf("--hidden", "-u")))
+
+        // -l/-c/-v/-o/-w/-x 等 grep 原生支持，直接透传
+        assertTrue(buildFallbackSearchCommand(parseShellWords("-l foo src/")!!)!!.command.contains("-l"))
+        assertTrue(buildFallbackSearchCommand(parseShellWords("-c foo src/")!!)!!.command.contains("-c"))
+        // --type 映射为扩展名 include
+        val typed = buildFallbackSearchCommand(parseShellWords("--type ts foo src/")!!)!!.command
+        assertTrue(typed.contains("--include='*.ts'"))
+        // -N（不输出行号）语义上被强制 -n 覆盖，丢弃即可
+        assertTrue(buildFallbackSearchCommand(parseShellWords("-N foo src/")!!)!!.command.endsWith("-e 'foo' 'src/'"))
+    }
+
+    @Test
+    fun buildFallbackSearchCommand_shortFlagCluster_isExpandedNotSwallowed() {
+        // 关键回归：`-ig -n PATTERN dir` 过去会把 `-g` 的取值当成 `-n`（→ 按 glob "-n" 过滤 → 0 命中）。
+        // 现在带值旗标后面紧跟另一个旗标时视为缺值并丢弃，模式与路径都保住。
+        val clustered = buildFallbackSearchCommand(parseShellWords("-ig -n PhysX src/")!!)!!
+        assertTrue(clustered.command.endsWith("-e 'PhysX' 'src/'"))
+        assertFalse(clustered.command.contains("--include"))
+        assertTrue(clustered.droppedFlags.contains("-g"))
+
+        // 簇内带值（-ePATTERN / -g*.kt）仍按 rg 语义取值
+        assertTrue(buildFallbackSearchCommand(parseShellWords("-n -ePhysX src/")!!)!!.command.contains("-e 'PhysX'"))
+        assertTrue(buildFallbackSearchCommand(parseShellWords("-g*.kt foo src/")!!)!!.command.contains("--include='*.kt'"))
+    }
+
+    @Test
+    fun buildFallbackSearchCommand_smartCase_addsIgnoreCaseForLowercasePattern() {
+        assertTrue(buildFallbackSearchCommand(parseShellWords("-S foo src/")!!)!!.command.contains(" -i "))
+        assertFalse(buildFallbackSearchCommand(parseShellWords("-S Foo src/")!!)!!.command.contains(" -i "))
+    }
+
+    @Test
+    fun buildFallbackSearchCommand_rejectsOnlyUntranslatableOutputModes() {
+        // 只拒绝「输出结构无法用 grep 表达」的参数，以及没有模式的纯开关调用
         assertNull(buildFallbackSearchCommand(parseShellWords("--json foo src/")!!))
-        assertNull(buildFallbackSearchCommand(parseShellWords("-l foo src/")!!))
+        assertNull(buildFallbackSearchCommand(parseShellWords("--vimgrep foo src/")!!))
+        assertNull(buildFallbackSearchCommand(parseShellWords("-0 foo src/")!!))
         assertNull(buildFallbackSearchCommand(parseShellWords("--files")!!))
-        assertNull(buildFallbackSearchCommand(parseShellWords("--type ts foo src/")!!))
-        assertNull(buildFallbackSearchCommand(parseShellWords("-N foo src/")!!))
-        // 没有模式（仅开关）同样拒绝
         assertNull(buildFallbackSearchCommand(parseShellWords("--hidden")!!))
     }
 
     @Test
+    fun buildFallbackSearchCommand_minimal_dropsIncludeExclude() {
+        val minimal = buildFallbackSearchCommand(parseShellWords("-g '*.kt' -uu foo src/")!!, minimal = true)!!.command
+        assertTrue(minimal.startsWith("grep -rnI -E"))
+        assertFalse(minimal.contains("--include"))
+        assertFalse(minimal.contains("--exclude-dir"))
+        assertTrue(minimal.endsWith("-e 'foo' 'src/'"))
+    }
+
+    @Test
     fun buildFallbackSearchCommand_keepsHeadPipe_rejectsOtherPipes() {
-        assertTrue(buildFallbackSearchCommand(parseShellWords("foo src/ | head -30")!!)!!.endsWith(" | head -30"))
+        assertTrue(buildFallbackSearchCommand(parseShellWords("foo src/ | head -30")!!)!!.command.endsWith(" | head -30"))
         assertNull(buildFallbackSearchCommand(parseShellWords("foo src/ | grep bar")!!))
         assertNull(buildFallbackSearchCommand(parseShellWords("foo src/ | head -30; rm -rf /")!!))
+    }
+
+    @Test
+    fun buildSearchCommand_withBundledRgBin_usesQuotedAbsolutePath() {
+        val command = buildSearchCommand(
+            parseShellWords("-uu -n foo src/")!!,
+            home = "/root",
+            rgBin = "/data/app/lib/arm64/librg.so"
+        )!!
+        assertTrue(command.startsWith("'/data/app/lib/arm64/librg.so' --line-number"))
+        assertTrue(command.endsWith("'src/'"))
     }
 
     // ---------- positionalPathArgs ----------

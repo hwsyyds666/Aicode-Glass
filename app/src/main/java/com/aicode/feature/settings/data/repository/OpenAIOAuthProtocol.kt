@@ -14,6 +14,8 @@ internal object OpenAIOAuthProtocol {
     const val ISSUER = "https://auth.openai.com"
     const val RESOURCE = "https://api.openai.com/v1"
     const val DYNAMIC_CLIENT_ID = "dynamic_agent_client"
+    /** Public client id used by the open-source Codex CLI; only a fallback for imported credentials. */
+    const val CODEX_CLI_CLIENT_ID = "app_EMoamEEZ73f0CkXaX11ZibmR"
     const val CALLBACK_PATH = "/auth/callback"
     const val PLAN_USAGE_SCOPE = "chatgpt.tokens.use.direct"
 

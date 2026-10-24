@@ -1,5 +1,8 @@
 package com.aicode.feature.settings.presentation.component
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.BorderStroke
@@ -26,6 +29,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -52,14 +56,21 @@ import com.aicode.core.theme.Spacing
 import com.aicode.core.theme.semanticColors
 import com.aicode.core.ui.AdaptiveModalBottomSheet
 import com.aicode.core.ui.AppSwitch
+import com.aicode.core.ui.AppTextField
+import com.aicode.core.ui.dialogTextFieldColors
 import com.aicode.feature.settings.data.local.entity.OpenAIAccountEntity
+import com.aicode.feature.settings.data.repository.OpenAILoginSession
 import com.aicode.feature.settings.data.repository.OpenAIAccountSummary
 import com.aicode.feature.settings.presentation.OpenAIAccountsViewModel
 import compose.icons.FeatherIcons
 import compose.icons.feathericons.ChevronRight
+import compose.icons.feathericons.Copy
+import compose.icons.feathericons.Download
 import compose.icons.feathericons.ExternalLink
+import compose.icons.feathericons.Plus
 import compose.icons.feathericons.RefreshCw
 import compose.icons.feathericons.Settings
+import compose.icons.feathericons.Star
 import compose.icons.feathericons.Trash2
 import compose.icons.feathericons.User
 import compose.icons.feathericons.Zap
@@ -132,8 +143,9 @@ internal fun OpenAIAccountsSection(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var removeTarget by remember { mutableStateOf<OpenAIAccountSummary?>(null) }
+    var showImport by remember { mutableStateOf(false) }
     val context = LocalContext.current
-    val isConnecting = state.busyAccountId == "__connecting__"
+    val isConnecting = state.loginPreparing || state.loginSession != null
 
     Column(verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
         Card(
@@ -166,7 +178,7 @@ internal fun OpenAIAccountsSection(
                 )
                 if (state.accounts.isNotEmpty()) {
                     Text(
-                        text = stringResource(R.string.openai_account_single_profile_hint),
+                        text = stringResource(R.string.openai_accounts_multi_hint),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -175,18 +187,45 @@ internal fun OpenAIAccountsSection(
                     horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (state.accounts.isEmpty()) {
-                        Button(
-                            onClick = viewModel::connect,
-                            enabled = state.busyAccountId == null
-                        ) {
-                            if (isConnecting) {
-                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                                Spacer(Modifier.width(Spacing.sm))
-                            }
-                            Text(stringResource(R.string.openai_account_connect))
+                    // 多账号：无论当前已有几个账号，「添加账号」始终可用
+                    Button(
+                        onClick = { viewModel.startLogin(null) },
+                        enabled = state.busyAccountId == null && !isConnecting
+                    ) {
+                        Icon(
+                            imageVector = FeatherIcons.Plus,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(Spacing.xs))
+                        if (isConnecting) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(Spacing.sm))
                         }
+                        Text(
+                            stringResource(
+                                if (state.accounts.isEmpty()) R.string.openai_account_connect
+                                else R.string.openai_account_add
+                            )
+                        )
                     }
+                    OutlinedButton(
+                        onClick = { showImport = true },
+                        enabled = state.busyAccountId == null && !isConnecting
+                    ) {
+                        Icon(
+                            imageVector = FeatherIcons.Download,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(Spacing.xs))
+                        Text(stringResource(R.string.openai_account_import_action))
+                    }
+                }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     OutlinedButton(onClick = {
                         runCatching {
                             context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(OPENAI_USAGE_URL)))
@@ -216,6 +255,9 @@ internal fun OpenAIAccountsSection(
             OpenAIAccountCard(
                 account = account,
                 busy = state.busyAccountId == account.id,
+                isDefault = state.defaultProviderId.isNotBlank() &&
+                    account.providerId == state.defaultProviderId,
+                onSetDefault = { viewModel.setAsDefault(account.id) },
                 onToggle = { viewModel.setEnabled(account.id, it) },
                 onRefreshModels = { viewModel.refreshModels(account.id) },
                 onRefreshUsage = { viewModel.refreshUsage(account.id) },
@@ -257,6 +299,193 @@ internal fun OpenAIAccountsSection(
             }
         )
     }
+
+    if (state.loginSession != null || state.loginPreparing) {
+        ChatGptLoginSheet(
+            session = state.loginSession,
+            preparing = state.loginPreparing,
+            isNewAccount = state.loginSession?.accountId == null,
+            onDismiss = viewModel::cancelLogin,
+            onSubmitCallback = viewModel::submitLoginCallback
+        )
+    }
+
+    if (showImport) {
+        ImportAccountDialog(
+            onDismiss = { showImport = false },
+            onImport = { raw ->
+                showImport = false
+                viewModel.importAccount(raw)
+            }
+        )
+    }
+}
+
+/**
+ * 登录/重新授权弹层： cockpit-tools 的 ChatGptPlanDialog 同思路——先给授权链接与「打开浏览器」，
+ * 再给一个手动粘贴回调链接的入口，浏览器无法回跳 127.0.0.1 时依然能登录成功。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChatGptLoginSheet(
+    session: OpenAILoginSession?,
+    preparing: Boolean,
+    isNewAccount: Boolean,
+    onDismiss: () -> Unit,
+    onSubmitCallback: (String) -> Unit
+) {
+    val context = LocalContext.current
+    var callbackInput by remember(session?.sessionId) { mutableStateOf("") }
+    AdaptiveModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier.padding(horizontal = Spacing.lg, vertical = Spacing.md),
+            verticalArrangement = Arrangement.spacedBy(Spacing.sm)
+        ) {
+            Text(
+                text = stringResource(
+                    if (isNewAccount) R.string.openai_login_add_title else R.string.openai_login_reauthorize_title
+                ),
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
+            )
+            Text(
+                text = stringResource(R.string.openai_login_oauth_summary),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            if (session == null) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(Spacing.sm))
+                    Text(
+                        text = stringResource(R.string.openai_login_preparing),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            } else {
+                Text(
+                    text = stringResource(R.string.openai_login_authorize_url_label),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = session.authorizeUrl,
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 4,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(Spacing.sm)
+                    )
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                    Button(
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            runCatching {
+                                context.startActivity(
+                                    Intent(Intent.ACTION_VIEW, Uri.parse(session.authorizeUrl))
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            }
+                        }
+                    ) {
+                        Icon(
+                            imageVector = FeatherIcons.ExternalLink,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(Spacing.xs))
+                        Text(stringResource(R.string.openai_login_open_browser))
+                    }
+                    OutlinedButton(onClick = {
+                        val manager = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        manager?.setPrimaryClip(ClipData.newPlainText("openai-auth-url", session.authorizeUrl))
+                    }) {
+                        Icon(
+                            imageVector = FeatherIcons.Copy,
+                            contentDescription = stringResource(R.string.common_copy),
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+
+                Text(
+                    text = stringResource(R.string.openai_login_manual_callback_label),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AppTextField(
+                        value = callbackInput,
+                        onValueChange = { callbackInput = it },
+                        label = stringResource(R.string.openai_login_manual_callback_placeholder),
+                        singleLine = true,
+                        colors = dialogTextFieldColors(),
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(Modifier.width(Spacing.xs))
+                    Button(
+                        enabled = callbackInput.isNotBlank() && !preparing,
+                        onClick = { onSubmitCallback(callbackInput) }
+                    ) { Text(stringResource(R.string.openai_login_submit)) }
+                }
+                Text(
+                    text = stringResource(R.string.openai_login_hint),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
+            }
+            Spacer(Modifier.height(Spacing.lg))
+        }
+    }
+}
+
+/** 导入账号：粘贴 Codex CLI 的 auth.json（或任意含 access_token 的 JSON）。 */
+@Composable
+private fun ImportAccountDialog(onDismiss: () -> Unit, onImport: (String) -> Unit) {
+    var raw by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.openai_account_import_title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                Text(
+                    text = stringResource(R.string.openai_account_import_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = raw,
+                    onValueChange = { raw = it },
+                    placeholder = { Text(stringResource(R.string.openai_account_import_placeholder), maxLines = 2) },
+                    minLines = 5,
+                    maxLines = 10,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = raw.isNotBlank(), onClick = { onImport(raw) }) {
+                Text(stringResource(R.string.openai_account_import_action))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
+        }
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -264,6 +493,8 @@ internal fun OpenAIAccountsSection(
 private fun OpenAIAccountCard(
     account: OpenAIAccountSummary,
     busy: Boolean,
+    isDefault: Boolean,
+    onSetDefault: () -> Unit,
     onToggle: (Boolean) -> Unit,
     onRefreshModels: () -> Unit,
     onRefreshUsage: () -> Unit,
@@ -301,6 +532,7 @@ private fun OpenAIAccountCard(
                     ) {
                         PlanTierBadge(planType = account.planType)
                         StatusPill(account = account)
+                        if (isDefault) DefaultBadge()
                     }
                 }
                 if (busy) {
@@ -395,6 +627,14 @@ private fun OpenAIAccountCard(
                 horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                CardActionButton(
+                    icon = FeatherIcons.Star,
+                    contentDescription = stringResource(R.string.openai_account_set_default),
+                    enabled = !busy && !isDefault && account.planUsageAuthorized,
+                    tint = if (isDefault) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    onClick = onSetDefault
+                )
                 CardActionButton(
                     icon = FeatherIcons.RefreshCw,
                     contentDescription = stringResource(R.string.openai_account_refresh_usage),
@@ -522,6 +762,34 @@ private fun PlanTierBadge(planType: String?, modifier: Modifier = Modifier) {
             color = content,
             maxLines = 1
         )
+    }
+}
+
+/** 「默认」徽章：该账号是新会话默认使用的账号。 */
+@Composable
+private fun DefaultBadge(modifier: Modifier = Modifier) {
+    val tint = MaterialTheme.colorScheme.primary
+    Box(
+        modifier = modifier
+            .clip(CircleShape)
+            .background(tint.copy(alpha = 0.14f))
+            .padding(horizontal = 7.dp, vertical = 2.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+            Icon(
+                imageVector = FeatherIcons.Star,
+                contentDescription = null,
+                tint = tint,
+                modifier = Modifier.size(10.dp)
+            )
+            Text(
+                text = stringResource(R.string.openai_account_default_badge),
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                color = tint,
+                maxLines = 1
+            )
+        }
     }
 }
 

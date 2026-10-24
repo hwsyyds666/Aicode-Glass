@@ -4,10 +4,12 @@ import android.content.Context
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.aicode.BuildConfig
 import com.aicode.R
 import com.aicode.core.security.KeystoreCipher
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
@@ -19,6 +21,18 @@ import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.SocketTimeoutException
+import java.net.URI
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Base64
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -65,7 +79,7 @@ internal data class GitHubDevicePollResult(
     override fun toString(): String = "GitHubDevicePollResult(status=$status, accessToken=[REDACTED])"
 }
 
-/** GitHub OAuth App Device Flow and REST access. Access tokens are only persisted as KeystoreCipher ciphertext. */
+/** GitHub OAuth authorization and REST access. Access tokens are only persisted as KeystoreCipher ciphertext. */
 @Singleton
 class GitHubOAuthRepository @Inject constructor(
     @param:ApplicationContext private val context: Context,
@@ -88,10 +102,7 @@ class GitHubOAuthRepository @Inject constructor(
 
     suspend fun configuredClientId(): String {
         val stored = context.githubOAuthDataStore.data.first()[clientIdKey]?.trim().orEmpty()
-        // 用户侧零配置：优先用内置 OAuth App 的 client_id（Device Flow 不需要 secret，
-        // 可随包发布）。仓库维护者在 GitHub 注册 OAuth App（开启 Device Flow）后填此处；
-        // 为空时界面给出注册指引，不崩溃、不要求用户手填 ID。
-        return stored.ifBlank { BUILT_IN_CLIENT_ID }
+        return stored.ifBlank { BuildConfig.GITHUB_OAUTH_CLIENT_ID }
     }
 
     suspend fun saveClientId(value: String) {
@@ -113,6 +124,26 @@ class GitHubOAuthRepository @Inject constructor(
             ?.takeIf(String::isNotBlank)
     }
 
+    /**
+     * Starts the GitHub Device Flow and returns the code the user confirms in the browser.
+     * Device flow carries no redirect_uri, so GitHub never warns about an unregistered callback.
+     */
+    suspend fun beginDeviceAuthorization(): GitHubDeviceCode {
+        val clientId = configuredClientId().trim()
+        if (clientId.isBlank()) throw IOException(context.getString(R.string.workspace_github_error_client_id_required))
+        return requestDeviceCode(clientId)
+    }
+
+    /** Polls until the user confirms the device code, reporting the remaining time while waiting. */
+    suspend fun completeDeviceAuthorization(
+        deviceCode: GitHubDeviceCode,
+        onWaiting: suspend (Long) -> Unit
+    ): GitHubAccount {
+        val clientId = configuredClientId().trim()
+        if (clientId.isBlank()) throw IOException(context.getString(R.string.workspace_github_error_client_id_required))
+        return pollDeviceCode(clientId, deviceCode, onWaiting)
+    }
+
     suspend fun requestDeviceCode(clientId: String): GitHubDeviceCode = withContext(Dispatchers.IO) {
         require(clientId.isNotBlank()) { context.getString(R.string.workspace_github_error_client_id_required) }
         val body = FormBody.Builder()
@@ -122,6 +153,18 @@ class GitHubOAuthRepository @Inject constructor(
             .add("scope", "repo read:user")
             .build()
         val json = postForm("https://github.com/login/device/code", body, acceptJson = true)
+        // Device flow must be enabled on the OAuth App, otherwise GitHub answers with an error body.
+        json.optString("error").takeIf(String::isNotBlank)?.let { error ->
+            val description = json.optString("error_description")
+            throw IOException(
+                if (error == "device_flow_disabled" || description.contains("device", ignoreCase = true)) {
+                    context.getString(R.string.workspace_github_error_device_flow)
+                } else {
+                    description.takeIf(String::isNotBlank)
+                        ?: context.getString(R.string.workspace_github_error_authorization_response)
+                }
+            )
+        }
         val verificationUri = json.requiredString("verification_uri")
         if (!isAllowedGitHubVerificationUri(verificationUri)) {
             throw IOException(context.getString(R.string.workspace_github_error_malformed_response))
@@ -346,14 +389,6 @@ class GitHubOAuthRepository @Inject constructor(
         val REPOSITORY_COMPONENT = Regex("[A-Za-z0-9_.-]{1,100}")
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
-        /**
-         * 内置 GitHub OAuth App 的 client_id。Device Flow 只需 client_id、不需要 secret，
-         * 因此可安全随包发布。仓库维护者注册自己的 OAuth App（Settings → Developer settings →
-         * OAuth Apps → New OAuth App，勾选 Enable Device Flow）后把 Client ID 填到这里，
-         * 终端用户即可「点连接 → 浏览器授权 → 连上」，全程零输入。
-         * 留空 = 此版本未内置，界面会显示注册指引。
-         */
-        const val BUILT_IN_CLIENT_ID = ""
     }
 }
 

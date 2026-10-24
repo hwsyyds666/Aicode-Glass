@@ -117,10 +117,11 @@ fun headLinesOf(seg: List<String>): Int? = when {
  * [home] 为命令执行环境的 home（本地 PRoot 容器为 /root，远程 SSH 为远程用户 home），
  * 用于展开 `~/` 参数——quote 后 shell 不会自动展开 `~`，故在构造命令时显式展开。
  */
-fun buildSearchCommand(tokens: List<String>, home: String = "/root"): String? {
+fun buildSearchCommand(tokens: List<String>, home: String = "/root", rgBin: String? = null): String? {
     val (rgTokens, pipeSegments) = splitPipes(tokens) ?: return null
     val args = mutableListOf(
-        "rg",
+        // rgBin：随包内置的静态 rg（真机无包管理器时用它），为空则用 PATH 里的 rg
+        rgBin?.let(::shellQuote) ?: "rg",
         "--line-number",
         "--no-heading",
         "--with-filename",
@@ -145,82 +146,143 @@ fun expandTilde(arg: String, home: String = "/root"): String =
     }
 
 /**
- * 组装 rg 缺失时的 **grep 兜底**搜索命令：把与 grep 原生兼容的参数透传，输出格式
- * （`文件:行号:内容`）与 [buildSearchCommand] 的 rg 输出一致；遇到 rg 专有参数
- * （--json/-l/-c/-o/-N/--type/--files/-u 等）返回 null，由调用方提示用户先装 rg。
+ * grep 兜底命令的构建结果。
  *
- * 已知妥协（兜底路径与 rg 的差异，调用方应在结果的 backend 字段标注 grep）：
- *  - grep 不读 .gitignore（rg 默认读），以 `--exclude-dir` 排除 .git 与常见构建目录近似；
- *  - `-g` 仅映射正向 glob 到 `--include`，否定 glob（`!`）语义不同，拒绝兜底；
- *  - `--hidden` 为 no-op（grep -r 默认即含隐藏文件）；
- *  - 正则按 POSIX ERE（-E）解释，与 rg 的 Rust 正则不完全一致（如 `\d` 不可用）。
+ * @property command 供执行环境运行的完整 grep 命令（含白名单 `| head` 管道）
+ * @property droppedFlags 被丢弃的 rg 旗标。这些旗标在 grep 里没有对应能力，但**丢弃不改变
+ *           搜索语义**：例如 `-u/--no-ignore*` 要求"不遵守忽略规则"，而 grep 本身就不读任何
+ *           忽略规则；`--hidden` 要求"含点文件"，而 `grep -r` 默认就包含。调用方应把该列表
+ *           回传给调用者，避免出现"命令成功、结果为空、调用方以为真的没有匹配"的误判。
  */
-fun buildFallbackSearchCommand(tokens: List<String>, home: String = "/root", minimal: Boolean = false): String? {
+data class GrepFallbackCommand(
+    val command: String,
+    val droppedFlags: List<String> = emptyList()
+)
+
+/**
+ * 组装 rg 缺失时的 **grep 兜底**搜索命令：把 rg 参数翻译成 grep 参数，输出格式
+ * （`文件:行号:内容`）与 [buildSearchCommand] 的 rg 输出一致。
+ *
+ * 设计原则（2026-10-24 修正）：**宽容降级，而不是拒绝执行**。旧实现遇到任何 rg 专有参数
+ * 就返回 null，调用方只能报 RG_UNAVAILABLE —— 表现为"搜索 0 结果"或"工具不可用"，而实际
+ * 上绝大多数 rg 旗标对 grep 来说要么天然成立（`-u/--no-ignore/--hidden`），要么只影响次要
+ * 信息（`-M/--max-columns`、`--sort`、`--stats`）。现在只有**真的无法用 grep 表达**的参数
+ * 才拒绝兜底：改变输出结构的 `--json/--vimgrep/--null/-0`，以及 `--files`（列文件模式）。
+ *
+ * 翻译细节：
+ *  - 短旗标簇按 rg 语义展开（`-uu` → 两个 `-u`；`-ig` → `-i` + 缺值的 `-g`），
+ *    带值旗标后面紧跟另一个旗标时视为**缺值并丢弃**，而不是把下一个旗标当值
+ *    （否则 `-ig -n PATTERN` 会变成按 glob `-n` 过滤，直接 0 命中）；
+ *  - `-g/--glob/--iglob` → `--include`，否定 glob（`!x`）→ `--exclude=x`；
+ *  - `-t/--type` → 预置扩展名表 [RG_TYPE_GLOBS]，`-T/--type-not` → `--exclude`；
+ *  - `-m/-A/-B/-C/-v/-x/-o/-c/-l/-w/-F/-i/-f/-q` 等 grep 原生支持，原样透传；
+ *  - `-S/--smart-case`：模式串全小写时补 `-i`（与 rg smart-case 语义一致）；
+ *  - `-a/--text/--binary`：去掉 `-I`（改为读取二进制文件）；
+ *  - 正则按 POSIX ERE（-E）解释，与 rg 的 Rust 正则不完全一致（如 `\d` 不可用）。
+ *
+ * [minimal] 为真时只保留 `grep -rnI -E`（并丢弃 --include/--exclude/--exclude-dir），
+ * 供个别精简 grep（toybox 老版本不认这些旗标）用法错误后重试。
+ */
+fun buildFallbackSearchCommand(tokens: List<String>, home: String = "/root", minimal: Boolean = false): GrepFallbackCommand? {
     val (searchTokens, pipeSegments) = splitPipes(tokens) ?: return null
-    val grepArgs = if (minimal) {
-        // 最小形态：个别精简 grep（toybox 的老版本/裁剪版）不认 --exclude-dir，
-        // 用法错误重试时只保留 -rnI -E。
-        mutableListOf("grep", "-rnI", "-E")
-    } else {
-        mutableListOf(
-            "grep", "-rnI", "-E",
-            "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=.gradle"
-        )
-    }
+    val args = normalizeSearchArgs(searchTokens) ?: return null
+
+    val grepArgs = mutableListOf("grep", "-rnI", "-E")
+    val includes = mutableListOf<String>()
+    val excludes = mutableListOf<String>()
+    val dropped = mutableListOf<String>()
     val positional = mutableListOf<String>()
     var hasRegexpFlag = false
-    var afterDashDash = false
-    var i = 0
-    while (i < searchTokens.size) {
-        val t = searchTokens[i]
-        if (afterDashDash) {
-            positional += t
-            i++
+    var smartCase = false
+    var binaryAsText = false
+
+    for (arg in args) {
+        if (arg is SearchArg.Positional) {
+            positional += arg.text
             continue
         }
-        when {
-            t == "--" -> afterDashDash = true
-            // 与 grep 原生兼容的开关：原样透传
-            t == "-i" || t == "--ignore-case" || t == "-F" || t == "--fixed-strings" ||
-                t == "-w" || t == "--word-regexp" -> grepArgs += t
-            // 上下文行数：rg 与 grep 语义一致，透传（值必须纯数字）
-            t == "-A" || t == "-B" || t == "-C" -> {
-                if (i + 1 >= searchTokens.size) return null
-                val n = searchTokens[i + 1]
-                if (n.isEmpty() || !n.all(Char::isDigit)) return null
-                grepArgs += listOf(t, n)
-                i++
+        val flag = (arg as SearchArg.Flag).name
+        val value = arg.value
+        when (flag) {
+            // —— grep 原生兼容：原样透传 ——
+            "-i", "--ignore-case", "-F", "--fixed-strings", "-w", "--word-regexp",
+            "-v", "--invert-match", "-x", "--line-regexp", "-o", "--only-matching",
+            "-c", "--count", "-l", "--files-with-matches", "--files-without-match",
+            "-q", "--quiet", "--silent" ->
+                grepArgs += when (flag) {
+                    "--files-without-match" -> "-L"
+                    "--quiet", "--silent" -> "-q"
+                    else -> flag
+                }
+            "-f", "--file" -> if (value != null) grepArgs += listOf("-f", shellQuote(value)) else dropped += flag
+            "-m", "--max-count", "-A", "--after-context", "-B", "--before-context", "-C", "--context" -> {
+                val short = when (flag) {
+                    "--after-context" -> "-A"
+                    "--before-context" -> "-B"
+                    "--context" -> "-C"
+                    else -> flag
+                }
+                if (value != null && value.isNotEmpty() && value.all(Char::isDigit)) {
+                    grepArgs += listOf(short, value)
+                } else {
+                    dropped += flag
+                }
             }
-            // -e/--regexp 带模式值：grep 同样支持多 -e 或语义
-            t == "-e" || t == "--regexp" -> {
-                if (i + 1 >= searchTokens.size) return null
+            "-e", "--regexp" -> if (value != null) {
                 hasRegexpFlag = true
-                grepArgs += listOf("-e", shellQuote(searchTokens[i + 1]))
-                i++
+                grepArgs += listOf("-e", shellQuote(value))
+            } else dropped += flag
+            // —— 文件过滤：glob / type ——
+            "-g", "--glob", "--iglob" -> when {
+                value == null -> dropped += flag
+                value.startsWith("!") -> excludes += value.removePrefix("!")
+                else -> includes += value
             }
-            // -g/--glob → --include（仅正向 glob）
-            t == "-g" || t == "--glob" -> {
-                if (i + 1 >= searchTokens.size) return null
-                val glob = searchTokens[i + 1]
-                if (glob.startsWith("!")) return null
-                grepArgs += "--include=${shellQuote(glob)}"
-                i++
+            "-t", "--type" -> {
+                val globs = value?.let { RG_TYPE_GLOBS[it.lowercase()] }
+                if (globs == null) dropped += "$flag ${value ?: ""}".trim() else includes += globs
             }
-            // rg 默认输出参数与 grep -rn 重复或无需映射：跳过（--color 连带跳过其值 never）
-            t == "--hidden" || t == "-n" || t == "--line-number" || t == "--no-heading" ||
-                t == "--with-filename" -> Unit
-            t == "--color" -> i++
-            // 其它 rg 专有参数：无法安全映射，拒绝兜底
-            t.startsWith("-") -> return null
-            else -> positional += t
+            "-T", "--type-not" -> {
+                val globs = value?.let { RG_TYPE_GLOBS[it.lowercase()] }
+                if (globs == null) dropped += "$flag ${value ?: ""}".trim() else excludes += globs
+            }
+            // —— 改变输出结构，grep 无法表达：拒绝兜底 ——
+            "-0", "--null", "--null-data", "--json", "--vimgrep", "--files", "-r", "--replace" -> return null
+            // —— 语义已被 grep 默认行为满足，或只影响次要信息：丢弃 ——
+            "-u", "--no-ignore", "--no-ignore-vcs", "--no-ignore-dot", "--no-ignore-parent",
+            "--no-ignore-global", "--no-ignore-exclude", "--hidden", "--no-config",
+            "--no-require-git", "--no-messages", "-N", "--no-line-number", "-n", "--line-number",
+            "--no-heading", "--with-filename", "--color", "--colour", "--stats", "--passthru",
+            "--trim", "-U", "--multiline", "-M", "--max-columns", "--max-filesize",
+            "--sort", "--sortr", "--threads", "-P", "--pcre2", "-z", "--search-zip", "--crlf",
+            "--mmap", "--no-unicode", "--one-file-system", "--engine", "--dfa-size-limit",
+            "--regex-size-limit", "--pre", "--pre-glob", "--context-separator", "--encoding",
+            "--colors", "--type-add", "--hostname", "--path-separator", "--hyperlink-format",
+            "--glob-case-insensitive", "--fixed-strings-off", "--auto-hybrid-regex",
+            "--max-depth", "-L", "--follow" -> dropped += flag
+            "-a", "--text", "--binary" -> binaryAsText = true
+            "-S", "--smart-case" -> smartCase = true
+            else -> dropped += flag
         }
-        i++
     }
+
     // 模式来源：有 -e 时全部位置参数都是路径；否则第一个位置参数是模式
     if (!hasRegexpFlag && positional.isEmpty()) return null
     val pattern = if (hasRegexpFlag) null else positional.first()
     val paths = (if (hasRegexpFlag) positional else positional.drop(1))
         .map { expandTilde(it, home) }
+
+    if (!minimal) {
+        grepArgs += listOf("--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=.gradle")
+        includes.forEach { grepArgs += "--include=${shellQuote(it)}" }
+        excludes.forEach { grepArgs += "--exclude=${shellQuote(it)}" }
+    } else {
+        dropped += includes.map { "-g $it" } + excludes.map { "-g !$it" }
+    }
+    if (binaryAsText) grepArgs.remove("-I")
+    // smart-case：模式串里没有大写字母时按忽略大小写处理（与 rg 语义一致）
+    if (smartCase && pattern != null && pattern.none(Char::isUpperCase)) grepArgs += "-i"
+
     val sb = StringBuilder(grepArgs.joinToString(" "))
     if (pattern != null) sb.append(" -e ").append(shellQuote(pattern))
     if (paths.isEmpty()) {
@@ -233,7 +295,122 @@ fun buildFallbackSearchCommand(tokens: List<String>, home: String = "/root", min
         if (headLinesOf(seg) == null) return null
         sb.append(" | ").append(seg.joinToString(" "))
     }
-    return sb.toString()
+    return GrepFallbackCommand(sb.toString(), dropped.distinct())
+}
+
+/** 归一后的搜索参数：带值旗标（值可能为 null = 缺值）或位置参数。 */
+private sealed interface SearchArg {
+    data class Flag(val name: String, val value: String?) : SearchArg
+    data class Positional(val text: String) : SearchArg
+}
+
+/** 短旗标中带值的字母（rg 语义：值可紧跟在同一 token 内，也可取下一个 token）。 */
+private val SHORT_VALUE_CHARS: Set<Char> = setOf('e', 'f', 'A', 'B', 'C', 'm', 'g', 't', 'T', 'M', 'j', 'r')
+
+/** 长旗标中带值的（无值时若下一个 token 不是旗标则取之）。 */
+private val LONG_VALUE_FLAGS: Set<String> = setOf(
+    "--regexp", "--glob", "--iglob", "--type", "--type-not", "--type-add", "--after-context",
+    "--before-context", "--context", "--max-count", "--max-columns", "--max-filesize",
+    "--max-depth", "--encoding", "--sort", "--sortr", "--pre", "--pre-glob", "--context-separator",
+    "--colors", "--color", "--colour", "--engine", "--dfa-size-limit", "--regex-size-limit",
+    "--threads", "--path-separator", "--hyperlink-format", "--replace"
+)
+
+/** rg `-t/--type` 常见类型到 glob 的映射；未收录的类型按缺值丢弃（搜索范围退回全量，不会漏匹配）。 */
+private val RG_TYPE_GLOBS: Map<String, List<String>> = mapOf(
+    "kt" to listOf("*.kt"), "kotlin" to listOf("*.kt", "*.kts"),
+    "java" to listOf("*.java"),
+    "py" to listOf("*.py"), "python" to listOf("*.py"),
+    "js" to listOf("*.js", "*.jsx", "*.mjs"),
+    "ts" to listOf("*.ts", "*.tsx"),
+    "c" to listOf("*.c", "*.h"),
+    "cpp" to listOf("*.cpp", "*.hpp", "*.cc", "*.hh", "*.cxx", "*.hxx"),
+    "go" to listOf("*.go"),
+    "rs" to listOf("*.rs"), "rust" to listOf("*.rs"),
+    "rb" to listOf("*.rb"), "ruby" to listOf("*.rb"),
+    "md" to listOf("*.md"), "markdown" to listOf("*.md"),
+    "json" to listOf("*.json"),
+    "yaml" to listOf("*.yaml", "*.yml"), "yml" to listOf("*.yaml", "*.yml"),
+    "xml" to listOf("*.xml"),
+    "html" to listOf("*.html", "*.htm"),
+    "css" to listOf("*.css"),
+    "sh" to listOf("*.sh"), "shell" to listOf("*.sh"),
+    "swift" to listOf("*.swift"),
+    "scala" to listOf("*.scala"),
+    "php" to listOf("*.php"),
+    "cs" to listOf("*.cs"),
+    "gradle" to listOf("*.gradle", "*.gradle.kts"),
+    "toml" to listOf("*.toml"),
+    "sql" to listOf("*.sql")
+)
+
+/**
+ * 把 rg 参数 token 归一为 [SearchArg] 序列：展开短旗标簇并按 rg 语义识别带值旗标。
+ *
+ * 宽容点：带值旗标后面紧跟另一个旗标（如 `-ig -n PATTERN` 里的 `-g`）视为**缺值**并保留为
+ * `value == null`，而不是把下一个旗标当值——后者会变成"按 glob `-n` 过滤"，直接导致 0 命中。
+ */
+private fun normalizeSearchArgs(tokens: List<String>): List<SearchArg>? {
+    val result = mutableListOf<SearchArg>()
+    var afterDashDash = false
+    var i = 0
+    while (i < tokens.size) {
+        val t = tokens[i]
+        if (afterDashDash) {
+            result += SearchArg.Positional(t)
+            i++
+            continue
+        }
+        when {
+            t == "--" -> afterDashDash = true
+            t == "-" -> result += SearchArg.Positional(t)
+            t.startsWith("--") -> {
+                val eq = t.indexOf('=')
+                if (eq > 0) {
+                    result += SearchArg.Flag(t.substring(0, eq), t.substring(eq + 1))
+                } else if (t in LONG_VALUE_FLAGS) {
+                    val next = tokens.getOrNull(i + 1)
+                    if (next != null && !next.startsWith("-")) {
+                        result += SearchArg.Flag(t, next)
+                        i++
+                    } else {
+                        result += SearchArg.Flag(t, null)
+                    }
+                } else {
+                    result += SearchArg.Flag(t, null)
+                }
+            }
+            t.startsWith("-") -> {
+                val cluster = t.removePrefix("-")
+                var ci = 0
+                while (ci < cluster.length) {
+                    val c = cluster[ci]
+                    val rest = cluster.substring(ci + 1)
+                    if (c in SHORT_VALUE_CHARS) {
+                        if (rest.isNotEmpty()) {
+                            result += SearchArg.Flag("-$c", rest)
+                            ci = cluster.length
+                        } else {
+                            val next = tokens.getOrNull(i + 1)
+                            if (next != null && !next.startsWith("-")) {
+                                result += SearchArg.Flag("-$c", next)
+                                i++
+                            } else {
+                                result += SearchArg.Flag("-$c", null)
+                            }
+                            ci++
+                        }
+                    } else {
+                        result += SearchArg.Flag("-$c", null)
+                        ci++
+                    }
+                }
+            }
+            else -> result += SearchArg.Positional(t)
+        }
+        i++
+    }
+    return result
 }
 
 /** 单引号包裹，shell 命令安全。 */

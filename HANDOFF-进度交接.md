@@ -107,3 +107,46 @@ HEAD `c9a14f8b`。用户反馈：容器模式 search 正常、真机（DEVICE_RO
 
 - `:app:assembleUniversalDebug` BUILD SUCCESSFUL；`:app:testUniversalDebugUnitTest` **1295 通过 0 失败**（Windows 上 9 个 POSIX 用例跳过）；迁移对账 8..66 通过。
 - Release 包：`C:\Users\gx520\Documents\Codex\2026-10-24\aicode-glass-search-container-fix\outputs\Aicode-Glass-1.0.9-dev.13-search-container-universal-release.apk`，`versionCode=51`、`versionName=1.0.9-dev.13+c9a14f8b`，19,039,860 bytes，SHA-256 `F05EE0E81C9DA07A3F6E6AA9DF9605AA40D1AD088916ED42DB8CF33943BF9D37`。构建源同 `app\build\outputs\apk\universal\release\app-universal-release.apk`。
+
+---
+
+## 2026-10-24 第四轮（多账号管理 + search 后端根治）
+
+### 1. ChatGPT 账号页：真正的多账号管理（用户点名）
+
+用户反馈"不止一个账号，是多账号管理"。排查发现**根本不是 UI 问题，是策略层硬编码单档案**：
+
+- `OpenAIAccountSelectionPolicy.canConnect`：`reauthorizeAccountId == null -> existingAccountIds.isEmpty()` ——已有 1 个账号后新增一律拒绝（`openai_error_single_profile`）；
+- `setEnabled`：启用任一账号时若存在其它账号即抛错；
+- `routeForModel`：`canRoute` 要求"存档里恰好只有这一个账号"；
+- UI：「连接」按钮只在 `accounts.isEmpty()` 时渲染 —— 视觉上根本没有"再加一个"的入口。
+
+改动：
+
+1. 策略改为多账号（上限 `MAX_ACCOUNTS = 10`）；路由语义保持**只走显式指定的账号、绝不自动轮换**——多账号并存 ≠ 额度池。
+2. `setEnabled` 去掉"存在其它账号即拒绝"；`routeForModel` 只校验指定账号存在。
+3. UI：「添加账号」按钮常驻（不再随账号数消失）；账号卡支持**设为默认**（写入 `DefaultModelSettingsRepository` 的新会话默认 provider+模型），默认账号带 ★「默认」徽章；文案换成多账号说明，移除单档案提示。
+4. 新增 `providerSelectionOf()`；新增/替换字符串：`openai_account_add`、`openai_accounts_multi_hint`、`openai_account_default_badge`、`openai_account_set_default`、`openai_notice_default_account_set`、`openai_error_account_limit`（删除 `openai_error_single_profile` / `openai_account_single_profile_hint`）。
+5. `OpenAIAccountRoutingPolicyTest` 全部重写为新语义。
+
+### 2. search：grep 兜底不再静默 0 结果（用户点名）
+
+真机实测证据：`-ig -uu -n PhysX ~/workspace/...` → 0 匹配；`-uu` 查询直接 `RG_UNAVAILABLE`。根因**不是忽略规则文件**，是 `buildFallbackSearchCommand` 遇到任何 rg 专有参数就 `return null`，调用方只能报 RG_UNAVAILABLE，表现为"搜索 0 结果"。
+
+重写为**宽容降级**：
+
+- 短旗标簇按 rg 语义展开（`-uu` → 两个 `-u`；`-ig` → `-i` + 缺值 `-g`）；
+- **关键**：带值旗标后面紧跟另一个旗标时视为**缺值并丢弃**，而不是把下一个旗标当值——旧行为会把 `-ig -n PATTERN` 变成"按 glob `-n` 过滤"，直接 0 命中；
+- grep 不读任何忽略规则，因此 `-u/--no-ignore*/--hidden` 丢弃是**语义等价**的；`-M/--max-columns/--sort/--stats/--threads/-U/--multiline/-S` 等只影响次要信息，一并丢弃；
+- `-g/--glob` → `--include`，否定 glob → `--exclude`；`-t/--type` 按预置扩展名表映射，`-T/--type-not` → `--exclude`；`-m/-A/-B/-C/-v/-x/-o/-c/-l/-w/-F/-i/-f/-q` 透传；`-S/--smart-case` 按模式串是否含大写补 `-i`；`-a/--text/--binary` 去掉 `-I`；
+- 只有**输出结构无法用 grep 表达**的才拒绝兜底：`--json/--vimgrep/--null/-0/--files/-r/--replace`；
+- 返回值改 `GrepFallbackCommand(command, droppedFlags)`，结果 JSON 带 `backend=grep`、`degraded=true`、`dropped_flags` 与 `warning`，AI 能看到"降级了、丢了哪些参数"，不会再误判为"没有匹配"。
+
+### 3. search：内置静态 rg（真机无包管理器也能用真 rg）
+
+真机 `/system/bin/sh` 既无 rg 也无 apk/apt-get/dnf/yum/pacman，`RipgrepProvisioner` 的安装在真机上必然失败。现把 **musl 静态 rg 15.2.0** 以 `jniLibs/<abi>/librg.so` 打进 APK（arm64-v8a 4.4MB / x86_64 5.4MB），Android 10+ 禁止执行应用私有数据目录文件，但原生库解压到 `nativeLibraryDir` 后可正常 exec；清单显式 `android:extractNativeLibs="true"`（已核对合并后 manifest 生效）。真机通道优先用内置 rg，`-uu`、`--glob`、忽略规则等全部原生行为一致；内置不可用才退 grep 兜底。
+
+### 验证
+
+- `:app:assembleUniversalDebug` BUILD SUCCESSFUL（universal debug APK 23.5MB，`lib/arm64-v8a/librg.so` 与 `lib/x86_64/librg.so` 均已入包）。
+- 单测：见本轮提交后的测试报告（`ShellArgsTest` 新增短簇展开、`-uu` 丢弃、smart-case、minimal、内置 rg 路径等用例；`OpenAIAccountRoutingPolicyTest` 重写）。

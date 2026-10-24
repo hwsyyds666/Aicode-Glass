@@ -19,6 +19,20 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
 
+// GitHub OAuth client secret stays in the ignored local.properties file (or a local Gradle property),
+// never in tracked Kotlin/Gradle source. GitHub requires it for the authorization-code token exchange.
+val localPropertiesFile = rootProject.file("local.properties")
+val localProperties = Properties()
+if (localPropertiesFile.exists()) {
+    localProperties.load(FileInputStream(localPropertiesFile))
+}
+val githubOAuthClientSecret = providers.gradleProperty("GITHUB_CLIENT_SECRET")
+    .orElse(localProperties.getProperty("GITHUB_CLIENT_SECRET").orEmpty())
+    .get()
+
+fun buildConfigString(value: String): String =
+    "\"${value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r")}\""
+
 // gitVersionName 从 git tag 动态解析，彻底解决“发版时手改 build.gradle.kts 与 tag 双向不同步”问题。
 // 规则：
 //   1. 若当前 commit 刚好有 tag（如 v1.7.0 或 v1.7.0-rc1），直接提取为 "1.7.0" 或 "1.7.0-rc1"；
@@ -108,6 +122,8 @@ android {
 
     defaultConfig {
         applicationId = "com.aicode"
+        buildConfigField("String", "GITHUB_OAUTH_CLIENT_ID", buildConfigString("Ov23liGYzTkc2hSsEwOa"))
+        buildConfigField("String", "GITHUB_OAUTH_CLIENT_SECRET", buildConfigString(githubOAuthClientSecret))
         minSdk = 26
         // 仍锁 targetSdk 28，但阻塞项已不是 PRoot：proot 全套改由 jniLibs 装到 nativeLibraryDir
         // （见 sourceSets 与 packaging.jniLibs 注释），W^X 不再挡容器启动。升级前待解决：

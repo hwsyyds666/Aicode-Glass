@@ -146,9 +146,6 @@ private fun GitHubRepositoriesDialog(
             viewModel.loadGitHubRepositories(reset = true)
         }
     }
-    LaunchedEffect(state.deviceCode?.verificationUri) {
-        state.deviceCode?.verificationUri?.let { uri -> openExternalGitHubUri(context, uri) }
-    }
 
     val filteredRepos = remember(state.repositories, query, ownerFilter, showPrivate, showPublic) {
         state.repositories.filter { repo ->
@@ -178,8 +175,6 @@ private fun GitHubRepositoriesDialog(
                 val account = state.account
                 if (account == null) {
                     if (state.clientId.isBlank()) {
-                        // 此版本未内置 GitHub OAuth App：给出注册指引。用户零输入——
-                        // 连接只需要点「连接 GitHub」，client_id 由应用内置（Device Flow 无需 secret）。
                         Text(
                             stringResource(R.string.workspace_github_not_configured),
                             style = MaterialTheme.typography.bodySmall,
@@ -194,36 +189,37 @@ private fun GitHubRepositoriesDialog(
                             modifier = Modifier.padding(bottom = Spacing.sm)
                         )
                     }
-                    state.deviceCode?.let { code ->
-                        Spacer(Modifier.height(Spacing.md))
-                        Text(stringResource(R.string.workspace_github_user_code, code.userCode), style = MaterialTheme.typography.titleMedium)
-                        TextButton(onClick = { openExternalGitHubUri(context, code.verificationUri) }) {
-                            Text(stringResource(R.string.workspace_github_open_authorization))
-                        }
-                        val remaining = state.authorizationRemainingSeconds
-                        if (remaining != null) {
-                            Text(
-                                stringResource(R.string.workspace_github_waiting, remaining),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                    // 一键连接：始终展示按钮。client_id 缺省走内置/已存值，
-                    // 两者都空时由 ViewModel 给出注册指引（不再要求用户手填 ID）。
+                    // One tap opens GitHub in the system browser; the local callback completes the connection.
                     Spacer(Modifier.height(Spacing.md))
                     androidx.compose.material3.Button(
                         onClick = { viewModel.connectGitHub() },
                         enabled = !state.authorizing,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        if (state.authorizing && state.deviceCode == null) {
+                        if (state.authorizing) {
                             CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                             Spacer(Modifier.width(Spacing.sm))
                         }
                         Text(stringResource(if (state.authorizing) R.string.workspace_github_authorizing else R.string.workspace_github_connect))
                     }
-                    if (state.authorizing && state.deviceCode != null) {
+                    state.userCode?.let { code ->
+                        Spacer(Modifier.height(Spacing.sm))
+                        Text(
+                            text = stringResource(R.string.workspace_github_device_code_hint, code),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    state.waitingSeconds?.let { remaining ->
+                        if (state.userCode != null) {
+                            Text(
+                                text = stringResource(R.string.workspace_github_waiting, remaining),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    if (state.authorizing) {
                         TextButton(onClick = viewModel::cancelGitHubAuthorization, modifier = Modifier.align(Alignment.CenterHorizontally)) {
                             Text(stringResource(R.string.common_cancel))
                         }
@@ -341,13 +337,13 @@ private fun GitHubRepositoriesDialog(
     }
 }
 
-/** Always hand GitHub authorization to the device browser instead of an in-app URI handler. */
-private fun openExternalGitHubUri(context: Context, value: String) {
+/** Always hand GitHub authorization to the system browser. */
+private fun openExternalGitHubUri(context: Context, value: String): Boolean {
     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(value)).apply {
         addCategory(Intent.CATEGORY_BROWSABLE)
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
-    runCatching { context.startActivity(intent) }
+    return runCatching { context.startActivity(intent) }.isSuccess
 }
 
 @Composable
@@ -484,9 +480,40 @@ private fun WorkspaceSelectionHost(
     val addError by viewModel.addError.collectAsStateWithLifecycle()
     val externalWarningDismissed by viewModel.externalWarningDismissed.collectAsStateWithLifecycle()
     val deleteExternalWorkspaceSessions by viewModel.deleteExternalWorkspaceSessions.collectAsStateWithLifecycle()
+    val githubState by viewModel.github.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var pendingWorkspaceSelect by remember { mutableStateOf<Workspace?>(null) }
     var showGitHubRepositories by remember { mutableStateOf(false) }
+    var awaitingGitHubList by remember { mutableStateOf(false) }
+
+    // 一键连接：设备流的验证页直接交给系统浏览器，中间不再弹任何窗口
+    LaunchedEffect(githubState.browserUrl) {
+        val url = githubState.browserUrl ?: return@LaunchedEffect
+        val opened = openExternalGitHubUri(context, url)
+        viewModel.onGitHubBrowserUrlHandled()
+        if (!opened) viewModel.onGitHubBrowserUnavailable()
+    }
+
+    LaunchedEffect(githubState.userCode) {
+        val code = githubState.userCode ?: return@LaunchedEffect
+        runCatching {
+            val manager = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            manager.setPrimaryClip(android.content.ClipData.newPlainText("github-device-code", code))
+        }
+        Toast.makeText(
+            context,
+            context.getString(R.string.workspace_github_device_code_hint, code),
+            Toast.LENGTH_LONG
+        ).show()
+    }
+
+    // 本次是「点了 GitHub 之后才连上」的，才自动展开仓库列表；已连接状态下打开面板不打扰
+    LaunchedEffect(githubState.account?.login) {
+        if (awaitingGitHubList && githubState.account != null) {
+            awaitingGitHubList = false
+            showGitHubRepositories = true
+        }
+    }
     var showExternalWarning by remember { mutableStateOf(false) }
     var dontShowExternalWarningAgain by remember { mutableStateOf(false) }
 
@@ -546,7 +573,14 @@ private fun WorkspaceSelectionHost(
                 if (externalWarningDismissed) folderLauncher.launch(null)
                 else showExternalWarning = true
             },
-            onAddGitHub = { showGitHubRepositories = true },
+            onAddGitHub = {
+                if (githubState.account != null) {
+                    showGitHubRepositories = true
+                } else {
+                    awaitingGitHubList = true
+                    viewModel.connectGitHub()
+                }
+            },
             onSelect = ::select,
             onCreate = { name ->
                 viewModel.createWorkspace(name) { created ->

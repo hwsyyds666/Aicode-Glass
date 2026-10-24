@@ -12,7 +12,6 @@ import com.aicode.feature.agent.domain.container.CommandEvent
 import com.aicode.feature.git.domain.GitCommandEngine
 import com.aicode.feature.workspace.data.repository.GitHubOAuthRepository
 import com.aicode.feature.workspace.data.repository.GitHubAccount
-import com.aicode.feature.workspace.data.repository.GitHubDeviceCode
 import com.aicode.feature.workspace.data.repository.GitHubRepositoryItem
 import com.aicode.feature.workspace.data.repository.WorkspaceRepository
 import com.aicode.feature.workspace.domain.model.Workspace
@@ -47,9 +46,12 @@ class WorkspaceViewModel @Inject constructor(
     data class GitHubUiState(
         val clientId: String = "",
         val account: GitHubAccount? = null,
-        val deviceCode: GitHubDeviceCode? = null,
+        /** 需要立刻在系统浏览器打开的 URL（由 UI 打开后即清空）。 */
+        val browserUrl: String? = null,
+        /** 设备流授权码，展示给用户以便在 GitHub 页面输入。 */
+        val userCode: String? = null,
+        val waitingSeconds: Long? = null,
         val authorizing: Boolean = false,
-        val authorizationRemainingSeconds: Long? = null,
         val repositories: List<GitHubRepositoryItem> = emptyList(),
         val nextPage: Int? = null,
         val loadingRepositories: Boolean = false,
@@ -138,12 +140,14 @@ class WorkspaceViewModel @Inject constructor(
         runCatching { repository.deleteWorkspace(name) }
     }
 
-    /** Begin Device Flow; the UI opens GitHub's verification URI while polling proceeds in the background. */
+    /**
+     * One tap connect: starts the GitHub Device Flow and hands the verification URL to the UI so the
+     * browser opens immediately. There is no redirect_uri at all, so GitHub cannot complain about an
+     * unregistered callback.
+     */
     fun connectGitHub(): Job {
         activeGitHubAuthorizationJob?.cancel()
         val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
-            // 零配置连接：client_id 取用户存储值，缺省用内置 OAuth App 的（见 GitHubOAuthRepository）。
-            // 两者都为空（此版本未内置）时给出明确指引，而不是要用户手填 ID。
             val normalizedClientId = githubOAuthRepository.configuredClientId().trim()
             if (normalizedClientId.isBlank()) {
                 _github.update { it.copy(error = context.getString(R.string.workspace_github_error_client_id_required)) }
@@ -152,33 +156,34 @@ class WorkspaceViewModel @Inject constructor(
             _github.update {
                 it.copy(
                     clientId = normalizedClientId,
-                    deviceCode = null,
+                    browserUrl = null,
+                    userCode = null,
+                    waitingSeconds = null,
                     authorizing = true,
-                    authorizationRemainingSeconds = null,
                     error = null
                 )
             }
             try {
-                val deviceCode = githubOAuthRepository.requestDeviceCode(normalizedClientId)
-                _github.update { it.copy(deviceCode = deviceCode) }
-                val account = githubOAuthRepository.pollDeviceCode(normalizedClientId, deviceCode) { remaining ->
-                    _github.update { it.copy(authorizationRemainingSeconds = remaining) }
+                val deviceCode = githubOAuthRepository.beginDeviceAuthorization()
+                _github.update {
+                    it.copy(browserUrl = deviceCode.verificationUri, userCode = deviceCode.userCode)
+                }
+                val account = githubOAuthRepository.completeDeviceAuthorization(deviceCode) { remaining ->
+                    _github.update { it.copy(waitingSeconds = remaining) }
                 }
                 _github.update {
-                    it.copy(account = account, authorizing = false, deviceCode = null, authorizationRemainingSeconds = null)
+                    it.copy(account = account, authorizing = false, userCode = null, waitingSeconds = null)
                 }
                 loadGitHubRepositories(reset = true)
             } catch (error: CancellationException) {
-                _github.update {
-                    it.copy(authorizing = false, deviceCode = null, authorizationRemainingSeconds = null)
-                }
+                _github.update { it.copy(authorizing = false, userCode = null, waitingSeconds = null) }
                 throw error
             } catch (error: Exception) {
                 _github.update {
                     it.copy(
                         authorizing = false,
-                        deviceCode = null,
-                        authorizationRemainingSeconds = null,
+                        userCode = null,
+                        waitingSeconds = null,
                         error = error.message ?: context.getString(R.string.workspace_github_error_authorization)
                     )
                 }
@@ -192,6 +197,21 @@ class WorkspaceViewModel @Inject constructor(
 
     fun cancelGitHubAuthorization() {
         activeGitHubAuthorizationJob?.cancel()
+    }
+
+    fun onGitHubBrowserUrlHandled() {
+        _github.update { it.copy(browserUrl = null) }
+    }
+
+    fun onGitHubBrowserUnavailable() {
+        activeGitHubAuthorizationJob?.cancel()
+        _github.update {
+            it.copy(
+                browserUrl = null,
+                authorizing = false,
+                error = context.getString(R.string.workspace_github_error_browser_unavailable)
+            )
+        }
     }
 
     fun disconnectGitHub() = viewModelScope.launch {
