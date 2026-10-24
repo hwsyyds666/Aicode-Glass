@@ -38,8 +38,13 @@ class ToolSafetySettingsRepository @Inject constructor(
         private val DISABLED_KEY = booleanPreferencesKey("disable_safety_interception")
         private val AUTH_LEVEL_KEY = stringPreferencesKey("command_auth_level")
         private val REVIEW_TIMEOUT_SECONDS_KEY = intPreferencesKey("command_review_timeout_seconds")
-        const val DEFAULT_REVIEW_TIMEOUT_SECONDS = 15
-        private val SUPPORTED_REVIEW_TIMEOUT_SECONDS = setOf(10, 15, 20)
+        /**
+         * AI 审查器默认等待时间。审查模型（尤其云端大模型）冷启动 + 排队经常超过 15s，
+         * 超时即转人工会让自主模式频繁被打断，默认放宽到 50s。
+         */
+        const val DEFAULT_REVIEW_TIMEOUT_SECONDS = 50
+        /** 支持的档位：历史值（10/20）不在表内会自动回退到默认 50s。 */
+        private val SUPPORTED_REVIEW_TIMEOUT_SECONDS = setOf(15, 30, 50)
     }
 
     /** 当前开关流；未设置时回退到 false（默认保留安全拦截）。 */

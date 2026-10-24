@@ -137,13 +137,13 @@ internal fun PermissionsSection(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     SegmentedTabs(
-                        selected = listOf(10, 15, 20).indexOf(commandReviewTimeoutSeconds).coerceAtLeast(0),
+                        selected = listOf(15, 30, 50).indexOf(commandReviewTimeoutSeconds).coerceAtLeast(0),
                         labels = listOf(
-                            stringResource(R.string.perm_review_timeout_10s),
                             stringResource(R.string.perm_review_timeout_15s),
-                            stringResource(R.string.perm_review_timeout_20s)
+                            stringResource(R.string.perm_review_timeout_30s),
+                            stringResource(R.string.perm_review_timeout_50s)
                         ),
-                        onSelect = { onSelectReviewTimeout(listOf(10, 15, 20)[it]) }
+                        onSelect = { onSelectReviewTimeout(listOf(15, 30, 50)[it]) }
                     )
                 }
             }

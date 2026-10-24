@@ -1981,9 +1981,9 @@
     <string name="tool_diff_skipped_hint">File is large; line-by-line diff not shown</string>
     <string name="perm_review_timeout_title">AI reviewer timeout</string>
     <string name="perm_review_timeout_desc">In autonomous mode, a reviewer that does not respond in time falls back to manual approval.</string>
-    <string name="perm_review_timeout_10s">10 sec</string>
     <string name="perm_review_timeout_15s">15 sec</string>
-    <string name="perm_review_timeout_20s">20 sec</string>
+    <string name="perm_review_timeout_30s">30 sec</string>
+    <string name="perm_review_timeout_50s">50 sec (default)</string>
     <string name="checkpoint_rewind_confirm_title">Confirm rewind</string>
     <string name="checkpoint_rewind_cancel">Cancel</string>
     <string name="checkpoint_rewind_confirm">Continue</string>

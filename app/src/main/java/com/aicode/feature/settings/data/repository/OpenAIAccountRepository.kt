@@ -36,6 +36,8 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.FormBody
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -607,14 +609,17 @@ class OpenAIAccountRepository @Inject constructor(
         val existing = accountDao.getAllOnce().firstOrNull { it.subject == subject }
         val accountId = existing?.id ?: UUID.randomUUID().toString()
         val providerId = existing?.providerId ?: "$PROVIDER_ID_PREFIX$accountId"
+        // id_token 的 auth claims 里带订阅档位（chatgpt_plan_type）与账号 ID，模型目录按档位过滤
+        val planType = auth?.optString("chatgpt_plan_type")?.takeIf(String::isNotBlank)
+        val chatgptAccountId = auth?.optString("chatgpt_account_id")?.takeIf(String::isNotBlank)
         val models = if (credential.accessToken.isBlank()) {
             emptyList()
         } else {
-            runCatching { fetchModelCatalog(credential.accessToken) }
+            runCatching { fetchModelCatalog(credential.accessToken, planType, chatgptAccountId) }
                 .getOrElse { error ->
                     if (error is CancellationException) throw error
                     FileLogger.w(TAG, "导入账号模型目录拉取失败，改用内置列表: ${error.message}")
-                    DEFAULT_ACCOUNT_MODELS
+                    defaultAccountModels(planType)
                 }
         }
         val scopes = listOf(
@@ -641,7 +646,8 @@ class OpenAIAccountRepository @Inject constructor(
                 OpenAIAccountEntity.STATUS_CONNECTED
             },
             lastError = null,
-            chatgptAccountId = auth?.optString("chatgpt_account_id")?.takeIf(String::isNotBlank),
+            chatgptAccountId = chatgptAccountId,
+            planType = planType,
             createdAt = existing?.createdAt ?: now,
             updatedAt = now
         )
@@ -751,16 +757,20 @@ class OpenAIAccountRepository @Inject constructor(
                 else -> "$PROVIDER_ID_PREFIX$accountId"
             }
             val now = System.currentTimeMillis()
-            // ChatGPT OAuth token 调 api.openai.com/v1/models 常被拒（403），
-            // 这里失败即回退到内置 Codex 模型目录，保证账号登录后立即可用。
+            // ChatGPT OAuth token 打 api.openai.com/v1/models 会被拒（403），官方 Codex 客户端
+            // 走 chatgpt.com 后端目录端点；失败即回退到按订阅分级的内置列表，保证登录后立即可用。
+            val planType = decodeIdTokenClaims(tokens.idToken)
+                ?.optJSONObject("https://api.openai.com/auth")
+                ?.optString("chatgpt_plan_type")
+                ?.takeIf(String::isNotBlank)
             val modelResult = when {
                 !canUsePlan -> Result.success(emptyList<OpenAIAccountModel>())
                 tokens.refreshToken.isBlank() -> Result.failure(OpenAIAccountException(text(R.string.openai_error_refresh_token_missing)))
-                else -> runCatching { fetchModelCatalog(tokens.accessToken) }
+                else -> runCatching { fetchModelCatalog(tokens.accessToken, planType, identity.chatgptAccountId) }
                     .recoverCatching { error ->
                         if (error is CancellationException) throw error
                         FileLogger.w(TAG, "账号模型目录拉取失败，改用内置列表: ${error.message}")
-                        DEFAULT_ACCOUNT_MODELS
+                        defaultAccountModels(planType)
                     }
             }
             val models = modelResult.getOrDefault(emptyList())
@@ -787,6 +797,7 @@ class OpenAIAccountRepository @Inject constructor(
                 lastError = modelResult.exceptionOrNull()?.message
                     ?: modelResult.exceptionOrNull()?.let { text(R.string.openai_warning_model_catalog_unavailable) },
                 chatgptAccountId = identity.chatgptAccountId,
+                planType = planType ?: previous?.planType ?: priorIdentity?.planType,
                 createdAt = previous?.createdAt ?: priorIdentity?.createdAt ?: now,
                 updatedAt = now
             )
@@ -898,18 +909,18 @@ class OpenAIAccountRepository @Inject constructor(
 
     suspend fun refreshModels(accountId: String): OpenAIAccountRefreshResult {
         val token = accessToken(accountId, allowUsagePaused = true)
+        val account = accountDao.getById(accountId) ?: throw OpenAIAccountException(text(R.string.openai_error_account_missing))
         // 拉不到账号目录时回退内置列表，让「暂时没有模型」的账号也能恢复可用；
         // 同时把原因作为 warning 告诉用户，避免误以为模型是真的只有这些。
         val (models, warning) = try {
-            fetchModelCatalog(token) to null
+            fetchModelCatalog(token, account.planType, account.chatgptAccountId) to null
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
             FileLogger.w(TAG, "刷新模型目录失败，改用内置列表: ${error.message}")
-            DEFAULT_ACCOUNT_MODELS to (error.message?.takeIf(String::isNotBlank)
+            defaultAccountModels(account.planType) to (error.message?.takeIf(String::isNotBlank)
                 ?: text(R.string.openai_warning_model_catalog_unavailable))
         }
-        val account = accountDao.getById(accountId) ?: throw OpenAIAccountException(text(R.string.openai_error_account_missing))
         val oldProvider = providerRepository.getProviderById(account.providerId)
         val modelSlugs = models.map(OpenAIAccountModel::slug)
         val selected = oldProvider?.effectiveModel?.takeIf { it in modelSlugs } ?: modelSlugs.firstOrNull().orEmpty()
@@ -1277,11 +1288,30 @@ class OpenAIAccountRepository @Inject constructor(
         }
     }
 
-    private suspend fun fetchModelCatalog(accessToken: String): List<OpenAIAccountModel> {
+    /**
+     * 拉取账号自己的模型目录（官方 Codex 客户端契约）。
+     *
+     * 端点：`chatgpt.com/backend-api/codex/models?client_version=...`，带账号 token 与
+     * `chatgpt-account-id` 头。响应每个模型带 `visibility`（`hide` 的是内部模型，如
+     * codex-auto-review，不展示）和 `available_in_plans`（为空表示全档位可用；非空时
+     * 只有账号订阅档位命中才可见——免费号与付费号可见模型不同就是这个机制）。
+     *
+     * planType 为空（还没拉到用量信息）时不做档位过滤，只挡内部模型。
+     */
+    private suspend fun fetchModelCatalog(
+        accessToken: String,
+        planType: String?,
+        chatgptAccountId: String?
+    ): List<OpenAIAccountModel> {
+        val url = OPENAI_CODEX_MODELS_URL.toHttpUrl().newBuilder()
+            .addQueryParameter("client_version", OPENAI_CODEX_CLIENT_VERSION)
+            .build()
         val request = Request.Builder()
-            .url("$OPENAI_BASE_URL/v1/models")
+            .url(url)
             .header("Authorization", "Bearer $accessToken")
             .header("Accept", "application/json")
+            .header("originator", "codex_cli_rs")
+            .apply { chatgptAccountId?.takeIf(String::isNotBlank)?.let { header("ChatGPT-Account-Id", it) } }
             .get()
             .build()
         val response = execute(request)
@@ -1296,15 +1326,33 @@ class OpenAIAccountRepository @Inject constructor(
         // never fall back to a different public API shape or display hidden models.
         val items = json.optJSONArray("models")
             ?: throw OpenAIAccountException(text(R.string.openai_error_model_catalog_invalid))
+        val plan = planType?.trim()?.lowercase().orEmpty()
         val entries = buildList {
             for (index in 0 until items.length()) {
                 val model = items.optJSONObject(index) ?: continue
+                val slug = model.optString("slug").trim()
+                if (slug.isEmpty()) continue
+                // 内部模型（visibility=hide，如 codex-auto-review / 图像模型）不进入选择器
+                val visibility = model.optString("visibility").trim()
+                if (visibility.equals("hide", ignoreCase = true)) continue
+                // available_in_plans 为空 = 全档位可用；非空时账号档位必须命中（档位未知则不过滤）
+                val plans = model.optJSONArray("available_in_plans")
+                val planRestricted = plans != null && plans.length() > 0
+                val planAllowed = !planRestricted || plan.isEmpty() ||
+                    (0 until plans.length()).any { plans.optString(it).trim().equals(plan, ignoreCase = true) }
+                if (!planAllowed) continue
                 add(OpenAIOAuthProtocol.ModelCatalogEntry(
-                    slug = model.optString("slug"),
-                    displayName = model.optString("display_name"),
-                    visibility = model.optString("visibility")
+                    slug = slug,
+                    // 展示名缺失时退回 slug，避免被下游的合法性过滤整条丢掉
+                    displayName = model.optString("display_name").trim().ifBlank { slug },
+                    // 没写 visibility 的条目按可见处理（下游只认 "list"）
+                    visibility = visibility.ifBlank { "list" }
                 ))
             }
+        }
+        // 端点对过旧 client_version 会返回空列表且不报错：空列表视为拉取失败，让调用方回退内置目录。
+        if (entries.isEmpty()) {
+            throw OpenAIAccountException(text(R.string.openai_error_model_catalog_invalid))
         }
         return OpenAIOAuthProtocol.visibleModels(entries)
     }
@@ -1572,6 +1620,15 @@ class OpenAIAccountRepository @Inject constructor(
         const val PROVIDER_ID_PREFIX = "openai_account_"
         private const val OPENAI_BASE_URL = "https://api.openai.com/"
         private const val OPENAI_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+        /**
+         * 官方 Codex 客户端的账号模型目录端点（ChatGPT 订阅 token 专用）。
+         * `api.openai.com/v1/models` 面向 API platform，订阅 token 打它会被拒（403）；
+         * 官方 Codex 客户端走的是 chatgpt.com 后端的这个端点，且 `client_version` 必填、
+         * 受版本门控（过旧返回空列表不报错）。响应里每个模型带 `visibility` 与
+         * `available_in_plans`：免费号与付费号（plus/pro/team…）可见的模型确实不同。
+         */
+        private const val OPENAI_CODEX_MODELS_URL = "https://chatgpt.com/backend-api/codex/models"
+        private const val OPENAI_CODEX_CLIENT_VERSION = "0.153.4"
         /** Official Codex login callback ports; 1455 primary, 1457 is Codex's own fallback. */
         private val CALLBACK_PORTS = intArrayOf(1455, 1457)
         private const val CALLBACK_TIMEOUT_MS = 180_000
@@ -1591,23 +1648,46 @@ class OpenAIAccountRepository @Inject constructor(
         )
 
         /**
-         * ChatGPT 账号的兜底模型目录。
+         * ChatGPT 账号的兜底模型目录（官方 Codex 当前在售阵容，跟随 cockpit-tools 的随包清单）。
          *
-         * Sign in with ChatGPT 拿到的 OAuth token 访问 `api.openai.com/v1/models` 经常被拒
-         * （实测 403，因为该端点面向 API platform 而非 ChatGPT 订阅）。账号目录拉不到时
-         * 用这份列表顶上，保证登录/导入后账号立即可用、模型选择器里能看到官方模型。
+         * 账号目录端点拉不到（网络问题 / 403 / 空列表）时用这份列表顶上，保证登录/导入后
+         * 账号立即可用、模型选择器里能看到官方模型。免费号只给轻量子集，付费号给全量——
+         * 与官方按订阅等级开放模型的策略一致（真实可用集合以端点返回的 available_in_plans 为准）。
          */
-        val DEFAULT_ACCOUNT_MODELS: List<OpenAIAccountModel> = listOf(
+        private val ACCOUNT_MODELS_PAID: List<OpenAIAccountModel> = listOf(
+            OpenAIAccountModel("gpt-6.1-sol", "GPT-6.1 Sol"),
+            OpenAIAccountModel("gpt-6-astra", "GPT-6 Astra"),
+            OpenAIAccountModel("gpt-6-sol", "GPT-6 Sol"),
+            OpenAIAccountModel("gpt-6-luna", "GPT-6 Luna"),
+            OpenAIAccountModel("gpt-5.6-sol", "GPT-5.6 Sol"),
+            OpenAIAccountModel("gpt-5.6-terra", "GPT-5.6 Terra"),
+            OpenAIAccountModel("gpt-5.6-luna", "GPT-5.6 Luna"),
+            OpenAIAccountModel("gpt-5.4", "GPT-5.4"),
+            OpenAIAccountModel("gpt-5.4-mini", "GPT-5.4 Mini"),
             OpenAIAccountModel("gpt-5.3-codex", "GPT-5.3 Codex"),
             OpenAIAccountModel("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
-            OpenAIAccountModel("gpt-5.2-codex", "GPT-5.2 Codex"),
-            OpenAIAccountModel("gpt-5.1-codex", "GPT-5.1 Codex"),
-            OpenAIAccountModel("gpt-5.1-codex-mini", "GPT-5.1 Codex Mini"),
-            OpenAIAccountModel("gpt-5-codex", "GPT-5 Codex"),
-            OpenAIAccountModel("gpt-5-codex-mini", "GPT-5 Codex Mini"),
-            OpenAIAccountModel("gpt-5", "GPT-5"),
-            OpenAIAccountModel("gpt-5-mini", "GPT-5 Mini")
+            OpenAIAccountModel("gpt-reserve", "GPT Reserve")
         )
+
+        /** 免费订阅只能用到轻量子集（spark / mini / 日常款），前沿模型不开放。 */
+        private val ACCOUNT_MODELS_FREE: List<OpenAIAccountModel> = listOf(
+            OpenAIAccountModel("gpt-5.4", "GPT-5.4"),
+            OpenAIAccountModel("gpt-5.4-mini", "GPT-5.4 Mini"),
+            OpenAIAccountModel("gpt-5.3-codex", "GPT-5.3 Codex"),
+            OpenAIAccountModel("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
+            OpenAIAccountModel("gpt-reserve", "GPT Reserve")
+        )
+
+        /**
+         * 按订阅等级取兜底目录：free 只给轻量子集；其余（plus/pro/team/business/enterprise）
+         * 与未知档位都给全量——真实可用集合由账号目录端点的 available_in_plans 决定。
+         */
+        fun defaultAccountModels(planType: String?): List<OpenAIAccountModel> =
+            if (planType?.trim()?.equals("free", ignoreCase = true) == true) {
+                ACCOUNT_MODELS_FREE
+            } else {
+                ACCOUNT_MODELS_PAID
+            }
 
         fun isAccountProvider(provider: AIProviderConfig): Boolean = accountIdFromProviderMarker(provider.apiKey) != null
         fun accountIdFromProviderMarker(value: String): String? = value.takeIf { it.startsWith(PROVIDER_MARKER_PREFIX) }

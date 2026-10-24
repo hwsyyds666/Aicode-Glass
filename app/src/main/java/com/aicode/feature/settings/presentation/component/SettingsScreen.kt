@@ -696,25 +696,33 @@ fun SettingsScreen(
                 // 大屏菜单已常驻左栏，右栏在没选中分区时给个占位提示
                 SettingsSection.Menu -> if (expanded) SettingsDetailPlaceholder() else menuBody()
                 SettingsSection.General -> GeneralSettingsSectionHost(viewModel)
-                SettingsSection.Providers -> ProvidersSection(
-                    // ChatGPT 账号由「ChatGPT 账号」入口管理，不作为独立供应商出现在列表里
-                    providers = providers.filterNot {
-                        com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(it)
-                    },
-                    onEdit = {
-                        if (!com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(it)) {
-                            editingProvider = it
-                            section = SettingsSection.ProviderEditor
+                SettingsSection.Providers -> {
+                    // ChatGPT 账号由「ChatGPT 账号」入口管理，不作为独立供应商出现在列表里。
+                    // 过滤结果必须按 providers 记住：AnimatedContent 过渡动画每帧都会重组这一分支，
+                    // 每次重组都新建列表实例，会让 ProvidersSection 里的 LaunchedEffect(providers)
+                    // 逐帧重启并回写本地拖拽顺序，从编辑页返回时就表现为卡顿不连贯。
+                    val sectionProviders = remember(providers) {
+                        providers.filterNot {
+                            com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(it)
                         }
-                    },
-                    onDelete = {
-                        if (!com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(it)) {
-                            viewModel.deleteProvider(it.id)
-                        }
-                    },
-                    onReorder = { ordered -> viewModel.reorderProviders(ordered) },
-                    onOpenOpenAIAccounts = { section = SettingsSection.OpenAIAccounts }
-                )
+                    }
+                    ProvidersSection(
+                        providers = sectionProviders,
+                        onEdit = {
+                            if (!com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(it)) {
+                                editingProvider = it
+                                section = SettingsSection.ProviderEditor
+                            }
+                        },
+                        onDelete = {
+                            if (!com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(it)) {
+                                viewModel.deleteProvider(it.id)
+                            }
+                        },
+                        onReorder = { ordered -> viewModel.reorderProviders(ordered) },
+                        onOpenOpenAIAccounts = { section = SettingsSection.OpenAIAccounts }
+                    )
+                }
                 SettingsSection.OpenAIAccounts -> OpenAIAccountsSection()
                 SettingsSection.DefaultModels -> DefaultModelsSectionHost(
                     viewModel = viewModel,

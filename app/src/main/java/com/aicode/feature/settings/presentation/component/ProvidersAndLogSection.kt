@@ -55,6 +55,13 @@ import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
 
 /**
+ * LazyColumn 顶部前置了「ChatGPT 账号」入口卡（[OpenAIAccountsEntryCard]，不可拖拽）。
+ * reorderable 的 from/to.index 是整个 LazyColumn 的绝对下标，减掉这个前置条目数
+ * 才是供应商列表内的下标；不减就会拖动错位、动画完全乱掉（历史 bug）。
+ */
+private const val PROVIDERS_LEADING_ITEMS = 1
+
+/**
  * 提供商二级页：列表 + 空态提示。新增/编辑由顶栏「+」与点击触发 [ProviderEditorScreen]，左滑删除。
  * 每行为一组圆角卡片，长按内容区域可调整提供商顺序（持久化到 sortOrder）。
  */
@@ -69,17 +76,22 @@ internal fun ProvidersSection(
     // 拖拽期间顺序完全由本地 state 掌控（与提示词页一致）：若每移动一格就落盘，
     // Room 的 flow 回灌会覆盖 UI 顺序，AnchoredDraggable 的位置与实际 item 错位后手势就卡住。
     var localProviders by remember { mutableStateOf(providers) }
-    LaunchedEffect(providers) { localProviders = providers }
+    // 只有内容真的变了才回写：Room 同内容回灌也会换新列表实例，无条件赋值会多一次重组，
+    // 页面过渡动画每帧叠一次就是可见的卡顿。
+    LaunchedEffect(providers) {
+        if (localProviders != providers) localProviders = providers
+    }
 
     val lazyListState = rememberLazyListState()
     val reorderableState = rememberReorderableLazyListState(lazyListState) { from, to ->
         // reorderable 在拖到列表末尾时会给出 to.index == size，直接 add 会 IndexOutOfBounds 崩溃，
-        // 必须收敛到合法区间。
+        // 必须收敛到合法区间；同时 from/to 是含前置入口卡的绝对下标，先减掉前置条目数。
         val current = localProviders
         if (current.isEmpty()) return@rememberReorderableLazyListState
-        val fromIndex = from.index.coerceIn(current.indices)
-        val moved = current.toMutableList().apply { add(to.index.coerceIn(0, size), removeAt(fromIndex)) }
-        localProviders = moved
+        val fromIndex = (from.index - PROVIDERS_LEADING_ITEMS).coerceIn(current.indices)
+        val toIndex = (to.index - PROVIDERS_LEADING_ITEMS).coerceIn(0, current.size)
+        if (fromIndex == toIndex) return@rememberReorderableLazyListState
+        localProviders = current.toMutableList().apply { add(toIndex, removeAt(fromIndex)) }
     }
     val hapticFeedback = LocalHapticFeedback.current
     LazyColumn(

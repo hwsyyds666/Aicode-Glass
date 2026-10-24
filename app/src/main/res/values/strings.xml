@@ -1980,9 +1980,9 @@
     <string name="tool_diff_skipped_hint">文件较大，不显示逐行对比</string>
     <string name="perm_review_timeout_title">AI 审查器等待时间</string>
     <string name="perm_review_timeout_desc">自主执行模式下，审查器超过所选时间仍未返回时会转为人工确认。</string>
-    <string name="perm_review_timeout_10s">10 秒</string>
     <string name="perm_review_timeout_15s">15 秒</string>
-    <string name="perm_review_timeout_20s">20 秒</string>
+    <string name="perm_review_timeout_30s">30 秒</string>
+    <string name="perm_review_timeout_50s">50 秒（默认）</string>
     <string name="checkpoint_rewind_confirm_title">确认回退</string>
     <string name="checkpoint_rewind_cancel">取消</string>
     <string name="checkpoint_rewind_confirm">继续</string>
