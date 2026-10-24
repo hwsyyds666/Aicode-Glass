@@ -205,3 +205,47 @@ HEAD `c9a14f8b`。用户反馈：容器模式 search 正常、真机（DEVICE_RO
 - `:app:compileUniversalDebugKotlin`、`:app:testUniversalDebugUnitTest`、`:app:assembleUniversalRelease` 均 BUILD SUCCESSFUL；单测 1,300 通过 / 0 失败 / 0 错误 / 12 跳过。
 - 新测试：`OpenAIOAuthProtocolTest.authorizationUrlMatchesOfficialCodexDesktopContract`（校验 hosted 包装、内层 authorize 参数、Codex client、无动态注册残留）与 Codex scope 用例。
 - 提交 `15163e47`。
+
+## 2026-10-24 第七轮（账号页精简 / 登录兜底 / 多方式导入导出 / 拖拽与手势）
+
+用户一次性提了 8 项，逐项对应如下。
+
+### 1. 账号页去掉大段说明
+- `OpenAIAccountsSection`：删除顶部 `openai_accounts_description` 与 `openai_accounts_multi_hint` 两段说明文字，只留标题、账号数量与操作按钮。
+
+### 2. 卡片显示订阅等级 + 5h / 周额度
+- 卡片保留 `PlanTierBadge(planType)`（Free/Go/Plus/Pro/Team/Business/Enterprise/Edu 徽章）与 5h / 每周两条 `QuotaMiniRow`（绿→黄→橙→红按已用比例着色），并在下方给出额度更新时间。
+
+### 3. 打开页面自动刷新 + 手动刷新按钮
+- `OpenAIAccountsSection` 加 `LaunchedEffect(Unit) { viewModel.refreshAll() }`：每次进入本页自动刷一次全部账号额度（无模型目录的顺带刷模型）。
+- 标题行右侧新增刷新 `IconButton`，刷新中显示进度圈；带 `refreshing` 状态，避免重复触发。
+- ViewModel 新增 `refreshAll()`：遍历 `snapshotAccountIds()`，逐个 `refreshUsage`，失败计数后汇总成一条提示（新增 `openai_notice_import_result` / `openai_warning_usage_refresh_partial` / `openai_notice_no_accounts`）。
+
+### 4. 登录失败「明明跳到 fallback 链接就连不上 / 粘贴回调没反应」
+- **`awaitCallback` 加固**：之前一次不可用连接（浏览器预连接、favicon 探针）就会让整个等待失败；现在循环 accept，对非 loopback / 无法解析请求行 / 非回调路径 / state 不匹配的连接分别回 400/404 后**继续等**，只有匹配 state 的回调才结束等待。
+- **回环监听可靠性**：`bindLoopbackCallbackServer()` 的 backlog 从 1 提到 32（浏览器预连接会占用队列，太短会挤掉真正的回调），并把 `soTimeout` 交回给调用方的 `withTimeout` 管理（超时后 close socket 中断 accept）。
+- **手动回调容错**：`submitLoginCallback` 现在支持三种粘贴形态——完整回调 URL、`?code=…&state=…` 片段、以及**单独的 code**（补齐本次会话 state）；携带 state 时仍做恒定时间比对，防止串号重放。
+- **错误可见**：登录弹层内就地显示红底错误块（原提示落在被弹层盖住的页面上，用户看起来就是「点了没反应」），失败时保留弹层并给「重新发起登录」按钮（新增 `loginVisible` 状态与 `retryLogin()`）。
+
+### 5. 导入导出照抄 cockpit-tools 的多种方式
+- 新增 `importAccountsFromText()`：自动识别 JSON 对象 / JSON 数组（批量）/ 行分隔 JSON / 裸 token 行 / `邮箱----密码----2FA秘钥----邮件地址` 待授权行（3 段也可）。
+- 凭据容器兼容 Codex CLI 的 `tokens`、Web Session 的 `session`、顶层 `auth`，字段名 snake_case / camelCase 都收；`client_id` 缺省回退 Codex CLI 公开 id。
+- 返回 `OpenAIAccountImportOutcome`（imported / failures / pendingEmails），ViewModel 汇总成一条中文提示。
+- 新增 `exportAccounts()`：导出全部账号（含加密取出的令牌）为可再次导入的 JSON；UI 新增「导出账号」按钮与展示对话框（可一键复制）。
+- 导入对话框改为分段控件三页签：粘贴 JSON / Access Token / 批量文本，每页签一句简短说明（不再堆长文案）。
+
+### 6. AI 供应商拖拽卡死
+- **根因**：`ProvidersSection` 在 `rememberReorderableLazyListState` 的 onMove 里**每移动一格就写数据库**，Room 的 providers flow 立刻回灌并覆盖 UI 顺序，AnchoredDraggable 记录的位置与实际 item 错位，手势就卡住了。
+- **修复**：照搬提示词页（`PromptsSection`）的可用实现——本地 `localProviders` state 承接拖拽期间的临时顺序，onMove 只改本地；**松手时**才通过 `onReorder(ordered)` 整体落盘一次。
+- 调用方同步：`SettingsViewModel.reorderProviders(ordered: List<AIProviderConfig>)`，`SettingsScreen` 传参改传列表。
+
+### 7. 模型选择器「往上拖动就收回去」
+- **根因**：`rememberSheetFlingFix` 只拦截了 fling 阶段，拖拽（scroll）阶段向上的剩余位移会冒泡到 sheet 的 AnchoredDraggable。
+- **修复**：新增 `onPostScroll`，在 sheet 已完全展开时同样吃掉向上的剩余位移；向下方向原样放行，下滑关闭手势不受影响。
+
+### 8. 超级 Agent 图标未启用时有底色
+- `ChatInputBar`：关闭态背景由 `surfaceVariant(0.42f)` 改为 `Color.Transparent`，仅保留描边 + 灰色图标。
+
+### 验证
+- `:app:compileUniversalDebugKotlin` BUILD SUCCESSFUL；`:app:testUniversalDebugUnitTest` **1,300 通过 / 0 失败 / 0 错误 / 12 跳过**。
+- 提交 `bfa0e3e2`。
