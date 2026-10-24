@@ -46,7 +46,7 @@ data class SubAgentEvent(
  * 在子会话上启动 AI 工作流；子会话工作流结束时 ViewModel 再发 COMPLETED/FAILED，
  * 父会话据此注入后台通知（类比 terminal 的 notify=true 异步回调）。
  *
- * 同时维护活跃子代理会话 id 集合，供 TaskTool 查询并发上限（最多 5 个运行中）。
+ * 同时维护活跃子代理会话 id 集合，供 TaskTool 查询并发上限（同时运行数上限可配置，默认 3）。
  */
 @Singleton
 class SubAgentEventBus @Inject constructor() {

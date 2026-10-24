@@ -48,7 +48,7 @@ import javax.inject.Inject
  * - `del`：删除指定子代理会话及其全部消息。
  * - `list`：列出当前会话的全部子代理及其状态。
  *
- * 最多同时允许 5 个运行中的子代理（create 时检查上限）。
+ * 同时运行与每会话派发总数上限可配置（默认 3 / 12，create 时检查，超限返回错误）。
  * 子代理不能嵌套创建子代理（其工具集中不含 `task`）。
  *
  * `create` 仅接受 explore/research/worker/reviewer 四种应用内置类型，类型决定工具范围与模型档位。
@@ -80,7 +80,7 @@ class TaskTool @Inject constructor(
         }
     }
 
-    override val description = "管理隔离上下文的子代理。仅在任务可独立、边界清晰且并行收益显著高于约 15 倍 token 成本时派发；简单、集中或强耦合任务由主代理完成。可选类型：\n${BuiltInSubAgentCatalog.parentGuidance()}\n创建时必须提交自包含的完整交接：目标背景、可写/只读范围、共同约束、禁止事项、验收标准、返回格式。worker 必须声明非空且与其他运行任务不重叠的可写范围；代码修改必须使用范围校验的文件工具；构建/测试仅允许从可写范围根目录调用受限 Gradle 任务并明确选择 container 或 remote 环境。其他 shell 仅开放安全只读命令；其他类型只能只读或联网研究。派发后主代理必须审查结果和差异，必要时精准返工，最多两轮；是否自动建议 reviewer 由设置中的独立审查开关和文件数阈值决定。子代理不能嵌套。完成后等待后台通知，不要轮询。"
+    override val description = "管理隔离上下文的子代理。仅在任务可独立、边界清晰且并行收益显著高于约 15 倍 token 成本时派发；简单、集中或强耦合任务由主代理完成。可选类型：\n${BuiltInSubAgentCatalog.parentGuidance()}\n创建时必须提交自包含的完整交接：目标背景、可写/只读范围、共同约束、禁止事项、验收标准、返回格式。worker 必须声明非空且与其他运行任务不重叠的可写范围；代码修改必须使用范围校验的文件工具；构建/测试仅允许从可写范围根目录调用受限 Gradle 任务并明确选择 container 或 remote 环境。其他 shell 仅开放安全只读命令；其他类型只能只读或联网研究。派发后主代理必须审查结果和差异，必要时精准返工，最多两轮；大型或高风险改动可再派只读 reviewer 独立核对原始需求与差异。子代理不能嵌套。完成后等待后台通知，不要轮询。"
 
     override val parameters: Map<String, ToolParameter> = mapOf(
         "action" to ToolParameter(

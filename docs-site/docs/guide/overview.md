@@ -38,7 +38,7 @@
 | 默认与专用模型 | 新会话默认模型，以及识图、生图、标题总结的专用模型 → [文档](/guide/default-models) |
 | MCP 服务器 | 接入外部工具，全局与项目两级配置 → [文档](/guide/mcp) |
 | 技能 | 按需加载的专项能力扩展包 → [文档](/guide/skills) |
-| 子代理 | 派生独立会话并行执行任务，可在设置内新建、编辑与启停，支持自定义模型与工具集（1.11.0 起）→ [文档](/guide/subagent) |
+| 子代理 | 派生独立会话并行执行任务，内置 explore / research / worker / reviewer 四种类型与快速/主力两档模型 → [文档](/guide/subagent) |
 | Shizuku 工具 | AI 的 `Shizuku` 工具：以 adb shell（uid 2000）身份执行系统命令、读写 /sdcard（1.12.0 起）→ [文档](/guide/shizuku) |
 | 自定义提示词 | 覆盖与定制 AI 系统的提示词片段 → [文档](/guide/custom-prompts) |
 | 记忆与项目规则 | 跨会话长期记忆，以及 AGENTS.md / CLAUDE.md 项目规则 → [文档](/guide/memory) |
