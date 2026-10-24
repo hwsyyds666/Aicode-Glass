@@ -5,7 +5,7 @@
 ## 当前状态
 
 - 需求源：`C:\Users\gx520\Downloads\Telegram Desktop\Aicode-Glass_完整实施规格与回家执行手册.txt`。
-- 仓库：`C:\Users\gx520\WorkBuddy\2026-10-03-00-44-43\AiCode-main`；分支 `main`，HEAD `c9a14f8b`，比 `origin/main` 超前 13 笔（**全部未推送，等用户确认**）。
+- 仓库：`C:\Users\gx520\WorkBuddy\2026-10-03-00-44-43\AiCode-main`；分支 `main`，HEAD `51462814`，比 `origin/main` 超前 15 笔（**全部未推送，等用户确认**）。
 - 20 项需求和任务 17 子项的实现已落地；P3-c 的状态归属/Flow 数量已改善，但 `AIAgentViewModel.kt` 行数仍比 HEAD 基线多 200，故该静态验收项不算完全达标。本轮补齐 Macrobenchmark 冷启动/聊天滚动场景、SFTP 操作队列超时和取消测试、SAF canonical-path 白名单/根目录保护，以及终端空输出 delta 边界测试。
 - 本轮真机体验反馈已补齐：GitHub Device Flow 明确交给外部浏览器、Super Agent 开关静默且改用分支图标、回退确认/结果按实际非零项显示并区分工作区与 Git、聊天草稿按会话持久化、文件树走轻量目录列表、ChatGPT 账号改为入口卡片 + 独立管理页、默认模型页重做 Super Agent/派发限制层级。
 - 代码已冻结并完成最终验证：Release lint、Universal Release assemble、Macrobenchmark instrumentation assemble 均 `BUILD SUCCESSFUL`；单测报告 1,281 项通过、0 失败、0 错误、2 项因 Windows ARM/Conscrypt 环境跳过。迁移核对通过。
@@ -150,3 +150,37 @@ HEAD `c9a14f8b`。用户反馈：容器模式 search 正常、真机（DEVICE_RO
 
 - `:app:assembleUniversalDebug` BUILD SUCCESSFUL（universal debug APK 23.5MB，`lib/arm64-v8a/librg.so` 与 `lib/x86_64/librg.so` 均已入包）。
 - 单测：见本轮提交后的测试报告（`ShellArgsTest` 新增短簇展开、`-uu` 丢弃、smart-case、minimal、内置 rg 路径等用例；`OpenAIAccountRoutingPolicyTest` 重写）。
+
+## 2026-10-24 第五轮（GitHub 一键授权 + ChatGPT 账号能真加进去）
+
+### 1. GitHub：点一下直接跳浏览器，不再弹二次窗口，也不再有 redirect_uri 警告
+
+用户反馈两点：①点「GitHub」还要再弹一个窗口；②跳到浏览器后 GitHub 报 `Be careful! The redirect_uri is not associated with this application`。
+
+根因：走的是**回环 OAuth**，`redirect_uri=http://127.0.0.1:<随机端口>/github/callback`。该 URI 与 OAuth App 注册的 callback 不一致，GitHub 直接拒绝；而「连接」按钮又藏在二级对话框 `GitHubRepositoriesDialog` 里，于是用户感觉"点了还要弹窗"。
+
+改动：
+
+1. **换成 Device Flow**（`beginDeviceAuthorization` / `completeDeviceAuthorization`）：整个流程不带 `redirect_uri`，GitHub 无从校验回调地址，警告消失；同时不再需要 Client Secret。
+2. 删除整套回环服务端实现（`authorizeInExternalBrowser`、`awaitAuthorizationCode`、`parseCallbackQuery`、`writeCallbackResponse`、`randomUrlSafe` 与相关常量），`ServerSocket` 监听彻底移除。
+3. `requestDeviceCode` 识别 `device_flow_disabled` 等错误体，给出"去 OAuth App 勾选 Enable device flow"的可执行提示（`workspace_github_error_device_flow`）。
+4. 入口改一键：未连接时点「GitHub」→ 直接发起设备流并开浏览器；授权码自动进剪贴板 + Toast 提示（`workspace_github_device_code_hint`）。只有**本次是点了才连上**才自动展开仓库列表，已连接状态下打开面板不打扰。
+5. 仓库对话框里同步显示授权码与剩余秒数（`workspace_github_waiting`）。
+
+**仍需要 owner 做一步**：在 GitHub → Settings → Developer settings → OAuth Apps → 该 App 勾选 **Enable device flow**。Client ID `Ov23li…` 已内置于 `app/build.gradle.kts`，无需再手填。
+
+### 2. ChatGPT 账号页：能添加、能导入、登录有兜底
+
+用户反馈"不能导入账号也不能添加账号，登录账号也登录不了"。参照 cockpit-tools 的 `ChatGptPlanAccounts` / `ChatGptPlanDialog` 重写登录链路：
+
+1. **拆分 `signIn`**：新增 `beginLogin()` → `OpenAILoginSession(sessionId, authorizeUrl, expiresAt, accountId)`、`awaitLoginCompletion()`、`submitLoginCallback()`、`cancelLogin()`。原 `signIn` 保留为"自动开浏览器"的旧路径。
+2. **手动回调兜底**（关键）：部分设备浏览器不会回跳 `127.0.0.1`，以前只能干等超时。现在弹层里给出授权链接 + 「打开浏览器登录」+ 「手动粘贴回调链接」+ 「完成登录」，粘贴浏览器地址栏最终 URL 即可完成（`submitLoginCallback` 校验 state，防串号）。
+3. **导入账号**：`importAccountFromJson()` 支持 Codex CLI `auth.json`（`tokens.{id_token,access_token,refresh_token,account_id}`）或任意含这些字段的 JSON；从 id_token 解出 sub/email/name/chatgpt_account_id，缺 `client_id` 时回退到 Codex CLI 公开 client id（`OpenAIOAuthProtocol.CODEX_CLI_CLIENT_ID`）。UI 为独立「导入账号」对话框。
+4. UI：顶部卡片按钮改为「+ 添加账号 / 导入账号」，账号卡的「重新授权」图标走同一套登录弹层；登录弹层用 `AdaptiveModalBottomSheet`，与全局设置风格一致。
+5. 新增/双语文案：`openai_login_*`、`openai_account_import_*`、`openai_notice_imported`、`openai_error_callback_invalid`、`openai_error_auth_state_mismatch`、`openai_error_import_invalid`、`openai_error_import_missing_token`。
+
+### 验证
+
+- `:app:assembleUniversalDebug` / `:app:assembleUniversalRelease` BUILD SUCCESSFUL。
+- 单测 **1,300 通过 / 0 失败 / 0 错误 / 12 跳过**（Windows 平台 POSIX 路径假设与 Robolectric/Conscrypt 环境跳过）。
+- 仓库无 `OpenAIAccountRepository` / `OpenAIAccountsViewModel` 单测，本轮改动未破坏既有测试（`GitHubOAuthRepositoryTest` 仍只覆盖设备流与 PR）。
