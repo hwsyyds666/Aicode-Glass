@@ -254,6 +254,14 @@ class AIAgentViewModel @Inject constructor(
 
     private val _messageLimit = MutableStateFlow<Map<String, Int>>(emptyMap())
     private val defaultLimit = 30
+    /**
+     * 记录「已实际加载到 UI 的 limit 值」。仅在 [messagesState] 的 onEach 中写入。
+     * [loadMoreMessages] 用它防重入：上次 bump 的 limit 尚未落地（Room 查询仍在跑）时，
+     * loadedMessageLimits[sid] < _messageLimit[sid]，直接 return，避免 fling 经过
+     * index 3→2→1→0 时连续四次 bump（30→150），flatMapLatest 不断取消重启查询，
+     * 用户划到顶部却看不到加载结果。
+     */
+    private val loadedMessageLimits = mutableMapOf<String, Int>()
 
     /** 聊天记录搜索：命中条数上限、输入防抖、片段上下文宽度、定位时预留的分页余量。 */
     private val chatSearchLimit = 50
@@ -325,6 +333,13 @@ class AIAgentViewModel @Inject constructor(
      */
     val turnExpansionOverrides = mutableStateMapOf<String, Boolean>()
 
+    /**
+     * 按会话 id 缓存「消息 id → 稳定轮 key」映射。分页补齐时新加载的消息可能插在已有轮首之前，
+     * 导致同一轮的 key 在补齐前后不一致。reconcileTurnKeys 沿用这里的旧 key，保证展开选择与
+     * LazyColumn 锚点不丢。进程内存、不落盘（切会话/杀进程后重建，无副作用）。
+     */
+    val turnMessageKeys = mutableMapOf<String, MutableMap<String, String>>()
+
     fun setTurnExpanded(key: String, expanded: Boolean) {
         turnExpansionOverrides[key] = expanded
     }
@@ -345,7 +360,10 @@ class AIAgentViewModel @Inject constructor(
 
     fun loadMoreMessages() {
         val sid = _currentSessionId.value ?: return
+        val state = messagesState.value
+        if (state.sessionId != sid || !state.loaded || !state.hasMore) return
         val currentLimit = _messageLimit.value[sid] ?: defaultLimit
+        if (loadedMessageLimits[sid] != currentLimit) return
         _messageLimit.value = _messageLimit.value + (sid to (currentLimit + 30))
     }
 
@@ -540,6 +558,7 @@ class AIAgentViewModel @Inject constructor(
                         )
                     }
                     .flowOn(Dispatchers.Default)
+                    .onEach { loadedMessageLimits[id] = limit }
             }
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, ChatMessagesState(null, emptyList(), loaded = false))
@@ -876,12 +895,29 @@ class AIAgentViewModel @Inject constructor(
     /**
      * 把一节正文提炼成通知栏小段总结：取首个非空行，超长截断加省略号。
      * 一节正文往往就是 AI 对当前要做的事情的一句话说明（"我来搜索…"、"找到了，现在编辑…"），
-     * 取首行即是对 AI 当前意图的最佳概括。
+     * 取首行即是对 AI 当前意图的最佳概括。收尾后写入 steps 列表（展开通知逐行回看各节做了什么）。
      */
     private fun summarizeForNotification(content: String): String {
         val firstLine = content.lines().firstOrNull { it.isNotBlank() }?.trim() ?: return ""
         return if (firstLine.length <= NOTIFICATION_SUMMARY_MAX) firstLine
         else firstLine.take(NOTIFICATION_SUMMARY_MAX) + "…"
+    }
+
+    /**
+     * 流式预览专用：取累积正文里【最后一段非空行】——即 AI 此刻正在写的那一小段。
+     *
+     * 为什么不用首行：AI 一节正文常分多段写（"我来搜索…"换行"找到了…"换行"现在编辑…"），
+     * 取首行会让预览卡在第一段不动，用户在通知栏看不到 AI 已经写到哪了。
+     * 取最后一段，预览随 AI 写作实时跟进，每写完一小段通知就跳到那一段——
+     * 这正是用户要的"每一小段落总结的时候就把那一小段总结放上去"。
+     *
+     * 超长从尾部截断（保留段落开头）：一小段的开头往往是"现在/接着/于是"这类动作词，
+     * 看开头即知 AI 在做什么；尾部往往是半句话，截断尾部信息损失更小。
+     */
+    private fun latestParagraphForPreview(content: String): String {
+        val lastLine = content.lines().lastOrNull { it.isNotBlank() }?.trim() ?: return ""
+        return if (lastLine.length <= NOTIFICATION_SUMMARY_MAX) lastLine
+        else lastLine.take(NOTIFICATION_SUMMARY_MAX) + "…"
     }
 
     /** 任务收工：清掉通知栏进度条目与去重记录（通知随即回退为普通保活文案）。 */
@@ -1620,10 +1656,11 @@ class AIAgentViewModel @Inject constructor(
                         if (event.accumulated.hasVisibleContent()) finishReasoning()
                         setRetryState(sessionId, null)
                         setKeySwitchState(sessionId, null)
-                        // 通知栏实时预览：把正在生成的正文首行截断推给通知，
-                        // 用户在通知栏就能看到 AI 此刻在写什么，不必回到 App。
+                        // 通知栏实时预览：取 AI 正在写的【最后一段】推给通知——
+                        // 一节正文常分多段，取首行会让预览卡在第一段不动；
+                        // 取最后一段，每写完一小段通知就跳到那一段，用户实时看到 AI 写到哪了。
                         if (event.accumulated.hasVisibleContent()) {
-                            pushTaskLivePreview(sessionId, summarizeForNotification(event.accumulated))
+                            pushTaskLivePreview(sessionId, latestParagraphForPreview(event.accumulated))
                         }
                         setStreamingText(sessionId, event.accumulated)
                     }
@@ -2739,6 +2776,8 @@ class AIAgentViewModel @Inject constructor(
         _agentStates.value = _agentStates.value - sessionId
         _completedSessions.value = _completedSessions.value - sessionId
         _messageLimit.value = _messageLimit.value - sessionId
+        loadedMessageLimits.remove(sessionId)
+        turnMessageKeys.remove(sessionId)
         _streamingTexts.value = _streamingTexts.value - sessionId
         _streamingReasonings.value = _streamingReasonings.value - sessionId
         _reasoningTimings.value = _reasoningTimings.value - sessionId

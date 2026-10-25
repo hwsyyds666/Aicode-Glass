@@ -57,6 +57,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -201,6 +202,13 @@ private const val REASONING_CONTENT_TYPE = "reasoning"
 internal fun turnKeyOf(firstMessageId: String): String = "turn:$firstMessageId"
 
 /**
+ * 被窗口截断、找不到轮首的那一截过程（见 [buildChatItems]）的折叠头 key。
+ *
+ * 取块尾消息 id 而非块首：窗口继续向前补加载时新消息插在块首，块尾不变、key 保持稳定。
+ */
+internal fun leadingHeadKey(lastMessage: AgentUIMessage): String = "turn:head:${lastMessage.id}"
+
+/**
  * 整轮任务折叠头 item 的渲染状态。非空即表示这是一条「执行中 / 已完成」头行。
  *
  * [endMessageId] 是轮末助手消息 id，据此查本轮耗时（见 [computeTaskDurations]，口径一致）。
@@ -305,28 +313,56 @@ internal fun buildChatItems(
     groupOverrides: Map<String, Boolean>,
     turnOverrides: Map<String, Boolean> = emptyMap(),
     activeTurnKey: String? = null,
+    sessionId: String? = null,
+    turnKeys: Map<String, String> = emptyMap(),
 ): List<ChatRenderItem> {
     val items = ArrayList<ChatRenderItem>(messages.size)
     val (leading, turns) = splitChatTurns(messages)
-    // 轮首之前的散消息（会话开头就出现的助手/工具输出，罕见）不折叠，原样常显。
-    leading.forEach { items += messageRenderItems(it) }
+    // 窗口截断的半轮（分页加载后，轮首用户消息尚在更早的页）也创建折叠头，
+    // 默认收起——不创建的话 tool calls/reasoning 等过程项会全部散开显示。
+    if (leading.isNotEmpty()) {
+        val headKey = turnKeys[leading.last().id] ?: if (turns.isEmpty() && sessionId != null) {
+            "turn:head:session:$sessionId"
+        } else {
+            leadingHeadKey(leading.last())
+        }
+        val running = headKey == activeTurnKey
+        val resultId = if (running) null else leading.lastOrNull { it.isResultCandidate() }?.id
+        val process = buildTurnProcessItems(leading, resultId, groupOverrides)
+        if (process.isNotEmpty()) {
+            items += ChatRenderItem(
+                message = leading.last(),
+                key = "$headKey#header",
+                contentType = TURN_HEADER_CONTENT_TYPE,
+                turnHeader = TurnHeaderState(
+                    key = headKey,
+                    endMessageId = null,
+                    running = running,
+                    expanded = turnOverrides[headKey] ?: running,
+                ),
+                turnProcess = process,
+            )
+        }
+        items += buildTurnPersistentItems(leading, resultId)
+    }
     for (turn in turns) {
         items += messageRenderItems(turn.userMessage)
         val endAssistant = turn.messages.lastOrNull {
             it.role == MessageRole.ASSISTANT && !it.isPersistentInTurn()
         }
-        val running = turn.key == activeTurnKey
+        val stableTurnKey = turnKeys[turn.userMessage.id] ?: turn.key
+        val running = stableTurnKey == activeTurnKey
         val resultId = if (running) null else turn.messages.lastOrNull { it.isResultCandidate() }?.id
         // 过程项挂在轮头 item 里一起展开（保证展开动画是整体高度变化）；常显项与结果另作独立 item。
         val process = buildTurnProcessItems(turn.messages, resultId, groupOverrides)
-        val expanded = turnOverrides[turn.key] ?: running
+        val expanded = turnOverrides[stableTurnKey] ?: running
         if (process.isNotEmpty() || running) {
             items += ChatRenderItem(
                 message = turn.userMessage,
-                key = "${turn.key}#header",
+                key = "$stableTurnKey#header",
                 contentType = TURN_HEADER_CONTENT_TYPE,
                 turnHeader = TurnHeaderState(
-                    key = turn.key,
+                    key = stableTurnKey,
                     endMessageId = endAssistant?.id,
                     running = running,
                     expanded = expanded,
@@ -350,6 +386,7 @@ private class ChatTurn(
  * 按「用户消息」切成轮。返回 (轮首之前的散消息, 轮列表)。
  *
  * 后台通知虽可能是 USER 角色，但它是系统注入的提示条而非用户输入，不作为轮起点（归入当前轮内容）。
+ * 压缩标记同理：可能是 USER 角色的系统注入，不应作为轮起点切断正在进行的轮。
  */
 private fun splitChatTurns(messages: List<AgentUIMessage>): Pair<List<AgentUIMessage>, List<ChatTurn>> {
     val leading = ArrayList<AgentUIMessage>()
@@ -357,7 +394,7 @@ private fun splitChatTurns(messages: List<AgentUIMessage>): Pair<List<AgentUIMes
     var user: AgentUIMessage? = null
     var body: MutableList<AgentUIMessage>? = null
     for (message in messages) {
-        if (message.role == MessageRole.USER && !message.isBackgroundNotification) {
+        if (message.role == MessageRole.USER && !message.isBackgroundNotification && !message.isCompactionMarker) {
             user?.let { turns += ChatTurn(turnKeyOf(it.id), it, body?.toList().orEmpty()) }
             user = message
             body = ArrayList()
@@ -367,6 +404,39 @@ private fun splitChatTurns(messages: List<AgentUIMessage>): Pair<List<AgentUIMes
     }
     user?.let { turns += ChatTurn(turnKeyOf(it.id), it, body?.toList().orEmpty()) }
     return leading to turns
+}
+
+/**
+ * 将消息 id 映射到稳定的轮 key。分页补齐时，新加载的消息可能插在已有轮首之前，
+ * 导致同一轮的 key 在补齐前后不一致（旧 key 基于旧轮首 id，新 key 基于新轮首 id）。
+ *
+ * reconcileTurnKeys 沿用上一轮已显示的 key（[previousKeys]），保证：
+ * - 分页补齐轮首时，半轮→整轮的 key 不变，展开选择与 LazyColumn 锚点不丢。
+ * - leading 块（窗口截断的半轮）也获得稳定 key，补齐后不会重建。
+ */
+internal fun reconcileTurnKeys(
+    messages: List<AgentUIMessage>,
+    previousKeys: Map<String, String>,
+    sessionId: String?,
+): Map<String, String> = buildMap {
+    val (leading, turns) = splitChatTurns(messages)
+    if (leading.isNotEmpty()) {
+        val key = leading.asReversed().firstNotNullOfOrNull { previousKeys[it.id] }
+            ?: if (turns.isEmpty() && sessionId != null) {
+                "turn:head:session:$sessionId"
+            } else {
+                leadingHeadKey(leading.last())
+            }
+        leading.forEach { put(it.id, key) }
+    }
+    for (turn in turns) {
+        // 分页补齐轮首时，沿用已显示的半轮标识，保留展开选择与列表锚点。
+        val key = previousKeys[turn.userMessage.id]
+            ?: turn.messages.firstNotNullOfOrNull { previousKeys[it.id] }
+            ?: turn.key
+        put(turn.userMessage.id, key)
+        turn.messages.forEach { put(it.id, key) }
+    }
 }
 
 /** 该消息在整轮折叠里是否「常显」——不参与过程折叠，无论轮展开与否都显示。 */
@@ -718,17 +788,30 @@ fun AIChatPanel(
     // 连续的工具调用折成一个「N 次工具调用」分组；chatItems 的顺序即 LazyColumn item 顺序。
     // 提到这里（而不是 LazyColumn 分支内）是因为 isFarFromBottom 的「布局是否对应当前消息」判定
     // 需要它：分组会让 item 数 ≠ 消息数 + 1，不能再拿消息数当期望值。
+    // 稳定轮 key：分页补齐时新消息可能插在已有轮首之前，直接用 turnKeyOf(userMsg.id) 会让
+    // 同一轮的 key 在补齐前后变化，展开选择与 LazyColumn 锚点全丢。reconcileTurnKeys 沿用
+    // 上一轮已显示的 key，保证半轮→整轮过渡时 key 不变。
+    val turnKeyHistory = remember(currentSessionId) {
+        currentSessionId?.let { viewModel.turnMessageKeys.getOrPut(it) { mutableMapOf() } }
+            ?: mutableMapOf()
+    }
+    val stableTurnKeys = remember(messages, currentSessionId, messagesReady) {
+        if (messagesReady) reconcileTurnKeys(messages, turnKeyHistory, currentSessionId)
+        else emptyMap()
+    }
+    SideEffect { turnKeyHistory.putAll(stableTurnKeys) }
     // 末轮且 agent 忙 = 当前正在跑的那一轮：它的折叠头默认展开（显示「执行中」），收工后自动收起。
     val activeTurnKey = if (isBusy) {
-        messages.lastOrNull { it.role == MessageRole.USER && !it.isBackgroundNotification }
-            ?.let { turnKeyOf(it.id) }
+        messages.lastOrNull()?.let { stableTurnKeys[it.id] }
     } else null
-    val chatItems = remember(messages, toolGroupOverrideSnapshot, turnOverrideSnapshot, activeTurnKey) {
+    val chatItems = remember(messages, toolGroupOverrideSnapshot, turnOverrideSnapshot, activeTurnKey, currentSessionId, stableTurnKeys) {
         buildChatItems(
             messages = messages,
             groupOverrides = toolGroupOverrideSnapshot,
             turnOverrides = turnOverrideSnapshot,
             activeTurnKey = activeTurnKey,
+            sessionId = currentSessionId,
+            turnKeys = stableTurnKeys,
         )
     }
     // 每轮任务的总耗时（用户发送 → 本轮 AI 收工）与 token 合计，都只挂在轮末助手气泡下方

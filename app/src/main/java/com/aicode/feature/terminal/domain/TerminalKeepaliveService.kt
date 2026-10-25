@@ -183,20 +183,28 @@ class TerminalKeepaliveService : Service() {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_DEFERRED)
         when {
-            // 单个 AI 任务：标题=任务标题，正文=实时预览（流式生成中）或最近一节小结，
-            // 展开（BigTextStyle）= 各节小结列表（每一段总结一行，用户一眼看出 AI 做到哪了）
+            // 单个 AI 任务：标题=任务标题，正文=实时预览（流式生成中正在写的那一小段）或最近一节小结，
+            // 展开（BigTextStyle）= 各节小结列表 + 当前正在写的那一小段（最后一行）。
+            // 关键：流式生成第一段时 steps 列表还是空的，若 bigText 只取 steps 会变成空串——
+            // 展开通知什么都不显示（用户反馈"太长不会显示"实为"没内容可显示"）。把 livePreview
+            // 作为最后一行拼进 bigText，保证展开通知始终有内容。
             tasks.size == 1 -> {
                 val task = tasks.values.first()
                 val previewText = task.livePreview
                     ?: task.steps.lastOrNull()
                     ?: getString(R.string.notification_agent_task_preparing)
+                val bigText = buildString {
+                    task.steps.takeLast(MAX_TASK_STEPS_SHOWN).forEach { append(it).append('\n') }
+                    if (!task.livePreview.isNullOrEmpty()) {
+                        // 正在写的那一小段放最后一行（去掉 steps 已有的末尾换行，避免多空行）
+                        if (isNotEmpty()) append('\n')
+                        append(task.livePreview)
+                    }
+                }.ifEmpty { previewText }
                 builder
                     .setContentTitle(task.title)
                     .setContentText(previewText)
-                    .setStyle(
-                        NotificationCompat.BigTextStyle()
-                            .bigText(task.steps.takeLast(MAX_TASK_STEPS_SHOWN).joinToString("\n"))
-                    )
+                    .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
             }
             // 多个 AI 任务（根任务 + 子代理并行）：标题=N 个任务，正文=最近更新的任务的实时预览/小结，
             // 展开逐行列出每个任务的标题与当前小结
