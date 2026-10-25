@@ -11,7 +11,10 @@
 > **Fork Notice**: This is a fork of the original project [jieapi/AiCode](https://github.com/jieapi/aicode),
 > adding **Liquid Glass UI (PrismalAGSL refraction / chromatic dispersion / gradient glass)**,
 > **AI todo display position preferences**, **floating glass title bar**, and other enhancements,
-> plus container channel and performance fixes. All credit to the original author; this fork
+> plus container channel and performance fixes. This fork also adds **ChatGPT multi-account aggregation**
+> (batch import, tier-sorted single-group selector, session affinity, free/paid quota routing),
+> **notification-bar task progress**, **maximized Anthropic context caching** (4-breakpoint rolling cache),
+> and **smooth chat-list scrolling**. All credit to the original author; this fork
 > is released under the same [GPL-3.0](LICENSE) license.
 >
 > Original project: https://github.com/jieapi/aicode
@@ -70,6 +73,8 @@ There is nothing to set up beforehand: install the app, configure a model under 
 ### AI Agent
 
 - **AI Agent** — Built-in tools for file read/write/edit, shell execution, background terminal, code & web search, image recognition, todo lists, and more; streaming output with live Markdown rendering and automatic context compression
+- **Notification task progress** — While the AI runs a task, a persistent notification shows the task title; expand it to follow the current step in real time (preparing → thinking → generating → running a tool). Multiple parallel tasks show "N tasks running"; it auto-dismisses on completion
+- **Maximized context caching** — Anthropic uses all 4 `cache_control` breakpoints (system prompt + tool definitions + original user question + a rolling breakpoint). The ever-growing assistant + tool_result history inside tool loops flows through the rolling breakpoint — each step writes a fresh cache and the next step reads it, so only the last tool_result is recomputed on long tasks
 - **Parallel subagents** — Enable a session's built-in Explore, Research, Worker and Reviewer agents; workers have scoped writes, cannot nest agents, and return work for the main agent to review
 - **Three run modes** — BUILD for normal development, PLAN to draft and execute a tracked plan under the same tool permissions, and ASK for read-only questions
 - **Checkpoints & Undo** — Snapshots are recorded before the agent edits code; one-tap rollback of code, chat history, or both
@@ -101,7 +106,7 @@ There is nothing to set up beforehand: install the app, configure a model under 
 
 ### Official Accounts
 
-- **OpenAI / ChatGPT** — Sign in through OpenAI's official OAuth flow; tokens are encrypted on-device with Android Keystore. This app stores one ChatGPT plan-usage profile and never switches or rotates accounts to work around limits. Quota refresh uses an undocumented endpoint and may stop working if it changes. Local token totals are not plan quota—use OpenAI's usage page as the authoritative view.
+- **ChatGPT multi-account aggregation** — Sign in with ChatGPT to access the official Codex Responses API. Supports batch import aligned with cockpit-tools export formats (sub2api, refresh-token-only, inline JSON arrays). Tokens are encrypted on-device with Android Keystore. The model selector aggregates all accounts into a single group sorted by subscription tier; session affinity binds a session to one account by default and soft-unbinds on credential failure. Quota routing sends free models to free accounts and paid-only models to paid accounts — accounts that are quota-paused, offline or disabled are never silently switched. The model catalog is filtered only by `visibility` (aligned with the official client) and silently refreshed with a 30-minute TTL when the selector opens. Local token totals are for reference only; OpenAI's usage page is the authoritative view.
 - **GitHub** — Connect with Device Flow, browse and clone repositories, and confirm each pull-request creation. The app never pushes a branch on your behalf.
 
 ## Getting Started
