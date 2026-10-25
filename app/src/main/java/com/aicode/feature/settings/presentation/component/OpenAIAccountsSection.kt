@@ -9,6 +9,8 @@ import org.json.JSONObject
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -36,7 +38,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -165,7 +166,13 @@ internal fun OpenAIAccountsSection(
     // 每次打开本页自动刷新一次全部账号额度，避免看到过期的配额数据
     LaunchedEffect(Unit) { viewModel.refreshAll() }
 
-    Column(verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+    // 账号多时内容远超一屏：整个区域必须可滚动，否则「列表划不动」
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(Spacing.sm)
+    ) {
         Card(
             shape = RoundedCornerShape(14.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.semanticColors.cardSurface),
@@ -291,7 +298,6 @@ internal fun OpenAIAccountsSection(
                 onRefreshModels = { viewModel.refreshModels(account.id) },
                 onRefreshUsage = { viewModel.refreshUsage(account.id) },
                 onReauthorize = { viewModel.reauthorize(account.id) },
-                onSelectModel = { viewModel.selectModel(account.id, it) },
                 onRemove = { removeTarget = account }
             )
         }
@@ -731,10 +737,8 @@ private fun OpenAIAccountCard(
     onRefreshModels: () -> Unit,
     onRefreshUsage: () -> Unit,
     onReauthorize: () -> Unit,
-    onSelectModel: (String) -> Unit,
     onRemove: () -> Unit
 ) {
-    var modelSheetVisible by remember { mutableStateOf(false) }
     val outline = MaterialTheme.colorScheme.outlineVariant
 
     Card(
@@ -844,53 +848,8 @@ private fun OpenAIAccountCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            // ④ 使用模型（底部弹层选择）+ 行内刷新模型
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
-                    .clickable(enabled = account.models.isNotEmpty() && !busy) { modelSheetVisible = true }
-                    .padding(start = 10.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = stringResource(R.string.openai_account_model_label),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.width(Spacing.sm))
-                Text(
-                    text = account.models.firstOrNull { it.slug == account.selectedModel }?.displayName
-                        ?: account.models.firstOrNull()?.displayName
-                        ?: stringResource(R.string.openai_account_no_models),
-                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-                // 刷新模型列表：从隐秘的闪电图标挪到模型行内，语义更直接
-                IconButton(
-                    onClick = onRefreshModels,
-                    enabled = !busy,
-                    modifier = Modifier.size(30.dp)
-                ) {
-                    Icon(
-                        imageVector = FeatherIcons.RefreshCw,
-                        contentDescription = stringResource(R.string.openai_account_refresh_models),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(15.dp)
-                    )
-                }
-                Icon(
-                    imageVector = FeatherIcons.ChevronRight,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(16.dp)
-                )
-            }
-
-            // ⑤ 动作行：带文字标签的按钮，窄屏自动换行，不再是一排含义不明的圆图标
+            // ④ 动作行：带文字标签的按钮，窄屏自动换行，不再是一排含义不明的圆图标
+            // 模型选择统一走主页/默认模型里的模型选择器（聚合入口），账号卡里不再放「使用模型」行
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
@@ -910,6 +869,12 @@ private fun OpenAIAccountCard(
                     enabled = !busy && account.planUsageAuthorized,
                     onClick = onRefreshUsage
                 )
+                CardActionButton(
+                    icon = FeatherIcons.Zap,
+                    text = stringResource(R.string.openai_account_refresh_models),
+                    enabled = !busy,
+                    onClick = onRefreshModels
+                )
                 if (account.status != OpenAIAccountEntity.STATUS_CONNECTED || !account.planUsageAuthorized) {
                     CardActionButton(
                         icon = FeatherIcons.Settings,
@@ -927,7 +892,7 @@ private fun OpenAIAccountCard(
                 )
             }
 
-            // ⑥ 底部：账号标识 + 错误
+            // ⑤ 底部：账号标识 + 错误
             Text(
                 text = stringResource(R.string.openai_account_identifier, account.id.take(8)),
                 style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
@@ -935,42 +900,6 @@ private fun OpenAIAccountCard(
             )
             account.lastError?.let {
                 Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-            }
-        }
-    }
-
-    if (modelSheetVisible && account.models.isNotEmpty()) {
-        AdaptiveModalBottomSheet(onDismissRequest = { modelSheetVisible = false }) {
-            Column(modifier = Modifier.padding(horizontal = Spacing.lg, vertical = Spacing.sm)) {
-                Text(
-                    text = stringResource(R.string.openai_account_select_model_title),
-                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-                    modifier = Modifier.padding(bottom = Spacing.sm)
-                )
-                account.models.forEach { model ->
-                    val selected = model.slug == account.selectedModel
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .clickable {
-                                modelSheetVisible = false
-                                onSelectModel(model.slug)
-                            }
-                            .padding(horizontal = Spacing.xs, vertical = Spacing.sm),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(selected = selected, onClick = null)
-                        Spacer(Modifier.width(Spacing.sm))
-                        Text(
-                            text = model.displayName,
-                            style = MaterialTheme.typography.bodyMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-                Spacer(Modifier.height(Spacing.lg))
             }
         }
     }

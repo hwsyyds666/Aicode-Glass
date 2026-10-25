@@ -135,6 +135,12 @@ private val FLOATING_LAYER_GAP_DP = 8.dp
 /** 内容底部驱动校准的容差（px）：最后内容底部超出安全区超过该值才向下校准，避免亚像素抖动。 */
 private const val AUTO_SCROLL_TOLERANCE_PX = 2
 
+/** 触发加载更多历史的顶部阈值：firstVisibleItemIndex 进入该值以内视为「接近顶部」。 */
+private const val LOAD_MORE_TRIGGER_INDEX = 3
+
+/** 会话切换后「运行中轮次」展开判定的静置窗口（ms）：等 agentState / messagesState 两条流都追上切换，避免旧会话的 Streaming 残影把新会话的末轮标成执行中。 */
+private const val TURN_RUNNING_SETTLE_MS = 250L
+
 /** AI 收工后继续逐帧校准的时长（ms）：md 异步解析仍可能改高度，不能一停就收手。 */
 private const val CALIBRATE_TAIL_MS = 1_200L
 
@@ -716,13 +722,34 @@ fun AIChatPanel(
     // 提到这里（而不是 LazyColumn 分支内）是因为 isFarFromBottom 的「布局是否对应当前消息」判定
     // 需要它：分组会让 item 数 ≠ 消息数 + 1，不能再拿消息数当期望值。
     // 末轮且 agent 忙 = 当前正在跑的那一轮：它的折叠头默认展开（显示「执行中」），收工后自动收起。
-    val activeTurnKey = remember(messages, isBusy) {
-        if (!isBusy) {
+    //
+    // 静置窗口：agentState（按会话 id 映射，flatMapLatest 切换）与 messagesState（Room 重查询）
+    // 是两条独立的状态流，切换会话瞬间可能组合出「新会话的消息 + 旧会话 Streaming 残影」的
+    // 错配帧——若直接拿它算 activeTurnKey，会把新会话的末轮标成「执行中」并展开（换会话后
+    // 任务过程莫名展开的根因）。切换后先按「没有运行轮」处理一小段，等两条流都追上再恢复。
+    var turnRunningSettled by remember { mutableStateOf(false) }
+    LaunchedEffect(currentSessionId) {
+        turnRunningSettled = false
+        delay(TURN_RUNNING_SETTLE_MS)
+        turnRunningSettled = true
+    }
+    val activeTurnKey = remember(messages, isBusy, turnRunningSettled) {
+        if (!isBusy || !turnRunningSettled) {
             null
         } else {
             messages.lastOrNull { it.role == MessageRole.USER && !it.isBackgroundNotification }
                 ?.let { turnKeyOf(it.id) }
         }
+    }
+    // 运行轮收工（activeTurnKey 变化/消失）时回收该轮「运行期间」的手动展开选择：
+    // 任务完成后默认收起是用户的预期行为，运行期间点过展开/收起不该让收工后永远保持展开。
+    var lastRunningTurnKey by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(activeTurnKey) {
+        val previous = lastRunningTurnKey
+        if (previous != null && previous != activeTurnKey) {
+            viewModel.onTurnFinished(previous)
+        }
+        lastRunningTurnKey = activeTurnKey
     }
     val chatItems = remember(messages, toolGroupOverrideSnapshot, turnOverrideSnapshot, activeTurnKey) {
         buildChatItems(
@@ -1044,8 +1071,14 @@ fun AIChatPanel(
     LaunchedEffect(pointerDown, userScrollGesture, nestedFling, listState.isScrollInProgress) {
         if (!pointerDown && userScrollGesture && !nestedFling && !listState.isScrollInProgress) {
             delay(150)
-            userScrollGesture = false
-            followBottom = isAtBottom
+            // 延迟期间用户可能又开始了新手势（反复快滑是常态）。绝不能在 delay 结束时盲目
+            // 清手势标志/恢复跟随：一旦新手势已按下或列表又在滚动，这里把 userScrollGesture
+            // 错误清成 false + followBottom 恢复 true，校准循环会在用户上滑途中每帧
+            // scrollToItem 把列表拽回底部——「反复滑动不跟手」的根因。必须重验全部条件。
+            if (!pointerDown && !nestedFling && !listState.isScrollInProgress) {
+                userScrollGesture = false
+                followBottom = isAtBottom
+            }
         }
     }
 
@@ -1080,9 +1113,12 @@ fun AIChatPanel(
                 is DragInteraction.Stop, is DragInteraction.Cancel -> {
                     // 松手后延迟判定是否恢复跟随：等惯性滚动稳定，
                     // 避免「松手在底部但惯性上滑」被立即拉回。
+                    // 与上面的手势收尾同款防御：延迟期间开始了新手势就什么都不做。
                     scope.launch {
                         delay(150)
-                        if (!userScrollGesture) followBottom = isAtBottom
+                        if (!userScrollGesture && !pointerDown && !nestedFling) {
+                            followBottom = isAtBottom
+                        }
                     }
                 }
             }
@@ -1240,15 +1276,27 @@ fun AIChatPanel(
     // fling 中 index 每跨一个 item 就变一次，会让整个 AIChatPanel 大函数随之重组、连带全部可见
     // item 重组，是快速滚动掉帧（进而 fling 补偿跳变、抽搐）的主要放大器。改为在协程内用
     // snapshotFlow 观察 index，组合体完全不读它。
+    //
+    // 闩锁（armed）：进近顶部区域一次只翻一页。没有闩锁时一次 fling 会经过 index 3→2→1→0，
+    // 每个值都触发一次 loadMoreMessages()（isLoadingMore 恒为 false 拦不住），limit 从 30 连
+    // 跳到 150——每跳一次都是 Room 重查询 + chatItems 全量重建 + 整个 LazyColumn 重 diff，
+    // 全部压在 fling 进行中的主线程上（上翻掉帧、锚点错乱、看起来「没加载」的根因）。
+    // 翻页落地后 key 锚点会把 index 顶回到新页之外（约 +30），armed 自动复位，可继续翻下一页。
     val latestMessagesState = rememberUpdatedState(messagesState)
     LaunchedEffect(listState, messagesReady) {
         if (!messagesReady) return@LaunchedEffect
+        var armed = true
         snapshotFlow { listState.firstVisibleItemIndex }
             .distinctUntilChanged()
             .collect { index ->
-                val ms = latestMessagesState.value
-                if (index <= 3 && ms.hasMore && !ms.isLoadingMore) {
-                    viewModel.loadMoreMessages()
+                if (index > LOAD_MORE_TRIGGER_INDEX) {
+                    armed = true
+                } else if (armed) {
+                    val ms = latestMessagesState.value
+                    if (ms.hasMore && !ms.isLoadingMore) {
+                        armed = false
+                        viewModel.loadMoreMessages()
+                    }
                 }
             }
     }
@@ -1286,7 +1334,7 @@ fun AIChatPanel(
                     durationMs = header.endMessageId?.let { taskDurations[it] },
                     expanded = header.expanded,
                     onToggle = {
-                        viewModel.setTurnExpanded(header.key, !header.expanded)
+                        viewModel.setTurnExpanded(header.key, !header.expanded, whileRunning = header.running)
                         onToolItemToggled()
                     }
                 )

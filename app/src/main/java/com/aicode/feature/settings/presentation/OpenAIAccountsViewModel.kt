@@ -242,6 +242,7 @@ class OpenAIAccountsViewModel @Inject constructor(
 
     /**
      * 批量导入：一次粘贴可包含多个账号（JSON 数组或换行分隔），结果按「成功 N 个 / 待登录邮箱 / 失败原因」汇总。
+     * 失败明细只展示前几条，其余折叠为一条计数——几十条同因失败刷成一面字墙没法看。
      */
     fun importAccount(rawText: String) = runAccountAction(IMPORTING) {
         val outcome = repository.importAccountsFromText(rawText)
@@ -255,7 +256,14 @@ class OpenAIAccountsViewModel @Inject constructor(
                 outcome.pendingEmails.joinToString(", ")
             )
         }
-        parts += outcome.failures
+        val shownFailures = outcome.failures.take(IMPORT_FAILURE_PREVIEW_LINES)
+        parts += shownFailures
+        if (outcome.failures.size > shownFailures.size) {
+            parts += context.getString(
+                R.string.openai_notice_import_more_failures,
+                outcome.failures.size - shownFailures.size
+            )
+        }
         message.value = parts.joinToString("；").ifBlank {
             context.getString(R.string.openai_error_import_invalid)
         }
@@ -302,10 +310,6 @@ class OpenAIAccountsViewModel @Inject constructor(
         messageIsError.value = false
     }
 
-    fun selectModel(accountId: String, model: String) = runAccountAction(accountId) {
-        repository.setSelectedModel(accountId, model)
-    }
-
     fun remove(accountId: String) = runAccountAction(accountId) {
         val revoked = repository.deleteAccount(accountId)
         message.value = if (revoked) {
@@ -344,5 +348,8 @@ class OpenAIAccountsViewModel @Inject constructor(
         const val CONNECTING = "__connecting__"
         const val IMPORTING = "__importing__"
         const val EXPORTING = "__exporting__"
+
+        /** 批量导入失败明细最多展示的条数，其余折叠为一条计数提示。 */
+        const val IMPORT_FAILURE_PREVIEW_LINES = 3
     }
 }

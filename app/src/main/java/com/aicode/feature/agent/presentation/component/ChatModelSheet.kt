@@ -189,7 +189,7 @@ private fun ReasoningEffort.labelRes(): Int = when (this) {
 
 /**
  * 模型选择弹窗：复用设置页默认模型的 [ModelSelectionSheet]（iOS 胶囊搜索框、提供商分组卡片、能力 Tag）。
- * ChatGPT 账号 provider 按订阅等级排在顶部，组标题带档位徽章；打开时顺带做一次模型目录 TTL 刷新。
+ * ChatGPT 账号聚合为一个「ChatGPT 账号」组（slug 去重、按额度调度选账号）；打开时顺带做一次模型目录 TTL 刷新。
  */
 @Composable
 internal fun ModelSheet(

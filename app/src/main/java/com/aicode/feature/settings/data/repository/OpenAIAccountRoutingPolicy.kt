@@ -3,7 +3,7 @@ package com.aicode.feature.settings.data.repository
 /**
  * ChatGPT 多账号的选择与路由约束。
  *
- * 本机可保存多个账号（每个账号对应一个独立 provider，用户在聊天里显式选哪个就用哪个）。
+ * 本机可保存任意数量的账号（每个账号对应一个独立 provider，用户在聊天里显式选哪个就用哪个）。
  * 路由分两层：
  *
  *  1. **显式选择优先**：调用方指定的账号永远第一顺位，能服务就用它；
@@ -15,22 +15,19 @@ package com.aicode.feature.settings.data.repository
  */
 internal object OpenAIAccountSelectionPolicy {
 
-    /** 本地档案数量上限：防止无限堆积失效账号；达到上限需先移除一个。 */
-    const val MAX_ACCOUNTS = 10
-
     /**
      * 是否允许发起一次 OAuth 授权。
+     *
+     * 账号数量不设上限（对齐 cockpit-tools：多少都能存），只要求重新授权必须指向已存在的账号。
      *
      * @param reauthorizeAccountId 非空表示对既有账号重新授权（该账号必须已存在），空表示新增账号
      */
     fun canConnect(
         existingAccountIds: Set<String>,
-        reauthorizeAccountId: String?,
-        maxAccounts: Int = MAX_ACCOUNTS
+        reauthorizeAccountId: String?
     ): Boolean = when {
-        reauthorizeAccountId == null -> existingAccountIds.size < maxAccounts
-        reauthorizeAccountId !in existingAccountIds -> false
-        else -> true
+        reauthorizeAccountId == null -> true
+        else -> reauthorizeAccountId in existingAccountIds
     }
 
     /**

@@ -21,8 +21,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+
+/** 一个 AI 任务的常驻通知进度：任务标题 + 最近执行步骤（尾部截断）。 */
+data class AgentTaskProgress(
+    val title: String,
+    val steps: List<String>
+)
 
 @AndroidEntryPoint
 class TerminalKeepaliveService : Service() {
@@ -58,6 +65,14 @@ class TerminalKeepaliveService : Service() {
     override fun onCreate() {
         super.onCreate()
         FileLogger.i(TAG, "Service created")
+        // AI 任务进度驱动通知刷新：进度状态在 companion（进程级单例）里由
+        // AIAgentViewModel 直接写入，服务侧订阅并重发通知。不走 startService 传值——
+        // App 退后台后从 ViewModel startService 会触发 Android 8+ 的后台启动限制。
+        serviceScope.launch {
+            taskProgressState.collect {
+                if (sessionCount > 0 || persistent) ensureForeground()
+            }
+        }
         // 进程被系统回收后 START_STICKY 重建：persistent 是内存态会丢失。
         // 从持久化开关恢复常驻前台，否则服务空转后 stopSelf，保活形同虚设。
         serviceScope.launch {
@@ -130,20 +145,18 @@ class TerminalKeepaliveService : Service() {
     override fun onBind(intent: Intent?): IBinder = binder
 
     /**
-     * 进入前台并刷新通知；文案随「常驻保活 / 后台会话」组合变化。
+     * 进入前台并刷新通知；文案随「AI 任务进度 / 常驻保活 / 后台会话」组合变化。
+     *
+     * 有 AI 任务在跑时：通知标题 = 任务标题（多任务时为「N 个 AI 任务运行中」），
+     * 折叠正文 = 当前执行到哪一步；展开（BigTextStyle）显示最近步骤列表——
+     * 用户在通知栏就能看到 AI 的执行进度，不必回到 App。
      *
      * startForeground 在 Android 12+ 从后台启动前台服务时可能抛
      * ForegroundServiceStartNotAllowedException，此处捕获仅记录——常驻通知本次未能展示，
      * 不应让进程崩溃（设置页的开关仍是开启态，下次前台时由 [com.aicode.MainActivity] 恢复）。
      */
     private fun ensureForeground() {
-        val text = when {
-            sessionCount > 0 && persistent ->
-                getString(R.string.notification_keepalive_persistent_sessions, sessionCount)
-            sessionCount > 0 ->
-                getString(R.string.notification_keepalive_running_sessions, sessionCount)
-            else -> getString(R.string.notification_keepalive_enabled)
-        }
+        val tasks = taskProgressState.value
         val openAppIntent = PendingIntent.getActivity(
             this,
             0,
@@ -152,17 +165,53 @@ class TerminalKeepaliveService : Service() {
             },
             PendingIntent.FLAG_IMMUTABLE
         )
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_info_details)
-            .setContentTitle(getString(R.string.app_name))
-            .setContentText(text)
             .setContentIntent(openAppIntent)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_DEFERRED)
-            .build()
-
-        runCatching { startForeground(NOTIFICATION_ID, notification) }
+        when {
+            // 单个 AI 任务：标题=任务标题，正文=当前步骤，展开=带序号的最近步骤
+            tasks.size == 1 -> {
+                val task = tasks.values.first()
+                val currentStep = task.steps.lastOrNull()
+                    ?: getString(R.string.notification_agent_task_preparing)
+                builder
+                    .setContentTitle(task.title)
+                    .setContentText(currentStep)
+                    .setStyle(
+                        NotificationCompat.BigTextStyle()
+                            .bigText(task.steps.takeLast(MAX_TASK_STEPS_SHOWN).joinToString("\n"))
+                    )
+            }
+            // 多个 AI 任务（根任务 + 子代理并行）：标题=N 个任务，正文=最近更新的任务，
+            // 展开逐行列出每个任务的标题与当前步骤
+            tasks.size > 1 -> {
+                val lines = tasks.values.joinToString("\n\n") { task ->
+                    val step = task.steps.lastOrNull()
+                        ?: getString(R.string.notification_agent_task_preparing)
+                    "${task.title}\n$step"
+                }
+                builder
+                    .setContentTitle(getString(R.string.notification_agent_tasks_running, tasks.size))
+                    .setContentText(tasks.values.last().steps.lastOrNull() ?: "")
+                    .setStyle(NotificationCompat.BigTextStyle().bigText(lines))
+            }
+            else -> {
+                val text = when {
+                    sessionCount > 0 && persistent ->
+                        getString(R.string.notification_keepalive_persistent_sessions, sessionCount)
+                    sessionCount > 0 ->
+                        getString(R.string.notification_keepalive_running_sessions, sessionCount)
+                    else -> getString(R.string.notification_keepalive_enabled)
+                }
+                builder
+                    .setContentTitle(getString(R.string.app_name))
+                    .setContentText(text)
+            }
+        }
+        runCatching { startForeground(NOTIFICATION_ID, builder.build()) }
             .onFailure { FileLogger.e(TAG, "startForeground failed", it) }
     }
 
@@ -215,10 +264,47 @@ class TerminalKeepaliveService : Service() {
         private const val CHANNEL_ID = "terminal_service"
         /** 服务级 WakeLock 超时保险：AI 流式生成可能持续很久，给足 60 分钟。 */
         private const val WAKELOCK_TIMEOUT_MS = 60 * 60 * 1000L
+        /** 通知展开时最多显示的步骤数（尾部保留，老的丢掉）。 */
+        private const val MAX_TASK_STEPS_SHOWN = 8
+        /** 每个任务在内存里最多保留的步骤数。 */
+        private const val MAX_TASK_STEPS_KEPT = 12
         const val ACTION_START_SESSION = "com.aicode.action.START_SESSION"
         const val ACTION_STOP_SESSION = "com.aicode.action.STOP_SESSION"
         const val ACTION_ENABLE_PERSISTENT = "com.aicode.action.ENABLE_PERSISTENT"
         const val ACTION_DISABLE_PERSISTENT = "com.aicode.action.DISABLE_PERSISTENT"
+
+        /**
+         * AI 任务进度（进程级单例）：key = 会话 id。ViewModel 直接写入（同进程，无 IPC），
+         * 服务侧订阅后刷新常驻通知。任务开始时 [updateTaskProgress] 带 title；
+         * 每执行一步带 step（与上一步相同则忽略，流式 delta 不会刷爆通知）。
+         */
+        private val taskProgressState = MutableStateFlow<Map<String, AgentTaskProgress>>(emptyMap())
+
+        /**
+         * 注册/更新一个 AI 任务的进度。
+         *
+         * @param title 任务标题（非 null 时更新标题；任务开始时传）
+         * @param step 当前执行步骤描述（非 null 且与最近一步不同时追加）
+         */
+        fun updateTaskProgress(sessionId: String, title: String?, step: String?) {
+            val current = taskProgressState.value[sessionId]
+            val nextTitle = title ?: current?.title ?: ""
+            val nextSteps = when {
+                step == null -> current?.steps ?: emptyList()
+                current != null && current.steps.lastOrNull() == step -> current.steps
+                else -> (current?.steps ?: emptyList()).let {
+                    (it + step).takeLast(MAX_TASK_STEPS_KEPT)
+                }
+            }
+            taskProgressState.value =
+                taskProgressState.value + (sessionId to AgentTaskProgress(nextTitle, nextSteps))
+        }
+
+        /** 任务收工：移除进度条目（服务侧通知随之回退为普通保活文案）。 */
+        fun clearTaskProgress(sessionId: String) {
+            if (sessionId !in taskProgressState.value) return
+            taskProgressState.value = taskProgressState.value - sessionId
+        }
 
         /**
          * 注册一个活跃会话并拉起前台服务（用于 AI 流式生成 / 后台终端）。

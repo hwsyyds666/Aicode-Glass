@@ -103,7 +103,6 @@
     <string name="openai_error_quota_unavailable">用量服务暂未返回可识别的额度窗口；可稍后重试。</string>
     <string name="openai_error_no_available_account">当前已连接的 OpenAI 账号未启用或不支持模型 %1$s；请检查该账号和模型设置。</string>
     <string name="openai_error_model_requires_paid_plan">模型 %1$s 仅对付费订阅开放，当前 ChatGPT 账号无法使用。请切换到付费账号，或在模型选择器中改选其他模型。</string>
-    <string name="openai_error_account_limit">本机最多保存 %1$d 个 ChatGPT 账号；请先移除不再使用的账号再添加。</string>
     <string name="openai_error_access_token_decrypt">本机访问令牌无法解密，请重新登录。</string>
     <string name="openai_error_refresh_token_decrypt">本机续期凭据无法解密，请重新登录。</string>
     <string name="openai_error_login_expired">OpenAI 登录已过期，请重新授权。</string>
@@ -131,6 +130,7 @@
     <string name="openai_notice_imported">账号已导入。</string>
     <string name="openai_error_request_id">请求 ID：%1$s</string>
     <string name="openai_account_provider_name">ChatGPT 账号 · %1$s</string>
+    <string name="openai_account_group_label">ChatGPT 账号</string>
     <string name="openai_account_default_name">OpenAI 账号</string>
     <string name="openai_callback_title">OpenAI 登录</string>
     <string name="openai_callback_success">授权完成。请返回 Aicode-Glass。</string>
@@ -435,6 +435,11 @@
     <string name="notification_keepalive_persistent_sessions">后台保活 · 终端任务: %1$d</string>
     <string name="notification_keepalive_running_sessions">运行中的终端任务: %1$d</string>
     <string name="notification_keepalive_enabled">后台保活已开启</string>
+    <string name="notification_agent_task_preparing">正在准备…</string>
+    <string name="notification_agent_task_thinking">正在思考…</string>
+    <string name="notification_agent_task_generating">正在生成回复…</string>
+    <string name="notification_agent_task_step">正在执行：%1$s</string>
+    <string name="notification_agent_tasks_running">%1$d 个 AI 任务运行中</string>
     <string name="notification_channel_agent_complete">Agent 完成通知</string>
     <string name="notification_channel_agent_complete_desc">Agent 在后台完成任务时弹出的通知</string>
     <string name="settings_app_permissions">软件权限</string>
@@ -2029,4 +2034,5 @@
     <string name="openai_notice_export_copied">导出内容已复制到剪贴板</string>
     <string name="openai_notice_import_result">成功导入 %1$d 个账号</string>
     <string name="openai_notice_import_pending">待登录邮箱：%1$s</string>
+    <string name="openai_notice_import_more_failures">……另有 %1$d 条导入失败</string>
 </resources>

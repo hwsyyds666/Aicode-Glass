@@ -764,26 +764,29 @@ internal fun planTierRank(planType: String?): Int = when (planType?.trim()?.lowe
     else -> 15
 }
 
-/** 账号 provider 档位徽章文案（未知档位显示「Unknown」）。 */
-@Composable
-internal fun planBadgeLabel(planType: String?): String = when (planType?.trim()?.lowercase()) {
-    "free" -> stringResource(R.string.openai_quota_plan_free)
-    "go" -> stringResource(R.string.openai_quota_plan_go)
-    "plus" -> stringResource(R.string.openai_quota_plan_plus)
-    "pro" -> stringResource(R.string.openai_quota_plan_pro)
-    "team" -> stringResource(R.string.openai_quota_plan_team)
-    "business" -> stringResource(R.string.openai_quota_plan_business)
-    "enterprise" -> stringResource(R.string.openai_quota_plan_enterprise)
-    "education" -> stringResource(R.string.openai_quota_plan_education)
-    else -> stringResource(R.string.openai_quota_plan_unknown)
-}
+/**
+ * 聚合「ChatGPT 账号」组里的一个模型：全部账号的目录并集，slug 去重。
+ *
+ * @param paidOnly 任一账号目录把该模型标为付费专属（与运行期额度调度同一保守口径）
+ * @param providerIds 能服务该模型的账号 providerId（已按订阅等级降序）
+ */
+private data class AggregatedAccountModel(
+    val slug: String,
+    val paidOnly: Boolean,
+    val providerIds: List<String>
+)
+
+/** 聚合账号组在折叠记忆 / LazyColumn key 里用的伪 providerId（不与真实 id 冲突）。 */
+private const val ACCOUNT_GROUP_ID = "__chatgpt_accounts__"
 
 /**
  * 模型选择弹窗：风格与拉取模型弹窗保持一致（iOS 胶囊搜索框、提供商分组卡片、能力 Tag）。
  * 识图模型、压缩模型与主页聊天模型共用此组件，仅文案不同；右上角「重置」清除专用模型配置（回退跟随聊天模型），主页场景传 null 不显示。
  *
- * ChatGPT 账号 provider 恒驻列表顶部并按订阅等级降序（付费号在上），组标题带档位徽章；
- * 付费账号下的免费档模型带「免费可用」标签（提示可改走免费号省付费额度），付费专属模型带「付费专属」标签。
+ * **ChatGPT 账号聚合为一个组**（对齐 cockpit-tools 的账号池心智）：不再一个账号显示成一个供应商，
+ * 全部账号的模型按订阅等级降序并成一个「ChatGPT 账号」组，slug 去重、带免费/付费标签；
+ * 选中某模型时按额度调度语义落到最合适的账号（付费专属模型→付费号，免费模型→免费号优先），
+ * 运行期再由账号路由层做能力回退。其余 provider 保持原相对顺序（稳定排序）。
  * [onOpenRefresh] 在弹窗打开时触发一次账号模型目录 TTL 刷新（官方上/下架模型后列表随之更新）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -863,27 +866,61 @@ internal fun ModelSelectionSheet(
                 placeholder = stringResource(R.string.provider_filter_models_hint)
             )
 
-            // ChatGPT 账号对应的 provider 即使还没拉到模型目录也要显示（账号本身可用），
-            // 否则用户会在模型选择器里看不到自己刚添加的官方账号。
-            // 账号 provider 恒驻顶部并按订阅等级降序（付费号在上）；其余 provider 保持原相对顺序（稳定排序）。
-            val activeProviders = remember(providers, accountModelInfo) {
+            // ChatGPT 账号即使还没拉到模型目录也要显示（账号本身可用），否则用户会在
+            // 模型选择器里看不到自己刚添加的官方账号。多个账号**聚合为一个「ChatGPT 账号」组**
+            //（对齐 cockpit-tools 的账号池心智，不再一个账号一个供应商）：slug 去重、并集展示，
+            // 选中某模型时按额度调度语义落到最合适的账号（付费专属→付费号；免费模型优先免费号）。
+            // 其余非账号 provider 保持原相对顺序（稳定排序）排在聚合组之后。
+            val accountProviders = remember(providers) {
                 providers
                     .filter {
-                        it.isEnabled && (it.models.isNotEmpty() ||
-                            com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(it))
+                        it.isEnabled &&
+                            com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(it)
                     }
-                    .sortedWith { a, b ->
-                        val accountA = com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(a)
-                        val accountB = com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(b)
-                        when {
-                            accountA != accountB -> if (accountA) -1 else 1
-                            accountA -> planTierRank(accountModelInfo[a.id]?.planType) -
-                                planTierRank(accountModelInfo[b.id]?.planType)
-                            else -> 0
+                    .sortedByDescending { planTierRank(accountModelInfo[it.id]?.planType) }
+            }
+            val regularProviders = remember(providers) {
+                providers.filter {
+                    it.isEnabled &&
+                        !com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(it) &&
+                        it.models.isNotEmpty()
+                }
+            }
+
+            // 聚合账号组的模型并集：slug 去重，记录每个 slug 能由哪些账号服务 + 是否付费专属。
+            // 付费专属的保守口径：任一账号目录把它标为付费专属即视为付费专属（与运行期调度一致）。
+            val aggregatedAccountModels = remember(accountProviders, accountModelInfo) {
+                val bySlug = LinkedHashMap<String, AggregatedAccountModel>()
+                accountProviders.forEach { provider ->
+                    val info = accountModelInfo[provider.id]
+                    provider.models.forEach { slug ->
+                        val paidOnly = info?.paidOnlyBySlug?.get(slug) == true
+                        val existing = bySlug[slug]
+                        if (existing == null) {
+                            bySlug[slug] = AggregatedAccountModel(
+                                slug = slug,
+                                paidOnly = paidOnly,
+                                providerIds = listOf(provider.id)
+                            )
+                        } else {
+                            bySlug[slug] = existing.copy(
+                                paidOnly = existing.paidOnly || paidOnly,
+                                providerIds = existing.providerIds + provider.id
+                            )
                         }
                     }
+                }
+                bySlug.values.toList()
             }
-            if (activeProviders.isEmpty()) {
+            // 聚合组里至少有一个非 free 档账号时，才给免费模型标「免费可用」（否则全是免费号，标了是噪音）
+            val aggregatedHasPaidAccount = remember(accountProviders, accountModelInfo) {
+                accountProviders.any { id_p ->
+                    accountModelInfo[id_p.id]?.planType?.equals("free", ignoreCase = true) == false
+                }
+            }
+
+            val hasAnyContent = aggregatedAccountModels.isNotEmpty() || regularProviders.isNotEmpty()
+            if (!hasAnyContent) {
                 SettingsGroup {
                     Box(
                         modifier = Modifier
@@ -906,23 +943,78 @@ internal fun ModelSelectionSheet(
                         .heightIn(min = 360.dp, max = 420.dp),
                     verticalArrangement = Arrangement.spacedBy(Spacing.sm)
                 ) {
-                    activeProviders.forEach { provider ->
+                    // ① 聚合账号组（恒驻顶部）
+                    if (aggregatedAccountModels.isNotEmpty()) {
+                        val filteredAccountModels = aggregatedAccountModels.filter {
+                            searchQuery.isBlank() || it.slug.contains(searchQuery, ignoreCase = true)
+                        }
+                        if (filteredAccountModels.isNotEmpty()) {
+                            // 搜索时强制展开，否则用折叠状态：用户搜到名字却看不到结果会很困惑。
+                            val expanded = searchQuery.isNotBlank() || ACCOUNT_GROUP_ID !in collapsedProviderIds
+                            item(key = "header_${ACCOUNT_GROUP_ID}") {
+                                val groupLabel = stringResource(R.string.openai_account_group_label)
+                                CollapsibleGroupHeader(
+                                    text = "$groupLabel (${filteredAccountModels.size})",
+                                    expanded = expanded,
+                                    onToggle = {
+                                        val updated = if (ACCOUNT_GROUP_ID in collapsedProviderIds) {
+                                            collapsedProviderIds - ACCOUNT_GROUP_ID
+                                        } else {
+                                            collapsedProviderIds + ACCOUNT_GROUP_ID
+                                        }
+                                        collapsedProviderIds = updated
+                                        collapseStore.save(updated)
+                                    }
+                                )
+                            }
+                            if (expanded) {
+                                item(key = "card_${ACCOUNT_GROUP_ID}") {
+                                    SettingsGroup {
+                                        filteredAccountModels.forEachIndexed { index, entry ->
+                                            if (index > 0) SettingsDivider()
+                                            val tierTag = when {
+                                                entry.paidOnly -> stringResource(R.string.model_tag_paid_only)
+                                                aggregatedHasPaidAccount ->
+                                                    stringResource(R.string.model_tag_free_tier)
+                                                else -> null
+                                            }
+                                            // 选中模型时按额度调度语义落到最合适的账号：
+                                            // 付费专属→第一个非 free 档账号；免费模型→第一个 free 档账号（没有则用首个）
+                                            val selectedAccount = if (entry.paidOnly) {
+                                                entry.providerIds.firstOrNull { id_p ->
+                                                    accountModelInfo[id_p]?.planType
+                                                        ?.equals("free", ignoreCase = true) == false
+                                                } ?: entry.providerIds.first()
+                                            } else {
+                                                entry.providerIds.firstOrNull { id_p ->
+                                                    accountModelInfo[id_p]?.planType
+                                                        ?.equals("free", ignoreCase = true) == true
+                                                } ?: entry.providerIds.first()
+                                            }
+                                            ModelSelectionRow(
+                                                model = entry.slug,
+                                                selected = selectedAccount == currentProviderId &&
+                                                    entry.slug == currentModel,
+                                                metadata = modelMetadata[modelMetadataKey(selectedAccount, entry.slug)],
+                                                tierTag = tierTag,
+                                                onClick = { onSelect(selectedAccount, entry.slug) }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // ② 其余 provider 保持原相对顺序
+                    regularProviders.forEach { provider ->
                         val filteredModels = provider.models.filter {
                             searchQuery.isBlank() || it.contains(searchQuery, ignoreCase = true)
                         }
                         if (filteredModels.isNotEmpty()) {
-                            val accountInfo = accountModelInfo[provider.id]
-                            // 搜索时强制展开，否则用折叠状态：用户搜到名字却看不到结果会很困惑。
                             val expanded = searchQuery.isNotBlank() || provider.id !in collapsedProviderIds
                             item(key = "header_${provider.id}") {
-                                // 账号 provider 的组标题带订阅档位徽章（Plus/Pro/Free…）
-                                val headerText = if (accountInfo != null) {
-                                    "${provider.name} (${filteredModels.size}) · ${planBadgeLabel(accountInfo.planType)}"
-                                } else {
-                                    "${provider.name} (${filteredModels.size})"
-                                }
                                 CollapsibleGroupHeader(
-                                    text = headerText,
+                                    text = "${provider.name} (${filteredModels.size})",
                                     expanded = expanded,
                                     onToggle = {
                                         val updated = if (provider.id in collapsedProviderIds) {
@@ -939,22 +1031,12 @@ internal fun ModelSelectionSheet(
                                 item(key = "card_${provider.id}") {
                                     SettingsGroup {
                                         filteredModels.forEachIndexed { index, model ->
-                                            if (index > 0) {
-                                                SettingsDivider()
-                                            }
-                                            // 付费账号才标「免费可用」：免费号整个列表都是免费档，标了反而是噪音
-                                            val paidOnly = accountInfo?.paidOnlyBySlug?.get(model)
-                                            val tierTag = when {
-                                                paidOnly == true -> stringResource(R.string.model_tag_paid_only)
-                                                paidOnly == false && accountInfo?.planType?.equals("free", ignoreCase = true) == false ->
-                                                    stringResource(R.string.model_tag_free_tier)
-                                                else -> null
-                                            }
+                                            if (index > 0) SettingsDivider()
                                             ModelSelectionRow(
                                                 model = model,
                                                 selected = provider.id == currentProviderId && model == currentModel,
                                                 metadata = modelMetadata[modelMetadataKey(provider.id, model)],
-                                                tierTag = tierTag,
+                                                tierTag = null,
                                                 onClick = { onSelect(provider.id, model) }
                                             )
                                         }

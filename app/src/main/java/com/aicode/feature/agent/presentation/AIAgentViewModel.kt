@@ -317,14 +317,30 @@ class AIAgentViewModel @Inject constructor(
      * 整轮任务折叠（外层「执行中 / 已完成」头）的手动展开态：key = `turn:<轮首消息 id>`。
      *
      * 与 [toolExpansionOverrides] 同款：按 App 进程内存保留、不落盘。没记录时按「末轮运行中默认展开、
-     * 其余默认收起」推默认值（见 AIChatPanel.buildChatItems 的 activeTurnKey）；一旦用户手动点过，
-     * 就以其选择为准，任务完成自动收起也不会覆盖它。
+     * 其余默认收起」推默认值（见 AIChatPanel.buildChatItems 的 activeTurnKey）。
+     *
+     * 运行期间点过的展开/收起是「看过程」的临时意愿：该轮收工时由 [onTurnFinished] 回收，
+     * 让「完成后默认收起」接管（否则任务完成后整段过程一直摊开，换会话再回来也是展开的）。
+     * 收工之后再点的选择不受回收影响，按用户意愿保留。
      */
     val turnExpansionOverrides = mutableStateMapOf<String, Boolean>()
 
-    /** 记录一次整轮折叠的手动展开/收起。 */
-    fun setTurnExpanded(key: String, expanded: Boolean) {
+    /** 运行期间被手动点过的轮次 key：收工时回收这些临时选择。 */
+    private val turnOverrideSetWhileRunning = mutableSetOf<String>()
+
+    /** 记录一次整轮折叠的手动展开/收起；[whileRunning] = 点的时候该轮是否仍在执行。 */
+    fun setTurnExpanded(key: String, expanded: Boolean, whileRunning: Boolean = false) {
         turnExpansionOverrides[key] = expanded
+        if (whileRunning) turnOverrideSetWhileRunning += key
+        else turnOverrideSetWhileRunning -= key
+    }
+
+    /** 一轮任务收工（运行轮 key 变化/消失）时回收运行期间的手动选择，恢复「完成后默认收起」。 */
+    fun onTurnFinished(key: String) {
+        if (key in turnOverrideSetWhileRunning) {
+            turnOverrideSetWhileRunning -= key
+            turnExpansionOverrides.remove(key)
+        }
     }
 
     /**
@@ -817,6 +833,24 @@ class AIAgentViewModel @Inject constructor(
         if (!userKeepaliveEnabled && !terminalSessionManager.hasBackgroundTabs()) {
             TerminalKeepaliveService.disablePersistent(context)
         }
+    }
+
+    // ── 通知栏任务进度 ──
+    // 每个会话只记录「最近一次推给通知的步骤文本」：流式 delta（思考/正文）每个 chunk 都
+    // 到达一次，但步骤文本不变，去重后一个阶段只推一次通知更新，避免通知被 delta 刷爆。
+    private val lastPushedTaskStep = mutableMapOf<String, String>()
+
+    /** 推进通知栏里的任务步骤；与上一步相同则忽略（StateFlow 内部也会再挡一层）。 */
+    private fun pushTaskStep(sessionId: String, step: String) {
+        if (lastPushedTaskStep[sessionId] == step) return
+        lastPushedTaskStep[sessionId] = step
+        TerminalKeepaliveService.updateTaskProgress(sessionId, title = null, step = step)
+    }
+
+    /** 任务收工：清掉通知栏进度条目与去重记录（通知随即回退为普通保活文案）。 */
+    private fun clearTaskProgress(sessionId: String) {
+        lastPushedTaskStep.remove(sessionId)
+        TerminalKeepaliveService.clearTaskProgress(sessionId)
     }
 
     /** App 退到后台时 Agent 完成，弹一条可点击的系统通知（标题=任务完成，正文=用户消息）。 */
@@ -1431,6 +1465,14 @@ class AIAgentViewModel @Inject constructor(
         FileLogger.d(TAG, "stream start: sid=$sessionId prevState=${_agentStates.value[sessionId]} isAutoTrigger=$isAutoTrigger")
         setAgentState(sessionId, AgentUIState.Streaming)
         acquireKeepalive()
+        // 通知栏任务进度：注册任务标题（复用会话标题的截断规则），初始步骤为「准备中」。
+        // 每一步的推进由 Reasoning/Assistant/ToolCall 事件分别推进，见 pushTaskStep。
+        lastPushedTaskStep.remove(sessionId)
+        TerminalKeepaliveService.updateTaskProgress(
+            sessionId,
+            title = sessionUseCase.deriveTitle(request),
+            step = context.getString(R.string.notification_agent_task_preparing)
+        )
 
         try {
             var failed = false
@@ -1538,11 +1580,13 @@ class AIAgentViewModel @Inject constructor(
                         if (event.accumulated.hasVisibleContent()) finishReasoning()
                         setRetryState(sessionId, null)
                         setKeySwitchState(sessionId, null)
+                        pushTaskStep(sessionId, context.getString(R.string.notification_agent_task_generating))
                         setStreamingText(sessionId, event.accumulated)
                     }
                     is AgentEvent.ReasoningDelta -> {
                         setRetryState(sessionId, null)
                         setKeySwitchState(sessionId, null)
+                        pushTaskStep(sessionId, context.getString(R.string.notification_agent_task_thinking))
                         if (currentReasoningStart == null) {
                             currentReasoningStart = System.currentTimeMillis()
                             currentReasoningEnd = null
@@ -1654,6 +1698,11 @@ class AIAgentViewModel @Inject constructor(
                         val msgId = "tool_${event.id}"
                         setStreamingText(sessionId, null)
                         setPreparingTool(sessionId, null)
+                        // 通知栏步骤推进：每个工具调用计一步（工具名即步骤名）
+                        pushTaskStep(
+                            sessionId,
+                            context.getString(R.string.notification_agent_task_step, event.toolName)
+                        )
                         toolArgsByMsgId[msgId] = event.argsPreview
                         messagePersistenceUseCase.persist(
                             sessionId,
@@ -1767,6 +1816,9 @@ class AIAgentViewModel @Inject constructor(
              _completedSessions.value = _completedSessions.value - sessionId
         } finally {
             clearPendingToolProgress(sessionId)
+            // 通知栏进度先行清除：后面 releaseKeepalive 停服务时，通知已回退为普通保活文案，
+            // 不会残留「正在执行」的过期步骤。
+            clearTaskProgress(sessionId)
             val isOwnJob = sessionJobs[sessionId] == coroutineContext[Job]
             FileLogger.d(TAG, "stream finally: sid=$sessionId isOwnJob=$isOwnJob state=${_agentStates.value[sessionId]}")
             if (isOwnJob) {

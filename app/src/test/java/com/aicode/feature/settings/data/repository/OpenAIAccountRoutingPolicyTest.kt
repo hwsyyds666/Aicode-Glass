@@ -8,23 +8,16 @@ import org.junit.Test
 class OpenAIAccountRoutingPolicyTest {
 
     @Test
-    fun allowsAddingAccountsUpToTheLimit() {
+    fun allowsAddingAnyNumberOfAccounts() {
+        // 账号数量不设上限（对齐 cockpit-tools）：多少个都允许继续新增
         assertTrue(OpenAIAccountSelectionPolicy.canConnect(emptySet(), null))
         assertTrue(OpenAIAccountSelectionPolicy.canConnect(setOf("profile-a"), null))
-        assertTrue(OpenAIAccountSelectionPolicy.canConnect(setOf("profile-a", "profile-b"), null))
         assertTrue(
             OpenAIAccountSelectionPolicy.canConnect(
-                (1 until OpenAIAccountSelectionPolicy.MAX_ACCOUNTS).map { "p$it" }.toSet(),
+                (0 until 100).map { "p$it" }.toSet(),
                 null
             )
         )
-        assertFalse(
-            OpenAIAccountSelectionPolicy.canConnect(
-                (0 until OpenAIAccountSelectionPolicy.MAX_ACCOUNTS).map { "p$it" }.toSet(),
-                null
-            )
-        )
-        assertEquals(10, OpenAIAccountSelectionPolicy.MAX_ACCOUNTS)
     }
 
     @Test

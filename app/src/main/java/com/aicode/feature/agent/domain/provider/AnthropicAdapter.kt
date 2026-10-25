@@ -497,6 +497,8 @@ class AnthropicAdapter @Inject constructor(
         var lastAssistantHadToolUse = false
         // 最后一条普通 user 消息（非 tool_result）在 result 中的索引，供 messages 断点打点。
         var lastPlainUserIndex: Int? = null
+        // 最近一条含正文的 assistant 消息索引：用于第 4 个滚动缓存断点（工具循环增长沿）。
+        var lastAssistantTextIndex: Int? = null
 
         for (message in messages) {
             when (message) {
@@ -543,6 +545,10 @@ class AnthropicAdapter @Inject constructor(
 
                     if (contentBlocks.isNotEmpty()) {
                         result.add(AnthropicMessage(role = "assistant", content = contentBlocks))
+                        // 含 text 块的 assistant 才能打 cache_control（thinking/tool_use 块不允许）。
+                        if (message.content.isNotEmpty()) {
+                            lastAssistantTextIndex = result.lastIndex
+                        }
                     }
                 }
                 is AgentMessage.ToolResultMessage -> {
@@ -611,6 +617,30 @@ class AnthropicAdapter @Inject constructor(
                     else -> c
                 }
                 result[idx] = msg.copy(content = newContent)
+            }
+        }
+
+        // 第 4 个断点（滚动）：打在最近一条含正文的 assistant 消息的 text 块上。
+        // 工具循环中每步新增的 assistant 回复 + tool_result 不断增长，断点 3（原始用户问题）
+        // 离增长沿太远——增长的工具历史每步都全量重算。滚动断点让每步在当前 assistant 回复处
+        // 写入新缓存，下一步（又多了一条 tool_result + assistant）直接读上一步的缓存，
+        // 只重算最后那条 tool_result。这是 Claude Code 的做法。
+        // Anthropic 最多 4 个断点：system + tools + 原始 userQ + 本断点，刚好用满。
+        if (addMessageBreakpoint) {
+            val asstIdx = lastAssistantTextIndex
+            if (asstIdx != null && asstIdx != lastPlainUserIndex) {
+                val msg = result[asstIdx]
+                val blocks = (msg.content as? List<*>)?.filterIsInstance<AnthropicContentBlock>()
+                if (!blocks.isNullOrEmpty()) {
+                    val lastText = blocks.indexOfLast { it.type == "text" && it.cache_control == null }
+                    if (lastText >= 0) {
+                        result[asstIdx] = msg.copy(
+                            content = blocks.mapIndexed { i, b ->
+                                if (i == lastText) b.copy(cache_control = CACHE_BREAKPOINT) else b
+                            }
+                        )
+                    }
+                }
             }
         }
 

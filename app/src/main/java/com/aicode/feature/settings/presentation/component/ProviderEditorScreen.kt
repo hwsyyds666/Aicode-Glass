@@ -348,8 +348,23 @@ fun ProviderEditorScreen(
             customHeaders.any { it.first.isNotBlank() } ||
             models.isNotEmpty()
 
+    /**
+     * 配置是否真的变了（相对初始状态）。
+     *
+     * 编辑场景直接比对 [currentConfig] 与 [initialProvider]：sanitized() 是幂等的，
+     * 从 DB 读出的 initialProvider 本身就是 sanitized 后的，比较结果可靠。
+     * 新建场景退化为 [hasSubstantiveInput]：只要填了内容就算有变更（需要落盘创建）。
+     *
+     * 这层拦截是返回卡顿的根因修复——之前每次返回都无条件 saveCurrent → DB 写入 →
+     * StateFlow 发射 → 列表页在过渡动画期间重组，即使用户什么都没改。
+     */
+    fun isDirty(): Boolean {
+        if (initialProvider == null) return hasSubstantiveInput()
+        return currentConfig() != initialProvider
+    }
+
     fun saveCurrent() {
-        if (!hasSubstantiveInput()) return
+        if (!isDirty()) return
         onSave(currentConfig())
     }
 

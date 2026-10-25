@@ -103,7 +103,6 @@
     <string name="openai_error_quota_unavailable">The usage service returned no recognizable quota windows. Try again later.</string>
     <string name="openai_error_no_available_account">The connected OpenAI account is disabled or does not support model %1$s. Check that account and model settings.</string>
     <string name="openai_error_model_requires_paid_plan">Model %1$s requires a paid subscription and is unavailable on the current ChatGPT account. Switch to a paid account or pick another model in the model picker.</string>
-    <string name="openai_error_account_limit">This device keeps at most %1$d ChatGPT accounts. Remove an unused account before adding another.</string>
     <string name="openai_error_access_token_decrypt">The local access token could not be decrypted. Sign in again.</string>
     <string name="openai_error_refresh_token_decrypt">The local refresh credential could not be decrypted. Sign in again.</string>
     <string name="openai_error_login_expired">The OpenAI sign-in expired. Reauthorize the account.</string>
@@ -131,6 +130,7 @@
     <string name="openai_notice_imported">Account imported.</string>
     <string name="openai_error_request_id">Request ID: %1$s</string>
     <string name="openai_account_provider_name">ChatGPT · %1$s</string>
+    <string name="openai_account_group_label">ChatGPT accounts</string>
     <string name="openai_account_default_name">OpenAI account</string>
     <string name="openai_callback_title">OpenAI sign-in</string>
     <string name="openai_callback_success">Authorization complete. Return to Aicode-Glass.</string>
@@ -435,6 +435,11 @@
     <string name="notification_keepalive_persistent_sessions">Keepalive · terminal tasks: %1$d</string>
     <string name="notification_keepalive_running_sessions">Running terminal tasks: %1$d</string>
     <string name="notification_keepalive_enabled">Keepalive enabled</string>
+    <string name="notification_agent_task_preparing">Preparing…</string>
+    <string name="notification_agent_task_thinking">Thinking…</string>
+    <string name="notification_agent_task_generating">Generating reply…</string>
+    <string name="notification_agent_task_step">Running: %1$s</string>
+    <string name="notification_agent_tasks_running">%1$d AI tasks running</string>
     <string name="notification_channel_agent_complete">Agent completion notifications</string>
     <string name="notification_channel_agent_complete_desc">Notifications shown when the agent finishes in background</string>
     <string name="settings_app_permissions">App Permissions</string>
@@ -2030,4 +2035,5 @@
     <string name="openai_notice_export_copied">Export copied to clipboard</string>
     <string name="openai_notice_import_result">Imported %1$d accounts</string>
     <string name="openai_notice_import_pending">Pending logins: %1$s</string>
+    <string name="openai_notice_import_more_failures">…and %1$d more import failures</string>
 </resources>
