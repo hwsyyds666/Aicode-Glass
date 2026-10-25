@@ -145,18 +145,26 @@ class PerfMonitor @Inject constructor(
     private var fileInfoTick = 0
 
     // ── FPS 帧回调 ─────────────────────────────────────────────
-    private val frameTimesNs = ArrayDeque<Long>(240)
-    private val frameLock = Any()
+    //
+    // 无锁环形缓冲：主线程(doFrame)只写，采样线程(drainFrameStats)只读。
+    // 用 LongArray + 原子写入计数替代 ArrayDeque<Long> + synchronized：
+    // 1) 消除每帧 synchronized 锁竞争(120Hz 下采样线程 drainFrameStats 持锁时主线程阻塞)
+    // 2) 消除每帧 Long 装箱(ArrayDeque<Long> 每次 addLast 装箱 → ~120 个/秒的短命对象)
+    @Volatile private var frameBuffer: LongArray? = null
+    @Volatile private var frameWriteCount = 0  // 总写入次数(单调递增)，用于采样线程判断是否有新帧
+    private var frameBufSize = 240
     private var frameCallback: Choreographer.FrameCallback? = null
 
     private val frameCallbackImpl = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
-            synchronized(frameLock) {
-                // 已停止采样（stopFrameCallbacks 置空 frameCallback）：立即终止重挂载链条。
-                // 否则停止瞬间正在执行的一次回调会把自己再 post 回去，永久每帧空转。
-                if (frameCallback == null) return
-                frameTimesNs.addLast(System.nanoTime())
-                while (frameTimesNs.size > 240) frameTimesNs.removeFirst()
+            // 已停止采样（stopFrameCallbacks 置空 frameCallback）：立即终止重挂载链条。
+            // 否则停止瞬间正在执行的一次回调会把自己再 post 回去，永久每帧空转。
+            if (frameCallback == null) return
+            val buf = frameBuffer
+            if (buf != null) {
+                val idx = frameWriteCount % frameBufSize
+                buf[idx] = System.nanoTime()
+                frameWriteCount++
             }
             // 持续挂下一帧；停止采样时 [stopFrameCallbacks] 移除。
             choreographer.postFrameCallback(this)
@@ -351,6 +359,12 @@ class PerfMonitor @Inject constructor(
                     nativePssKb = info.nativePss.toLong()
                 }
             }
+        } else {
+            // smaps_rollup 成功：native PSS 从中读不到（该文件无 "Native" 字段）。
+            // 用 Debug.getNativeHeapAllocatedSize() 获取 native 堆已分配大小作为近似值——
+            // 与 dumpsys meminfo 的 "Native Heap" private dirty 接近，远比恒 0 有用。
+            // 之前此处不赋值导致 nativePssKb 恒为 0，日志把内存增长低估了三分之一。
+            nativePssKb = Debug.getNativeHeapAllocatedSize() / 1024L
         }
         val rt = Runtime.getRuntime()
         val usedHeap = rt.totalMemory() - rt.freeMemory()
@@ -450,20 +464,24 @@ class PerfMonitor @Inject constructor(
     private fun drainFrameStats(): Pair<Int, Int> {
         val now = System.nanoTime()
         val window = 1_000_000_000L
-        synchronized(frameLock) {
-            var frames = 0
-            var jank = 0
-            var prev = 0L
-            val it = frameTimesNs.iterator()
-            while (it.hasNext()) {
-                val t = it.next()
-                if (now - t > window) { it.remove(); continue }
-                if (prev != 0L && t - prev > JANK_THRESHOLD_NS) jank++
-                prev = t
-                frames++
-            }
-            return frames to jank
+        val buf = frameBuffer ?: return 0 to 0
+        val totalWrites = frameWriteCount  // 读取原子快照：写入线程不会修改已写的元素
+        if (totalWrites == 0) return 0 to 0
+        // 环形缓冲已写入的元素数 = min(totalWrites, bufSize)
+        val written = minOf(totalWrites, frameBufSize)
+        val baseIdx = totalWrites - written  // 最老元素的逻辑序号
+        var frames = 0
+        var jank = 0
+        var prev = 0L
+        for (i in 0 until written) {
+            val t = buf[(baseIdx + i) % frameBufSize]
+            if (t == 0L) continue  // 未写入的槽位
+            if (now - t > window) continue  // 超过 1 秒的帧不计
+            if (prev != 0L && t - prev > JANK_THRESHOLD_NS) jank++
+            prev = t
+            frames++
         }
+        return frames to jank
     }
 
     // ── 持久化 ─────────────────────────────────────────────────
@@ -504,6 +522,8 @@ class PerfMonitor @Inject constructor(
 
     private fun startFrameCallbacks() {
         if (frameCallback != null) return
+        frameBuffer = LongArray(frameBufSize)
+        frameWriteCount = 0
         frameCallback = frameCallbackImpl
         runCatching { choreographer.postFrameCallback(frameCallbackImpl) }
     }
@@ -512,7 +532,8 @@ class PerfMonitor @Inject constructor(
         val cb = frameCallback ?: return
         runCatching { choreographer.removeFrameCallback(cb) }
         frameCallback = null
-        synchronized(frameLock) { frameTimesNs.clear() }
+        frameBuffer = null
+        frameWriteCount = 0
     }
 
     private fun PerfSample.toJson(): JSONObject = JSONObject().apply {

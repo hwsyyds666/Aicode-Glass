@@ -40,9 +40,11 @@ data class AgentTaskProgress(
 @AndroidEntryPoint
 class TerminalKeepaliveService : Service() {
     private val binder = LocalBinder()
+    @Volatile
     private var sessionCount = 0
 
     /** 用户在设置页开启的常驻保活：为 true 时即便没有后台会话也保持前台通知。 */
+    @Volatile
     private var persistent = false
 
     /**
@@ -74,12 +76,13 @@ class TerminalKeepaliveService : Service() {
         // AI 任务进度驱动通知刷新：进度状态在 companion（进程级单例）里由
         // AIAgentViewModel 直接写入，服务侧订阅并重发通知。不走 startService 传值——
         // App 退后台后从 ViewModel startService 会触发 Android 8+ 的后台启动限制。
-        serviceScope.launch {
-            // conflate：流式 delta 期间上游每秒发射 ~16 次（每个 SSE chunk 一次），
-            // ensureForeground 内部要重建 NotificationCompat + PendingIntent 并调
-            // startForeground 系统调用。StateFlow 自带 conflate 语义（只保留最新值），
-            // collect 在重建通知期间自动跳过中间值——避免 16 次/秒的系统调用刷爆主线程。
-            // 配合下游 pushTaskLivePreview 的 200ms 时间窗口节流，通知刷新频率稳定在 ≤5 次/秒。
+        //
+        // **在 Dispatchers.Default 上 collect**：ensureForeground() 内部构建 NotificationCompat.Builder
+        // + PendingIntent + 调 startForeground 系统调用，这些都是耗时操作。
+        // 原先在 Dispatchers.Main.immediate 上跑，200ms 节流后仍有 ~5次/秒的主线程阻塞——
+        // 流式 delta 期间每秒吃掉 ~25ms 的主线程时间，直接拉高帧耗时导致 90Hz 锁帧。
+        // startForeground 可以在任意线程调用（Service 方法，内部 post 到主线程）。
+        serviceScope.launch(Dispatchers.Default) {
             taskProgressState.collect {
                 if (sessionCount > 0 || persistent) ensureForeground()
             }

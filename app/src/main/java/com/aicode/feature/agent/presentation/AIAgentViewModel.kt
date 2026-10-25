@@ -873,22 +873,36 @@ class AIAgentViewModel @Inject constructor(
      * 节流：200ms 时间窗口 + 增量去重（相同文本不重复推）。
      * delta 期间每秒 ~16 次 SSE chunk，不做节流会让通知重建+startForeground 系统调用
      * 刷爆主线程——这是 1.1.0 引入通知栏进度后全局卡顿的直接元凶。
+     *
+     * 性能：传入原始 accumulated 文本，**只在通过节流窗口后**才提取最后一段段落。
+     * 不在调用端提取是因为 lines() 在不断增长的正文上每秒调用 16 次会产生
+     * ~3MB/秒的 String 分配（GC 锯齿元凶）。节流后 200ms 才提取一次，分配量降到 ~1/40。
      */
-    private fun pushTaskLivePreview(sessionId: String, preview: String?) {
+    private fun pushTaskLivePreview(sessionId: String, rawContent: String?) {
+        if (rawContent == null) {
+            // null = 清空预览
+            if (lastPushedPreviewText[sessionId] == "") return
+            lastPushedPreviewText[sessionId] = ""
+            lastPushedPreviewTime[sessionId] = System.currentTimeMillis()
+            TerminalKeepaliveService.updateTaskProgress(
+                sessionId, title = null, step = null, livePreview = ""
+            )
+            return
+        }
+        // 时间窗口：200ms 内同会话只推一次。
+        // **在提取前检查**：避免对 100KB+ 的全文调 lines() 后才发现被节流丢弃。
         val now = System.currentTimeMillis()
-        val text = preview?.takeIf { it.isNotBlank() } ?: ""
-        // 增量去重：文本相同则跳过（delta 的首行总结在一节内往往不变）
-        if (lastPushedPreviewText[sessionId] == text && text.isNotEmpty()) return
-        // 时间窗口：200ms 内同会话只推一次
         val lastTime = lastPushedPreviewTime[sessionId] ?: 0L
-        if (now - lastTime < 200 && text.isNotEmpty()) return
-        lastPushedPreviewText[sessionId] = text
+        if (now - lastTime < 200) return
+        // 提取最后一段非空行（只在通过节流后执行一次）
+        val preview = extractLastParagraph(rawContent)
+        if (preview.isEmpty()) return
+        // 增量去重：文本相同则跳过
+        if (lastPushedPreviewText[sessionId] == preview) return
+        lastPushedPreviewText[sessionId] = preview
         lastPushedPreviewTime[sessionId] = now
         TerminalKeepaliveService.updateTaskProgress(
-            sessionId,
-            title = null,
-            step = null,
-            livePreview = text
+            sessionId, title = null, step = null, livePreview = preview
         )
     }
 
@@ -896,26 +910,58 @@ class AIAgentViewModel @Inject constructor(
      * 把一节正文提炼成通知栏小段总结：取首个非空行，超长截断加省略号。
      * 一节正文往往就是 AI 对当前要做的事情的一句话说明（"我来搜索…"、"找到了，现在编辑…"），
      * 取首行即是对 AI 当前意图的最佳概括。收尾后写入 steps 列表（展开通知逐行回看各节做了什么）。
+     *
+     * 零分配：直接搜索第一个换行符取首行，不用 lines()（lines() 会 split 全文创建 List+全部行 String）。
      */
     private fun summarizeForNotification(content: String): String {
-        val firstLine = content.lines().firstOrNull { it.isNotBlank() }?.trim() ?: return ""
+        if (content.isBlank()) return ""
+        // 找第一个非空白行的结尾
+        var start = 0
+        var end = content.length
+        // 跳过前导空白行
+        var i = 0
+        while (i < content.length) {
+            // 跳过空白字符
+            while (i < content.length && content[i].isWhitespace() && content[i] != '\n') i++
+            if (i >= content.length) break
+            if (content[i] == '\n') { i++; continue }
+            // 找到非空行起点
+            start = i
+            val nl = content.indexOf('\n', start)
+            end = if (nl < 0) content.length else nl
+            break
+        }
+        val firstLine = content.substring(start, end).trim()
+        if (firstLine.isEmpty()) return ""
         return if (firstLine.length <= NOTIFICATION_SUMMARY_MAX) firstLine
         else firstLine.take(NOTIFICATION_SUMMARY_MAX) + "…"
     }
 
     /**
-     * 流式预览专用：取累积正文里【最后一段非空行】——即 AI 此刻正在写的那一小段。
+     * 从累积正文中提取最后一段非空行——即 AI 此刻正在写的那一小段。
      *
-     * 为什么不用首行：AI 一节正文常分多段写（"我来搜索…"换行"找到了…"换行"现在编辑…"），
-     * 取首行会让预览卡在第一段不动，用户在通知栏看不到 AI 已经写到哪了。
-     * 取最后一段，预览随 AI 写作实时跟进，每写完一小段通知就跳到那一段——
-     * 这正是用户要的"每一小段落总结的时候就把那一小段总结放上去"。
+     * 零分配实现：直接搜索最后一个换行符，取其后的子串。
+     * 不用 content.lines()：lines() 会对全文做 split 创建 List + 全部行的 String 对象，
+     * 当正文增长到 100KB+(2000+ 行) 时每次调用分配 ~200KB，16/秒 = 3MB/秒(GC 锯齿元凶)。
+     * 直接 lastIndexOf+substring 只创建 1 个 String 对象。
      *
      * 超长从尾部截断（保留段落开头）：一小段的开头往往是"现在/接着/于是"这类动作词，
      * 看开头即知 AI 在做什么；尾部往往是半句话，截断尾部信息损失更小。
      */
-    private fun latestParagraphForPreview(content: String): String {
-        val lastLine = content.lines().lastOrNull { it.isNotBlank() }?.trim() ?: return ""
+    private fun extractLastParagraph(content: String): String {
+        // 从尾部跳过空白行，找到最后一个有内容的行
+        var end = content.length
+        // 跳过尾部空白
+        while (end > 0 && content[end - 1].isWhitespace()) end--
+        if (end == 0) return ""
+        // 找最后一个换行符（在 end 之前）
+        var nl = content.lastIndexOf('\n', end - 1)
+        // 如果最后一个字符就是换行，往前再找一个
+        if (nl == end - 1) {
+            nl = content.lastIndexOf('\n', nl - 1)
+        }
+        val lastLine = content.substring(nl + 1, end).trim()
+        if (lastLine.isEmpty()) return ""
         return if (lastLine.length <= NOTIFICATION_SUMMARY_MAX) lastLine
         else lastLine.take(NOTIFICATION_SUMMARY_MAX) + "…"
     }
@@ -1659,8 +1705,11 @@ class AIAgentViewModel @Inject constructor(
                         // 通知栏实时预览：取 AI 正在写的【最后一段】推给通知——
                         // 一节正文常分多段，取首行会让预览卡在第一段不动；
                         // 取最后一段，每写完一小段通知就跳到那一段，用户实时看到 AI 写到哪了。
+                        // 注意：extractLastParagraph 的提取推入 pushTaskLivePreview 内部，
+                        // 经 200ms 节流窗口后才执行——避免每个 delta(16/秒)都对全文调 lines()
+                        // 产生 ~3MB/秒的 String 分配风暴(GC 锯齿的元凶)。
                         if (event.accumulated.hasVisibleContent()) {
-                            pushTaskLivePreview(sessionId, latestParagraphForPreview(event.accumulated))
+                            pushTaskLivePreview(sessionId, event.accumulated)
                         }
                         setStreamingText(sessionId, event.accumulated)
                     }
