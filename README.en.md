@@ -1,153 +1,210 @@
-<p align="center">
-  <img src="docs/icon.webp" width="112" alt="AiCode" />
-  <h1 align="center">AiCode</h1>
-  <p align="center">
-    Universal AI Coding Agent for Android · Linux dev environment · Local & remote SSH
-    <br />
-    <a href="README.md">中文</a> · <a href="README.en.md">English</a>
-  </p>
-</p>
+<div align="center">
 
-> **Fork Notice**: This is a fork of the original project [jieapi/AiCode](https://github.com/jieapi/aicode),
-> adding **Liquid Glass UI (PrismalAGSL refraction / chromatic dispersion / gradient glass)**,
-> **AI todo display position preferences**, **floating glass title bar**, and other enhancements,
-> plus container channel and performance fixes. This fork also adds **ChatGPT multi-account aggregation**
-> (batch import, tier-sorted single-group selector, session affinity, free/paid quota routing),
-> **notification-bar task progress**, **maximized Anthropic context caching** (4-breakpoint rolling cache),
-> and **smooth chat-list scrolling**. All credit to the original author; this fork
-> is released under the same [GPL-3.0](LICENSE) license.
->
-> Original project: https://github.com/jieapi/aicode
+<img src="docs/icon.webp" alt="AiCode" width="120" />
 
-<p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0-blue.svg" alt="License GPL-3.0" /></a>
-  <img src="https://img.shields.io/badge/Platform-Android-green.svg" alt="Android Platform" />
-  <a href="https://github.com/hwsyyds666/Aicode-Glass/releases"><img src="https://img.shields.io/github/v/release/hwsyyds666/Aicode-Glass?display_name=tag&include_prereleases" alt="Latest Release" /></a>
-</p>
+# AiCode
 
-<p align="center">
-  <table>
-    <tr>
-      <td align="center"><img src="docs/screenshots/home.png" alt="AiCode home - AI chat interface with code generation and Markdown rendering" width="270"/></td>
-      <td align="center"><img src="docs/screenshots/git.png" alt="AiCode Git integration - visual commit history and branch management" width="270"/></td>
-    </tr>
-    <tr>
-      <td align="center">Home · AI Chat</td>
-      <td align="center">Git · Commit History</td>
-    </tr>
-    <tr>
-      <td align="center"><img src="docs/screenshots/container.png" alt="AiCode container settings - container image management" width="270"/></td>
-      <td align="center"><img src="docs/screenshots/models.png" alt="AiCode model list - multi-provider model management" width="270"/></td>
-    </tr>
-    <tr>
-      <td align="center">Container · Image Manager</td>
-      <td align="center">Models · Provider List</td>
-    </tr>
-  </table>
-</p>
+**An AI coding workstation on your phone — not just chat, it writes code, runs builds, ships results**
+
+Built-in Linux container & terminal · AI Agent reads/writes files, runs commands, debugs code · Local & remote SSH backends
+
+[中文](README.md) · [English](README.en.md)
+
+<br/>
+
+[![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Android-green.svg)](https://github.com/hwsyyds666/Aicode-Glass/releases/latest)
+[![Release](https://img.shields.io/github/v/release/hwsyyds666/Aicode-Glass?include_prereleases&display_name=tag&color=orange)](https://github.com/hwsyyds666/Aicode-Glass/releases)
+[![Stars](https://img.shields.io/github/stars/hwsyyds666/Aicode-Glass?style=flat&color=yellow)](https://github.com/hwsyyds666/Aicode-Glass/stargazers)
+
+[Download](https://github.com/hwsyyds666/Aicode-Glass/releases/latest) · [Features](#-core-highlights) · [Screenshots](#-screenshots) · [Quick Start](#-quick-start) · [Docs](https://aicode.murk.top)
+
+</div>
 
 ---
 
-## Overview
+> **Fork Notice** · Based on [jieapi/AiCode](https://github.com/jieapi/aicode), adding Liquid Glass UI, ChatGPT multi-account aggregation with quota routing, Super Agent with parallel subagents, notification-bar task progress, maximized context caching, and more. Released under the same [GPL-3.0](LICENSE) license.
 
-AiCode is a universal AI coding agent that runs on Android, packing a full Linux development environment into your phone: it bundles an Alpine Linux container and terminal, and the AI agent can read and write files, run shell commands and run build tools, so writing, debugging and building all happen on-device. A remote SSH server can also serve as the execution backend, turning your phone into a mobile workstation for remote projects.
+## 💡 What is this
 
-There is nothing to set up beforehand: install the app, configure a model under AI Vendors, and you can start coding — no computer, no environment to build yourself. AiCode ships no models and locks you into no vendor: it supports the OpenAI / Anthropic / Gemini protocols plus custom providers, with models, keys and endpoints all configured by you.
+**In one sentence**: Run a real AI coding Agent on your phone — not just one that replies with code snippets, but one that **reads/writes files, executes shell commands, runs builds, and debugs errors** — all on-device.
 
-## Sponsors
+- Built-in Alpine Linux container + terminal, the AI directly manipulates the file system
+- Remote SSH backend supported — your phone becomes a mobile workstation for remote projects
+- No bundled models, no vendor lock-in — OpenAI / Anthropic / Gemini protocols all supported
 
-| Icon | Description |
-|------|-------------|
-| <img src="https://www.rainyun.com/favicon.ico" width="24" alt="RainYun" /> | **[RainYun](https://www.rainyun.com/logins_)** — Sponsor of this project's server; a Chinese cloud provider specializing in VPS and game hosting (one-click Minecraft and other game servers), plus bare-metal machines and object storage; discounts for new users |
-| <img src="https://ai.onyxaxis.org/api/site/logo" width="24" alt="Axis AI" /> | **[Axis AI](https://ai.onyxaxis.org/register?invite=AICODE)** — A free non-profit AI platform offering frontier models; register with invite code `AICODE` for 7 days of Go benefits |
+## 🌟 Core Highlights
 
-## Advertisement
+### 📱 Phone = Workstation
 
-| Icon | Description |
-|------|-------------|
-| <img src="https://opencode.ai/favicon-96x96-v3.png" width="24" alt="OpenCode" /> | **[OpenCode Go](https://opencode.ai/go?ref=8Q5GA5B1NY)** — Low-cost subscription with generous limits and reliable access to the most capable open-source models |
-| <img src="https://www.qiniu.com/favicon.ico" width="24" alt="Qiniu" /> | **[Qiniu Cloud AI](https://s.qiniu.com/vUryau)** — New users get 3,000,000 free tokens on sign-up (valid for 2 years), covering 50+ popular models |
+Not a chat wrapper. The AI Agent has a full toolchain: file read/write/edit, shell execution, background terminal, code search, web fetch, image recognition, image generation, todo management. **Tell it "write me a web service and run it" — it writes the code, installs dependencies, starts the server, and fixes errors on its own.**
 
-## Features
+### 🔐 ChatGPT Multi-Account Aggregation + Quota Routing
 
-### AI Agent
+Batch import official OAuth accounts, model selector aggregates all accounts into a single group sorted by subscription tier. Smart quota routing: **free models go to free accounts, paid-only models go to paid accounts**. Session affinity binds a session to one account by default; credentials that fail are soft-unbound. Quota-paused / offline / disabled accounts are never silently switched. Aligned with cockpit-tools import format.
 
-- **AI Agent** — Built-in tools for file read/write/edit, shell execution, background terminal, code & web search, image recognition, todo lists, and more; streaming output with live Markdown rendering and automatic context compression
-- **Notification task progress** — While the AI runs a task, a persistent notification shows the task title; expand it to follow the current step in real time (preparing → thinking → generating → running a tool). Multiple parallel tasks show "N tasks running"; it auto-dismisses on completion
-- **Maximized context caching** — Anthropic uses all 4 `cache_control` breakpoints (system prompt + tool definitions + original user question + a rolling breakpoint). The ever-growing assistant + tool_result history inside tool loops flows through the rolling breakpoint — each step writes a fresh cache and the next step reads it, so only the last tool_result is recomputed on long tasks
-- **Parallel subagents** — Enable a session's built-in Explore, Research, Worker and Reviewer agents; workers have scoped writes, cannot nest agents, and return work for the main agent to review
-- **Three run modes** — BUILD for normal development, PLAN to draft and execute a tracked plan under the same tool permissions, and ASK for read-only questions
-- **Checkpoints & Undo** — Snapshots are recorded before the agent edits code; one-tap rollback of code, chat history, or both
-- **Skills & Auto Memory** — Global/project-level skills and long-term memory let the AI reuse experience and project conventions across sessions
-- **MCP Protocol** — Connect to local (stdio) or remote (HTTP) MCP servers to dynamically extend AI tool capabilities
-- **Tool permissions & custom prompts** — Per-tool authorization rules; system prompts can be overridden by the user and survive app upgrades
+### 🧠 Super Agent · Proactive Parallel Dispatch
 
-### Models & Providers
+When enabled, the AI **proactively** splits research/investigation tasks into parallel subagents — Explore, Research, Worker, and Reviewer roles working together. Workers have scoped writes, cannot nest agents, and the main session reviews and consolidates results. No more manually asking "use subagents."
 
-- **Model-agnostic** — No bundled models and no vendor lock-in: models, keys and endpoints are yours to configure
-- **Protocol support** — Compatible with the OpenAI / Anthropic / Gemini protocols, with presets for several official providers and support for custom ones; model lists and pricing are customizable
-- **Multiple keys** — Configure several keys per provider with sequential or round-robin rotation; reasoning effort is adjustable
+### 📢 Notification Bar Task Progress
 
-### Development Environment
+While the AI runs a task, a persistent notification shows what it's doing — thinking, generating, with a summary of each section visible on expand. Multiple parallel tasks show "N tasks running"; auto-dismisses on completion. **You don't need to stare at the screen to know where the AI is at.**
 
-- **Built-in Terminal & Container** — A local Linux container built on Termux and PRoot with a built-in Alpine image; supports custom rootfs images and host directory mounts; multi-tab terminals that can stay alive in the background
-- **Remote SSH Mode** — Use a remote SSH server as the execution backend: commands, files and terminal all act on the remote project
-- **File tree & code editor** — An indented file tree that opens files in a full-screen editor with syntax highlighting for mainstream languages and Markdown preview; `file:line` links in AI replies jump straight to that line, in both local and remote SSH workspaces
-- **Git Integration** — Visual management of status, branches, commit history, diffs and tags, plus staging/discarding changes, sign-off and credentials
-- **Workspace Sync** — SFTP / FTP synchronization with a built-in FTP server for desktop file management
+### ⚡ Maximized Context Caching
 
-### Experience
+Anthropic uses all 4 `cache_control` breakpoints (system prompt + tool definitions + original question + rolling breakpoint). The ever-growing history in tool loops flows through the rolling breakpoint — **each step writes a fresh cache and the next step reads it**, so only the last entry is recomputed on long tasks. Dramatically reduces token cost and latency.
 
-- **Tablet & large screen** — Layout adapts to window width: a persistent sidebar on wide screens with code or terminal beside the chat, falling back to a single pane when narrow
-- **Token stats** — Usage and cost estimates per provider and model, with a drill-down into individual calls
-- **Appearance & language** — Light/dark themes, preset color schemes, Material You colors, custom background images, and a bilingual (Chinese/English) UI
-- **Network proxy** — Configure a global proxy and per-provider proxies separately
-- **Backup & Restore** — Encrypted export/import of provider configs, chat history and workspace files; device-bound GitHub/OpenAI OAuth tokens are excluded and must be reauthorized after restore
+### ⏪ Checkpoints & One-Tap Rollback
 
-### Official Accounts
+Snapshots are recorded before the agent edits code. Not satisfied? **Roll back code, chat history, or both — in one tap.** No fear of the AI breaking things.
 
-- **ChatGPT multi-account aggregation** — Sign in with ChatGPT to access the official Codex Responses API. Supports batch import aligned with cockpit-tools export formats (sub2api, refresh-token-only, inline JSON arrays). Tokens are encrypted on-device with Android Keystore. The model selector aggregates all accounts into a single group sorted by subscription tier; session affinity binds a session to one account by default and soft-unbinds on credential failure. Quota routing sends free models to free accounts and paid-only models to paid accounts — accounts that are quota-paused, offline or disabled are never silently switched. The model catalog is filtered only by `visibility` (aligned with the official client) and silently refreshed with a 30-minute TTL when the selector opens. Local token totals are for reference only; OpenAI's usage page is the authoritative view.
-- **GitHub** — Connect with Device Flow, browse and clone repositories, and confirm each pull-request creation. The app never pushes a branch on your behalf.
+### 🌿 Visual Git + GitHub Workspace
 
-## Getting Started
+Status, branches, commit history, diffs, and tags at a glance — staging, discarding, sign-off supported. Connect GitHub via Device Flow, browse and clone repos, create Pull Requests with confirmation.
 
-| Item | Description |
-|------|-------------|
-| System requirements | Android 8.0+ (API 26), arm64-v8a / x86_64 |
-| Download | [GitHub Releases](https://github.com/hwsyyds666/Aicode-Glass/releases/latest): pick `armsolo` for real devices, `x86solo` for emulators, `universal` for both |
-| Quick start | Settings → AI Vendors to add a model → Container & Images to pick local or SSH → new session and chat |
-| Changelog | [Releases](https://github.com/hwsyyds666/Aicode-Glass/releases) (all versions & notes) |
-| User guide | [Online docs](https://aicode.murk.top): quick start, user manual and advanced guides (same content as the in-app docs) |
+### 🪟 Liquid Glass UI
 
-## Star
+Refraction, chromatic dispersion, and gradient glass effects powered by [PrismalAGSL](https://github.com/styropyr0/PrismalAGSL). Floating glass title bar, light/dark themes, Material You colors, custom background images.
 
-If AiCode is helpful to you, give it a [Star](https://github.com/hwsyyds666/Aicode-Glass) — it helps more developers discover the project.
+## 📸 Screenshots
 
-## Star History
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/home.png" alt="AI Chat" width="270"/></td>
+    <td align="center"><img src="docs/screenshots/git.png" alt="Git Integration" width="270"/></td>
+  </tr>
+  <tr>
+    <td align="center">Home · AI Chat</td>
+    <td align="center">Git · Commit History</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/container.png" alt="Container" width="270"/></td>
+    <td align="center"><img src="docs/screenshots/models.png" alt="Models" width="270"/></td>
+  </tr>
+  <tr>
+    <td align="center">Container · Image Manager</td>
+    <td align="center">Models · Provider List</td>
+  </tr>
+</table>
 
-<a href="https://www.star-history.com/?repos=jieapi%2Faicode&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=jieapi/aicode&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=jieapi/aicode&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=jieapi/aicode&type=date&legend=top-left" />
- </picture>
+## 🔀 Three Run Modes
+
+| Mode | Purpose | Behavior |
+| :-- | :-- | :-- |
+| **BUILD** | Normal development | Executes per your tool authorization rules |
+| **PLAN** | Plan then execute | Shows a task list first, then executes step by step |
+| **ASK** | Read-only Q&A | Explores and answers questions; writes are hard-denied |
+
+## 📦 Quick Start
+
+**System requirements**: Android 8.0+ (API 26), arm64-v8a / x86_64
+
+**1. Download**
+
+Get it from [GitHub Releases](https://github.com/hwsyyds666/Aicode-Glass/releases/latest):
+
+| Package | Target |
+| :-- | :-- |
+| `armsolo` | Real devices (arm64-v8a) |
+| `x86solo` | Emulators (x86_64) |
+| `universal` | Universal build — when in doubt, pick this |
+
+**2. Three steps**
+
+1. Go to **Settings → AI Vendors**, configure your model, API key, and endpoint
+2. In **Container & Images**, pick local container or remote SSH
+3. **New Session** — start chatting
+
+> 📖 For detailed guides, see [Online Docs](https://aicode.murk.top) (same content as in-app docs)
+
+<details>
+<summary><b>🔧 More Features</b></summary>
+<br/>
+
+**AI Agent**
+- Built-in tools: file read/write/edit, shell execution, background terminal, code/web search, image recognition, image generation, todo management
+- Streaming output + live Markdown rendering + automatic context compression
+- Global/project-level Skills and long-term memory for cross-session reuse
+- MCP protocol support — connect local (stdio) or remote (HTTP) MCP servers to extend tools
+- Per-tool authorization rules + user-overridable system prompts that survive upgrades
+
+**Models & Providers**
+- Model-agnostic: no bundled models, no vendor lock-in
+- Protocol support: OpenAI / Anthropic / Gemini + custom providers
+- Multiple keys per provider with sequential or round-robin rotation
+- Adjustable reasoning effort
+
+**Development Environment**
+- Built-in terminal & container: Termux + PRoot local Linux container with Alpine image, custom rootfs support, host directory mounting, multi-tab background terminals
+- Remote SSH mode: remote server as execution backend — commands, files, terminal all act on remote
+- File tree & code editor: indented tree + full-screen editor with syntax highlighting, Markdown preview, `file:line` jump from AI replies
+- Workspace sync: SFTP / FTP sync + built-in FTP server
+
+**Experience**
+- Tablet & large screen: persistent sidebar on wide screens with code/terminal beside chat
+- Token stats: usage and cost estimates per provider and model with call-level drill-down
+- Appearance: light/dark themes, preset colors, Material You, custom backgrounds, bilingual (CN/EN)
+- Network proxy: global and per-provider proxy configuration
+- Backup & restore: encrypted export/import of provider configs, chat history, workspace files
+
+</details>
+
+## 🏗 Build from Source
+
+```bash
+git clone https://github.com/hwsyyds666/Aicode-Glass.git
+cd AiCode
+./gradlew assembleDebug
+```
+
+Build output is in `app/build/outputs/apk/`. Requires JDK and Android SDK.
+
+<details>
+<summary>Project structure</summary>
+
+```text
+AiCode
+├── app/                # Android main app
+├── terminal-emulator/  # Terminal emulator core (based on Termux)
+├── terminal-view/      # Terminal view components (based on Termux)
+├── prismalrepo/        # PrismalAGSL liquid glass library (local Maven repo)
+├── docs/               # Icons, screenshots, docs assets
+└── docs-site/          # Online documentation site source
+```
+</details>
+
+## ⭐ Star History
+
+If AiCode helps you, give it a ⭐ Star — it helps more developers discover the project.
+
+[![Star History Chart](https://api.star-history.com/svg?repos=hwsyyds666/Aicode-Glass&type=Date)](https://www.star-history.com/#hwsyyds666/Aicode-Glass&Date)
+
+## 💬 Feedback & Contribution
+
+- 🐞 **Bug reports**: [Issues](https://github.com/hwsyyds666/Aicode-Glass/issues) (include repro steps, device model, OS version)
+- 💡 **Feature requests**: discuss in [Issues](https://github.com/hwsyyds666/Aicode-Glass/issues)
+- 🔧 **Contributing**: [Pull Requests](https://github.com/hwsyyds666/Aicode-Glass/pulls) welcome
+- 💬 **QQ group**: [AiCode QQ group](https://qm.qq.com/q/ByvqODJdIs) (group number: 1107110698)
+
+<a href="https://github.com/hwsyyds666/Aicode-Glass/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=hwsyyds666/Aicode-Glass" alt="Contributors" />
 </a>
 
-## Feedback & Contribution
-
-- **QQ group**: join the [AiCode QQ group](https://qm.qq.com/q/ByvqODJdIs) (group number: 1107110698) to share tips and feedback
-- **Bug reports**: open an [Issue](https://github.com/hwsyyds666/Aicode-Glass/issues) with reproduction steps, device model and OS version
-- **Feature requests**: discuss your ideas in [Issues](https://github.com/hwsyyds666/Aicode-Glass/issues)
-- **Contributing**: submit a [Pull Request](https://github.com/hwsyyds666/Aicode-Glass/pulls)
-
-## Acknowledgements
+## 🙏 Acknowledgements
 
 - **[jieapi/AiCode](https://github.com/jieapi/aicode)** — Original project, the foundation of this fork
-- [OpenCode](https://github.com/anomalyco/opencode) — Terminal-based AI coding tool, the core inspiration for this project
-- [Termux](https://github.com/termux/termux-app) — Android terminal emulator, provided terminal components and PRoot solution
-- [Kelivo](https://github.com/Chevey339/kelivo) — Cross-platform LLM chat client, AI conversation UI design reference
-- [PrismalAGSL](https://github.com/styropyr0/PrismalAGSL) — AGSL liquid glass effect library
+- [OpenCode](https://github.com/anomalyco/opencode) — Core inspiration
+- [Termux](https://github.com/termux/termux-app) — Terminal emulator and PRoot solution
+- [Kelivo](https://github.com/Chevey339/kelivo) — AI chat UI design reference
+- [PrismalAGSL](https://github.com/styropyr0/PrismalAGSL) — Liquid glass effect library
 
-## License
+## 📄 License
 
-This project is licensed under [GPL-3.0](LICENSE).
+[GPL-3.0](LICENSE) · Third-party notices: [NOTICE](NOTICE)
+
+<div align="center">
+
+<sub>Made with ❤️ on Android</sub>
+
+</div>
