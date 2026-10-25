@@ -563,19 +563,14 @@ internal fun ChatInputBar(
                             Box(
                                 modifier = Modifier
                                     .size(48.dp)
-                                    .clip(RoundedCornerShape(Radius.md))
-                                    // 未开启时保持透明，只留描边：有底色会让人误以为已开启
-                                    .background(
-                                        if (superAgentEnabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
-                                        else Color.Transparent
-                                    )
-                                    .border(
-                                        BorderStroke(
-                                            1.dp,
-                                            if (superAgentEnabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
-                                            else MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
-                                        ),
-                                        RoundedCornerShape(Radius.md)
+                                    .then(
+                                        if (superAgentEnabled) {
+                                            Modifier
+                                                .clip(CircleShape)
+                                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f))
+                                        } else {
+                                            Modifier
+                                        }
                                     )
                                     .combinedClickable(
                                         onClick = onToggleSuperAgent,

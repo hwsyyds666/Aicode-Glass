@@ -138,9 +138,6 @@ private const val AUTO_SCROLL_TOLERANCE_PX = 2
 /** 触发加载更多历史的顶部阈值：firstVisibleItemIndex 进入该值以内视为「接近顶部」。 */
 private const val LOAD_MORE_TRIGGER_INDEX = 3
 
-/** 会话切换后「运行中轮次」展开判定的静置窗口（ms）：等 agentState / messagesState 两条流都追上切换，避免旧会话的 Streaming 残影把新会话的末轮标成执行中。 */
-private const val TURN_RUNNING_SETTLE_MS = 250L
-
 /** AI 收工后继续逐帧校准的时长（ms）：md 异步解析仍可能改高度，不能一停就收手。 */
 private const val CALIBRATE_TAIL_MS = 1_200L
 
@@ -722,35 +719,10 @@ fun AIChatPanel(
     // 提到这里（而不是 LazyColumn 分支内）是因为 isFarFromBottom 的「布局是否对应当前消息」判定
     // 需要它：分组会让 item 数 ≠ 消息数 + 1，不能再拿消息数当期望值。
     // 末轮且 agent 忙 = 当前正在跑的那一轮：它的折叠头默认展开（显示「执行中」），收工后自动收起。
-    //
-    // 静置窗口：agentState（按会话 id 映射，flatMapLatest 切换）与 messagesState（Room 重查询）
-    // 是两条独立的状态流，切换会话瞬间可能组合出「新会话的消息 + 旧会话 Streaming 残影」的
-    // 错配帧——若直接拿它算 activeTurnKey，会把新会话的末轮标成「执行中」并展开（换会话后
-    // 任务过程莫名展开的根因）。切换后先按「没有运行轮」处理一小段，等两条流都追上再恢复。
-    var turnRunningSettled by remember { mutableStateOf(false) }
-    LaunchedEffect(currentSessionId) {
-        turnRunningSettled = false
-        delay(TURN_RUNNING_SETTLE_MS)
-        turnRunningSettled = true
-    }
-    val activeTurnKey = remember(messages, isBusy, turnRunningSettled) {
-        if (!isBusy || !turnRunningSettled) {
-            null
-        } else {
-            messages.lastOrNull { it.role == MessageRole.USER && !it.isBackgroundNotification }
-                ?.let { turnKeyOf(it.id) }
-        }
-    }
-    // 运行轮收工（activeTurnKey 变化/消失）时回收该轮「运行期间」的手动展开选择：
-    // 任务完成后默认收起是用户的预期行为，运行期间点过展开/收起不该让收工后永远保持展开。
-    var lastRunningTurnKey by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(activeTurnKey) {
-        val previous = lastRunningTurnKey
-        if (previous != null && previous != activeTurnKey) {
-            viewModel.onTurnFinished(previous)
-        }
-        lastRunningTurnKey = activeTurnKey
-    }
+    val activeTurnKey = if (isBusy) {
+        messages.lastOrNull { it.role == MessageRole.USER && !it.isBackgroundNotification }
+            ?.let { turnKeyOf(it.id) }
+    } else null
     val chatItems = remember(messages, toolGroupOverrideSnapshot, turnOverrideSnapshot, activeTurnKey) {
         buildChatItems(
             messages = messages,
@@ -1285,18 +1257,12 @@ fun AIChatPanel(
     val latestMessagesState = rememberUpdatedState(messagesState)
     LaunchedEffect(listState, messagesReady) {
         if (!messagesReady) return@LaunchedEffect
-        var armed = true
         snapshotFlow { listState.firstVisibleItemIndex }
             .distinctUntilChanged()
             .collect { index ->
-                if (index > LOAD_MORE_TRIGGER_INDEX) {
-                    armed = true
-                } else if (armed) {
-                    val ms = latestMessagesState.value
-                    if (ms.hasMore && !ms.isLoadingMore) {
-                        armed = false
-                        viewModel.loadMoreMessages()
-                    }
+                val ms = latestMessagesState.value
+                if (index <= LOAD_MORE_TRIGGER_INDEX && ms.hasMore && !ms.isLoadingMore) {
+                    viewModel.loadMoreMessages()
                 }
             }
     }
@@ -1334,7 +1300,7 @@ fun AIChatPanel(
                     durationMs = header.endMessageId?.let { taskDurations[it] },
                     expanded = header.expanded,
                     onToggle = {
-                        viewModel.setTurnExpanded(header.key, !header.expanded, whileRunning = header.running)
+                        viewModel.setTurnExpanded(header.key, !header.expanded)
                         onToolItemToggled()
                     }
                 )

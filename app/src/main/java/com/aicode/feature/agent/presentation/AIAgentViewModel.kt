@@ -322,29 +322,11 @@ class AIAgentViewModel @Inject constructor(
      *
      * 与 [toolExpansionOverrides] 同款：按 App 进程内存保留、不落盘。没记录时按「末轮运行中默认展开、
      * 其余默认收起」推默认值（见 AIChatPanel.buildChatItems 的 activeTurnKey）。
-     *
-     * 运行期间点过的展开/收起是「看过程」的临时意愿：该轮收工时由 [onTurnFinished] 回收，
-     * 让「完成后默认收起」接管（否则任务完成后整段过程一直摊开，换会话再回来也是展开的）。
-     * 收工之后再点的选择不受回收影响，按用户意愿保留。
      */
     val turnExpansionOverrides = mutableStateMapOf<String, Boolean>()
 
-    /** 运行期间被手动点过的轮次 key：收工时回收这些临时选择。 */
-    private val turnOverrideSetWhileRunning = mutableSetOf<String>()
-
-    /** 记录一次整轮折叠的手动展开/收起；[whileRunning] = 点的时候该轮是否仍在执行。 */
-    fun setTurnExpanded(key: String, expanded: Boolean, whileRunning: Boolean = false) {
+    fun setTurnExpanded(key: String, expanded: Boolean) {
         turnExpansionOverrides[key] = expanded
-        if (whileRunning) turnOverrideSetWhileRunning += key
-        else turnOverrideSetWhileRunning -= key
-    }
-
-    /** 一轮任务收工（运行轮 key 变化/消失）时回收运行期间的手动选择，恢复「完成后默认收起」。 */
-    fun onTurnFinished(key: String) {
-        if (key in turnOverrideSetWhileRunning) {
-            turnOverrideSetWhileRunning -= key
-            turnExpansionOverrides.remove(key)
-        }
     }
 
     /**
