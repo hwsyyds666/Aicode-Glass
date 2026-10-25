@@ -25,10 +25,16 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
-/** 一个 AI 任务的常驻通知进度：任务标题 + 最近执行步骤（尾部截断）。 */
+/** 一个 AI 任务的常驻通知进度：任务标题 + 最近执行步骤（尾部截断）+ 流式实时预览。
+ *
+ *  **livePreview** 是当前正在流式生成的正文预览（首行截断），不进 steps 列表——
+ *  每收到一个 delta 就覆盖更新，给用户实时看到 AI 正在写什么；
+ *  当一节正文收尾（AssistantText）时，把小结写进 steps 并清空 livePreview。
+ *  这样 steps 列表里全是「每一节的小段总结」，用户在通知栏一眼看出 AI 在做什么。 */
 data class AgentTaskProgress(
     val title: String,
-    val steps: List<String>
+    val steps: List<String>,
+    val livePreview: String? = null
 )
 
 @AndroidEntryPoint
@@ -69,6 +75,11 @@ class TerminalKeepaliveService : Service() {
         // AIAgentViewModel 直接写入，服务侧订阅并重发通知。不走 startService 传值——
         // App 退后台后从 ViewModel startService 会触发 Android 8+ 的后台启动限制。
         serviceScope.launch {
+            // conflate：流式 delta 期间上游每秒发射 ~16 次（每个 SSE chunk 一次），
+            // ensureForeground 内部要重建 NotificationCompat + PendingIntent 并调
+            // startForeground 系统调用。StateFlow 自带 conflate 语义（只保留最新值），
+            // collect 在重建通知期间自动跳过中间值——避免 16 次/秒的系统调用刷爆主线程。
+            // 配合下游 pushTaskLivePreview 的 200ms 时间窗口节流，通知刷新频率稳定在 ≤5 次/秒。
             taskProgressState.collect {
                 if (sessionCount > 0 || persistent) ensureForeground()
             }
@@ -172,30 +183,33 @@ class TerminalKeepaliveService : Service() {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_DEFERRED)
         when {
-            // 单个 AI 任务：标题=任务标题，正文=当前步骤，展开=带序号的最近步骤
+            // 单个 AI 任务：标题=任务标题，正文=实时预览（流式生成中）或最近一节小结，
+            // 展开（BigTextStyle）= 各节小结列表（每一段总结一行，用户一眼看出 AI 做到哪了）
             tasks.size == 1 -> {
                 val task = tasks.values.first()
-                val currentStep = task.steps.lastOrNull()
+                val previewText = task.livePreview
+                    ?: task.steps.lastOrNull()
                     ?: getString(R.string.notification_agent_task_preparing)
                 builder
                     .setContentTitle(task.title)
-                    .setContentText(currentStep)
+                    .setContentText(previewText)
                     .setStyle(
                         NotificationCompat.BigTextStyle()
                             .bigText(task.steps.takeLast(MAX_TASK_STEPS_SHOWN).joinToString("\n"))
                     )
             }
-            // 多个 AI 任务（根任务 + 子代理并行）：标题=N 个任务，正文=最近更新的任务，
-            // 展开逐行列出每个任务的标题与当前步骤
+            // 多个 AI 任务（根任务 + 子代理并行）：标题=N 个任务，正文=最近更新的任务的实时预览/小结，
+            // 展开逐行列出每个任务的标题与当前小结
             tasks.size > 1 -> {
                 val lines = tasks.values.joinToString("\n\n") { task ->
-                    val step = task.steps.lastOrNull()
+                    val step = task.livePreview
+                        ?: task.steps.lastOrNull()
                         ?: getString(R.string.notification_agent_task_preparing)
                     "${task.title}\n$step"
                 }
                 builder
                     .setContentTitle(getString(R.string.notification_agent_tasks_running, tasks.size))
-                    .setContentText(tasks.values.last().steps.lastOrNull() ?: "")
+                    .setContentText(tasks.values.last().let { it.livePreview ?: it.steps.lastOrNull() } ?: "")
                     .setStyle(NotificationCompat.BigTextStyle().bigText(lines))
             }
             else -> {
@@ -284,9 +298,12 @@ class TerminalKeepaliveService : Service() {
          * 注册/更新一个 AI 任务的进度。
          *
          * @param title 任务标题（非 null 时更新标题；任务开始时传）
-         * @param step 当前执行步骤描述（非 null 且与最近一步不同时追加）
+         * @param step 一节正文收尾时的小段总结（非 null 且与最近一步不同时追加进 steps 列表）
+         * @param livePreview 当前正在流式生成的正文预览（首行截断）；
+         *   传 null 时不动已有预览；传 "" 时清空预览（一节收尾、切到工具调用等）。
+         *   livePreview 不进 steps 列表——只覆盖通知正文，给用户实时看到 AI 正在写什么。
          */
-        fun updateTaskProgress(sessionId: String, title: String?, step: String?) {
+        fun updateTaskProgress(sessionId: String, title: String?, step: String?, livePreview: String? = null) {
             val current = taskProgressState.value[sessionId]
             val nextTitle = title ?: current?.title ?: ""
             val nextSteps = when {
@@ -296,8 +313,20 @@ class TerminalKeepaliveService : Service() {
                     (it + step).takeLast(MAX_TASK_STEPS_KEPT)
                 }
             }
+            val nextPreview = when {
+                livePreview == null -> current?.livePreview
+                livePreview.isEmpty() -> null
+                else -> livePreview
+            }
+            // 增量去重：title/steps/preview 三项全部未变时跳过 emission，
+            // 避免 delta 期间每秒 ~16 次无意义的 Map 复制 + collect 触发。
+            if (current != null &&
+                current.title == nextTitle &&
+                current.steps == nextSteps &&
+                current.livePreview == nextPreview
+            ) return
             taskProgressState.value =
-                taskProgressState.value + (sessionId to AgentTaskProgress(nextTitle, nextSteps))
+                taskProgressState.value + (sessionId to AgentTaskProgress(nextTitle, nextSteps, nextPreview))
         }
 
         /** 任务收工：移除进度条目（服务侧通知随之回退为普通保活文案）。 */

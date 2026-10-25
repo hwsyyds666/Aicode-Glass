@@ -51,6 +51,11 @@ class DelegatingFileAccess @Inject constructor(
 
     override suspend fun listFiles(path: String): List<FileEntry> = delegate().listFiles(path)
 
+    /** 转发轻量版文件列表：浏览列表时跳过 size/lastModified/permissions 等系统调用，
+     *  大目录下显著减少 stat 次数。不覆写则走接口默认实现（退化到完整 listFiles）。 */
+    override suspend fun listFilesForBrowse(path: String): List<FileEntry> =
+        delegate().listFilesForBrowse(path)
+
     override suspend fun listFilesRecursive(path: String, maxDepth: Int): List<String> =
         delegate().listFilesRecursive(path, maxDepth)
 

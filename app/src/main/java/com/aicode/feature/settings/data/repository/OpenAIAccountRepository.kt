@@ -1165,9 +1165,13 @@ class OpenAIAccountRepository @Inject constructor(
             !OpenAIOAuthProtocol.planUsageGranted(account.scopesAsSet())
     }
 
-    /** 档位硬约束命中：账号是免费档，而模型在它的目录里标记为付费专属。 */
+    /** 档位硬约束命中：账号是免费档，而模型在它的目录里标记为付费专属。
+     *  账号自己的目录为空（未拉取/拉取失败）时退回内置目录做 paidOnly 判定，
+     *  与 [resolveAccountTarget] 同口径，避免空目录让付费专属模型漏过档位检查。 */
     private fun isTierBlocked(account: OpenAIAccountEntity, model: String): Boolean =
-        decodeModelCatalog(account.modelCatalogJson).firstOrNull { it.slug == model }?.paidOnly == true &&
+        decodeModelCatalog(account.modelCatalogJson)
+            .ifEmpty { defaultAccountModels(account.planType) }
+            .firstOrNull { it.slug == model }?.paidOnly == true &&
             isFreePlan(account.planType)
 
     /**
@@ -1184,8 +1188,11 @@ class OpenAIAccountRepository @Inject constructor(
         // An empty catalog (e.g. the model list endpoint was unreachable at login) must not
         // block chatting: accept the requested model and let the upstream call fail if it is real.
         if (modelSet.isNotEmpty() && model !in modelSet) return null
-        // 付费专属模型不路由给免费账号（免费号打过去上游必然拒绝）
-        if (catalog.firstOrNull { it.slug == model }?.paidOnly == true && isFreePlan(account.planType)) return null
+        // 付费专属模型不路由给免费账号（免费号打过去上游必然拒绝）。
+        // 账号自己的目录为空（未拉取/拉取失败）时退回内置目录做 paidOnly 判定——
+        // 否则空目录会让付费专属模型漏过档位检查，被错误地路由给免费号。
+        val paidOnlyCatalog = catalog.ifEmpty { defaultAccountModels(account.planType) }
+        if (paidOnlyCatalog.firstOrNull { it.slug == model }?.paidOnly == true && isFreePlan(account.planType)) return null
         val token = try {
             accessToken(account.id)
         } catch (cancelled: CancellationException) {
@@ -1222,9 +1229,12 @@ class OpenAIAccountRepository @Inject constructor(
             }
         }
         val candidates = accounts.filter { it.id != excludeAccountId && !isUserVisibleBlocked(it) }
-        // 任一账号目录把该模型标为付费专属，就按付费专属调度（保守：避免路由到会被上游拒绝的免费号）
+        // 任一账号目录把该模型标为付费专属，就按付费专属调度（保守：避免路由到会被上游拒绝的免费号）。
+        // 账号自己的目录为空时退回内置目录做 paidOnly 判定（与 resolveAccountTarget 同口径）。
         val modelPaidOnly = candidates.any { account ->
-            decodeModelCatalog(account.modelCatalogJson).firstOrNull { it.slug == model }?.paidOnly == true
+            decodeModelCatalog(account.modelCatalogJson)
+                .ifEmpty { defaultAccountModels(account.planType) }
+                .firstOrNull { it.slug == model }?.paidOnly == true
         }
         val ordered = OpenAIAccountSelectionPolicy.orderFallbackCandidates(
             candidates.map { OpenAIAccountSelectionPolicy.FallbackCandidate(it.id, isFreePlan(it.planType)) },
@@ -1544,11 +1554,18 @@ class OpenAIAccountRepository @Inject constructor(
                 val model = items.optJSONObject(index) ?: continue
                 val slug = model.optString("slug").trim()
                 if (slug.isEmpty()) continue
+                // 已停售/退役的模型不再展示在模型选择器里
+                if (slug in DEPRECATED_MODEL_SLUGS) continue
                 // 对齐 cockpit 的 parse_models：只保留 visibility 恰为 "list" 的条目
                 if (model.optString("visibility").trim() != "list") continue
+                // 端点可能带 status 字段标记模型生命周期：deprecated/sunset/retired/end_of_life 一律跳过
+                val status = model.optString("status").trim().lowercase()
+                if (status in DEPRECATED_MODEL_STATUSES) continue
                 // available_in_plans 非空且不含 free = 付费专属（额度调度标记，不用于过滤展示）
                 val plans = model.optJSONArray("available_in_plans")
-                val planNames = (0 until (plans?.length() ?: 0)).map { plans.optString(it).trim().lowercase() }
+                val planNames = plans?.let { arr ->
+                    (0 until arr.length()).map { arr.optString(it).trim().lowercase() }
+                } ?: emptyList()
                 val paidOnly = plans != null && plans.length() > 0 && "free" !in planNames
                 add(OpenAIOAuthProtocol.ModelCatalogEntry(
                     slug = slug,
@@ -1750,6 +1767,8 @@ class OpenAIAccountRepository @Inject constructor(
                 val item = items.optJSONObject(index) ?: continue
                 val slug = item.optString("slug").trim()
                 val display = item.optString("display_name").trim()
+                // 已停售/退役的模型不展示（旧目录里存了也会被清掉）
+                if (slug in DEPRECATED_MODEL_SLUGS) continue
                 // 旧版目录没有 paid_only 字段：缺省按免费档处理（保守，避免误拦免费号）
                 val paidOnly = item.optBoolean("paid_only", false)
                 if (slug.isNotEmpty() && display.isNotEmpty()) add(OpenAIAccountModel(slug, display, paidOnly))
@@ -1881,8 +1900,20 @@ class OpenAIAccountRepository @Inject constructor(
             OpenAIAccountModel("gpt-5.4", "GPT-5.4", paidOnly = false),
             OpenAIAccountModel("gpt-5.4-mini", "GPT-5.4 Mini", paidOnly = false),
             OpenAIAccountModel("gpt-5.3-codex", "GPT-5.3 Codex", paidOnly = false),
-            OpenAIAccountModel("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", paidOnly = false),
-            OpenAIAccountModel("gpt-reserve", "GPT Reserve", paidOnly = true)
+            OpenAIAccountModel("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", paidOnly = false)
+        )
+
+        /**
+         * 已停售/退役的模型 slug：端点返回也好、内置目录也罢，一律不展示在模型选择器。
+         * 新增绝版模型时在此追加即可，[fetchModelCatalog] 与 [ACCOUNT_MODELS_CATALOG] 都会过滤。
+         */
+        private val DEPRECATED_MODEL_SLUGS: Set<String> = setOf(
+            "gpt-reserve"  // Reserve 是限量/临时模型，已停售
+        )
+
+        /** 端点 status 字段标记模型已退役的取值（小写匹配）。 */
+        private val DEPRECATED_MODEL_STATUSES: Set<String> = setOf(
+            "deprecated", "sunset", "retired", "end_of_life", "eol", "discontinued"
         )
 
         /**

@@ -380,9 +380,14 @@ class SettingsViewModel @Inject constructor(
     val accountModelInfo: StateFlow<Map<String, AccountModelInfo>> = openAIAccountRepository.observeAccounts()
         .map { accounts ->
             accounts.associate { account ->
+                // 账号自己的目录为空（未拉取/拉取失败）时退回内置目录，
+                // 保证模型选择器 paidOnly 判定不因空目录漏过付费专属模型。
+                val models = account.models.ifEmpty {
+                    com.aicode.feature.settings.data.repository.OpenAIAccountRepository.defaultAccountModels(account.planType)
+                }
                 account.providerId to AccountModelInfo(
                     planType = account.planType,
-                    paidOnlyBySlug = account.models.associate { it.slug to it.paidOnly }
+                    paidOnlyBySlug = models.associate { it.slug to it.paidOnly }
                 )
             }
         }

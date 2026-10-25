@@ -249,6 +249,11 @@ class GenerateImageTool @Inject constructor(
         val config = aiProviderRepository.getProviderById(providerId)
             ?: throw IllegalStateException("生图模型配置的供应商不存在或已被删除，请到「设置 → 默认模型 → 生图模型」重新选择。")
         if (!config.isEnabled) throw IllegalStateException("生图模型配置的供应商「${config.name}」未启用。")
+        // ChatGPT 账号不支持 OpenAI Images API：apiKey 是标记型（aicode-openai-account:<id>），
+        // baseUrl 指向 Codex 后端，调用 /v1/images/generations 会 404。
+        if (com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(config)) {
+            throw IllegalStateException("ChatGPT 账号模型不支持生图，请在「设置 → 默认模型 → 生图模型」中选择标准 API 供应商的图像模型（如 gpt-image-1 / dall-e-3）。")
+        }
         if (!config.hasUsableApiKey) throw IllegalStateException("生图模型配置的供应商「${config.name}」未填写 API Key。")
         return config.copy(selectedModel = model)
     }

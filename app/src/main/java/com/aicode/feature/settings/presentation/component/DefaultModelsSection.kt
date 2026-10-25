@@ -469,10 +469,16 @@ internal fun DefaultModelsSection(
     }
 
     if (showImageGenSheet) {
+        // ChatGPT 账号不支持 OpenAI Images API（/v1/images/generations）：
+        // apiKey 是标记型（aicode-openai-account:<id>），baseUrl 指向 Codex 后端，
+        // 调用 images 端点会返回 404。生图模型选择器只展示标准 API 供应商。
+        val imageGenProviders = providers.filterNot {
+            com.aicode.feature.settings.data.repository.OpenAIAccountRepository.isAccountProvider(it)
+        }
         ModelSelectionSheet(
             title = stringResource(R.string.settings_image_gen_model),
             noModelsText = stringResource(R.string.image_gen_no_models),
-            providers = providers,
+            providers = imageGenProviders,
             currentProviderId = imageGenProviderId,
             currentModel = imageGenModel,
             modelMetadata = modelMetadata,
@@ -979,11 +985,12 @@ internal fun ModelSelectionSheet(
                                                 else -> null
                                             }
                                             // 选中模型时按额度调度语义落到最合适的账号：
-                                            // 付费专属→第一个非 free 档账号；免费模型→第一个 free 档账号（没有则用首个）
+                                            // 付费专属→第一个非 free 档账号（planType 为 null 时保守视为可能付费，纳入候选）；
+                                            // 免费模型→第一个 free 档账号（没有则用首个）
                                             val selectedAccount = if (entry.paidOnly) {
                                                 entry.providerIds.firstOrNull { id_p ->
                                                     accountModelInfo[id_p]?.planType
-                                                        ?.equals("free", ignoreCase = true) == false
+                                                        ?.equals("free", ignoreCase = true) != true
                                                 } ?: entry.providerIds.first()
                                             } else {
                                                 entry.providerIds.firstOrNull { id_p ->

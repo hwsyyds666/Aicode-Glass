@@ -38,6 +38,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -81,6 +82,8 @@ import compose.icons.feathericons.FileText
 import compose.icons.feathericons.Search
 import compose.icons.feathericons.Terminal
 import compose.icons.feathericons.Tool
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -113,10 +116,10 @@ internal val DiffRemoveText: Color
 internal const val DIFF_COLLAPSE_THRESHOLD = 20
 internal const val TOOL_SECTION_LINE_LIMIT = 20
 
-/** 静态（非 live）工具输出渲染的字符上限：视口限高 240dp 本就看不完超长输出，但
- *  Text 会按全文做布局测量（O 字符数）——50KB 输出的卡片滚入视口时单次布局可达 10ms+，
- *  是快速滑动聊天记录时组合尖峰/掉帧的直接来源。超限截断展示，完整内容走原始记录。 */
-private const val TOOL_SECTION_CHAR_LIMIT = 16_000
+/** 静态（非 live）工具输出渲染的字符上限：Text 会按全文做布局测量（O 字符数），
+ *  50KB 输出的卡片滚入视口时单次布局可达 10ms+，是快速滑动聊天记录时组合尖峰/掉帧
+ *  的直接来源。降到 8K 在保证可读性的前提下显著降低布局开销。 */
+private const val TOOL_SECTION_CHAR_LIMIT = 8_000
 private const val TOOL_ERROR_SUMMARY_INPUT_LIMIT = 4_096
 private const val TOOL_ERROR_SUMMARY_CHAR_LIMIT = 140
 private val JSON_ERROR_MESSAGE = Regex(""""message"\s*:\s*"((?:\\.|[^"\\])*)"""")
@@ -151,45 +154,54 @@ internal fun ToolMessageBody(
 ) {
     val streaming = liveOutput != null
     val running = message.isToolRunning(liveOutput)
-    val edit = if (!running && !message.isError &&
-        (message.toolName == "editFile" || message.toolName == "writeFile")
-    ) {
-        remember(message.id, message.content) { parseEditDiff(message.content) }
-    } else null
+    val effectiveExpanded = expandedOverride == true
 
-    val resultText = if (!running) {
+    // ── 异步解析：JSON 解析移出主线程 ──
+    // 工具结果内容（message.content）可达数万字符，parseEditDiff / formatToolResult /
+    // parseTodoResult / parseWebSearchResult / parseToolNotifications 内部都调用
+    // Json.parseToJsonElement()，在 remember{} 里同步执行会阻塞组合达 10-50ms。
+    // 改用 produceState 在后台线程解析：首帧渲染时值为 null/空，解析完成后（1-2 帧后）
+    // 自动更新 UI。滚动时不再因首次组合而卡顿。
+    // 注意：用 .value 而非 by 委托，因为 Kotlin smart cast 不能用于委托属性。
+    val edit = produceState<EditDiff?>(null, message.id, message.content, running, message.isError) {
+        if (!running && !message.isError &&
+            (message.toolName == "editFile" || message.toolName == "writeFile")
+        ) {
+            value = withContext(Dispatchers.Default) { parseEditDiff(message.content) }
+        }
+    }.value
+    val todoData = produceState<ParsedTodoResult?>(null, message.id, message.content, running, message.isError, message.toolName) {
+        if (message.toolName == "todo" && !running && !message.isError) {
+            value = withContext(Dispatchers.Default) { parseTodoResult(message.content) }
+        }
+    }.value
+    // notifications 在折叠态也常显（后台任务/子代理完成通知），异步解析避免阻塞
+    val notifications = produceState<List<ToolNotificationInfo>>(emptyList(), message.id, message.content, running) {
+        if (!running) {
+            value = withContext(Dispatchers.Default) { parseToolNotifications(message.content) }
+        }
+    }.value
+    // 仅展开时才解析的结果文本/网页搜索结果（折叠态不需要，省掉一次重解析）
+    val resultText = if (effectiveExpanded && !running) {
         remember(message.id, message.content) { formatToolResult(message.content) }
     } else null
+    val webSearchData = if (effectiveExpanded && message.toolName == "websearch" && !running && !message.isError) {
+        remember(message.id, message.content) { parseWebSearchResult(message.content) }
+    } else null
+    // 工具参数（toolArgs）通常很小（几百字符），格式化开销可忽略
     val argHint = remember(message.toolArgs) { toolArgHint(message.toolArgs) }
     val argsFull = remember(message.toolArgs) { formatToolArgs(message.toolArgs) }
 
-    val todoData = if (message.toolName == "todo" && !running && !message.isError) {
-        remember(message.id, message.content) { parseTodoResult(message.content) }
-    } else null
-    val webSearchData = if (message.toolName == "websearch" && !running && !message.isError) {
-        remember(message.id, message.content) { parseWebSearchResult(message.content) }
-    } else null
-    // 后台任务/子代理完成通知：搭车在本次工具结果里送给 AI 的，同时常显给用户看。
-    val notifications = if (!running) {
-        remember(message.id, message.content) { parseToolNotifications(message.content) }
-    } else emptyList()
-
     // 执行中也可折叠/展开（如 bash 刷屏时可收起只看标题行），无论当前是否有输出；无输出时折叠态无内容，但保持可点击与箭头一致
     val hasLiveOutput = !liveOutput.isNullOrBlank()
-    val expandable = streaming || (!running && (edit != null || !resultText.isNullOrBlank() || !argsFull.isNullOrBlank()
-            || (todoData != null && todoData.items.isNotEmpty()) || webSearchData != null))
-    // 工具调用一律默认收起（差异卡、待办卡也不例外）：要不要看细节由用户点开，
-    // 手动开关过（expandedOverride 非 null）就以用户的选择为准。展开态由宿主保管，
-    // 因此滚出视口、切页返回都不会再丢。
-    val effectiveExpanded = expandedOverride == true
+    // 轻量 expandable 判定：不再依赖解析结果（避免因异步值为 null 而误判不可展开）；
+    // 只要工具已结束且有内容/参数，即可展开。
+    val expandable = streaming || (!running && (!message.content.isNullOrBlank() || !message.toolArgs.isNullOrBlank()))
 
     val toolLabel = message.toolName ?: stringResource(R.string.common_tool)
-    // 文件相关工具：从结构化 diff 或工具参数里取路径，统一按「工具名 + 路径 + 文件名」展示
-    val filePath = if (edit != null) {
-        edit.path
-    } else {
-        remember(message.toolArgs) { extractFilePathArg(message.toolArgs) }
-    }
+    // 文件路径：优先从工具参数提取（轻量），edit 异步就绪后更新
+    val filePath = if (edit != null) edit.path
+        else remember(message.toolArgs) { extractFilePathArg(message.toolArgs) }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
@@ -743,9 +755,16 @@ internal fun DiffView(diff: String, startLine: Int) {
     val mono = MaterialTheme.typography.bodySmall.copy(
         fontFamily = FontFamily.Monospace
     )
-    val removeCount = lines.count { it.startsWith("-") }
-    val addCount = lines.count { it.startsWith("+") }
-    val maxLineNo = startLine + lines.size - removeCount - addCount + maxOf(removeCount, addCount)
+    // 统计行数：缓存到 remember，避免每次重组都遍历全部行（数百行时开销可观）
+    val stats = remember(lines) {
+        val removeCount = lines.count { it.startsWith("-") }
+        val addCount = lines.count { it.startsWith("+") }
+        val maxLineNo = startLine + lines.size - removeCount - addCount + maxOf(removeCount, addCount)
+        Triple(removeCount, addCount, maxLineNo)
+    }
+    val removeCount = stats.first
+    val addCount = stats.second
+    val maxLineNo = stats.third
     val gutterChars = maxOf(2, maxLineNo.toString().length)
     val gutterColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
 

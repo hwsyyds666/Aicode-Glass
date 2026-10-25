@@ -190,9 +190,13 @@ class AIAgentViewModel @Inject constructor(
         openAIAccountRepository.observeAccounts()
             .map { accounts ->
                 accounts.associate { account ->
+                    // 账号自己的目录为空时退回内置目录，保证 paidOnly 判定不漏过付费专属模型。
+                    val models = account.models.ifEmpty {
+                        com.aicode.feature.settings.data.repository.OpenAIAccountRepository.defaultAccountModels(account.planType)
+                    }
                     account.providerId to com.aicode.feature.settings.presentation.component.AccountModelInfo(
                         planType = account.planType,
-                        paidOnlyBySlug = account.models.associate { it.slug to it.paidOnly }
+                        paidOnlyBySlug = models.associate { it.slug to it.paidOnly }
                     )
                 }
             }
@@ -701,7 +705,11 @@ class AIAgentViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     private fun setStreamingText(sessionId: String, text: String?) {
-        _streamingTexts.value = if (text == null) _streamingTexts.value - sessionId else _streamingTexts.value + (sessionId to text)
+        // 增量去重：相同值不触发 emission，避免 delta 期间每秒 ~16 次 Map 复制 + 重组
+        val current = _streamingTexts.value[sessionId]
+        if (text == current) return
+        _streamingTexts.value = if (text == null) _streamingTexts.value - sessionId
+        else _streamingTexts.value + (sessionId to text)
     }
 
     private val _reasoningTimings = MutableStateFlow<Map<String, Pair<Long, Long?>>>(emptyMap())
@@ -720,8 +728,11 @@ class AIAgentViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     private fun setStreamingReasoning(sessionId: String, text: String?) {
-        if (text == null) _reasoningTimings.value = _reasoningTimings.value - sessionId
-        _streamingReasonings.value = if (text == null) _streamingReasonings.value - sessionId else _streamingReasonings.value + (sessionId to text)
+        // 增量去重 + 修复：清空 reasoning 文本不应清空 reasoning timings（timings 在 finishReasoning / 会话重置时管理）
+        val current = _streamingReasonings.value[sessionId]
+        if (text == current) return
+        _streamingReasonings.value = if (text == null) _streamingReasonings.value - sessionId
+        else _streamingReasonings.value + (sessionId to text)
     }
 
     /** 按 sessionId 维护的重试状态；流式恢复或结束后置 null。 */
@@ -836,15 +847,59 @@ class AIAgentViewModel @Inject constructor(
     }
 
     // ── 通知栏任务进度 ──
-    // 每个会话只记录「最近一次推给通知的步骤文本」：流式 delta（思考/正文）每个 chunk 都
-    // 到达一次，但步骤文本不变，去重后一个阶段只推一次通知更新，避免通知被 delta 刷爆。
+    // 每个会话只记录「最近一次推给通知的步骤文本」：一节正文收尾时的小段总结去重，
+    // 避免相邻两节内容雷同时通知反复刷。
     private val lastPushedTaskStep = mutableMapOf<String, String>()
+    // 流式实时预览的时间窗口节流：同一会话 200ms 内只推一次，
+    // 避免 delta 期间每秒 ~16 次 SSE chunk 刷爆通知栏（通知重建+startForeground 系统调用）。
+    // 200ms = 用户在通知栏看到 AI 实时输出的体感阈值，再快人眼也分不清。
+    private val lastPushedPreviewTime = mutableMapOf<String, Long>()
+    private val lastPushedPreviewText = mutableMapOf<String, String>()
 
-    /** 推进通知栏里的任务步骤；与上一步相同则忽略（StateFlow 内部也会再挡一层）。 */
+    /** 推进通知栏里的任务步骤（一节正文的小段总结）；与上一步相同则忽略。 */
     private fun pushTaskStep(sessionId: String, step: String) {
         if (lastPushedTaskStep[sessionId] == step) return
         lastPushedTaskStep[sessionId] = step
-        TerminalKeepaliveService.updateTaskProgress(sessionId, title = null, step = step)
+        // 写 steps 列表的同时清掉 livePreview：这节正文已收尾，实时预览让位给小结
+        TerminalKeepaliveService.updateTaskProgress(sessionId, title = null, step = step, livePreview = "")
+    }
+
+    /**
+     * 推送流式实时预览到通知栏正文（不进 steps 列表）。
+     * 每收到一个 delta 就覆盖更新，让用户在通知栏实时看到 AI 正在写什么。
+     * 传 null 清空预览（切到工具调用等场景）。
+     *
+     * 节流：200ms 时间窗口 + 增量去重（相同文本不重复推）。
+     * delta 期间每秒 ~16 次 SSE chunk，不做节流会让通知重建+startForeground 系统调用
+     * 刷爆主线程——这是 1.1.0 引入通知栏进度后全局卡顿的直接元凶。
+     */
+    private fun pushTaskLivePreview(sessionId: String, preview: String?) {
+        val now = System.currentTimeMillis()
+        val text = preview?.takeIf { it.isNotBlank() } ?: ""
+        // 增量去重：文本相同则跳过（delta 的首行总结在一节内往往不变）
+        if (lastPushedPreviewText[sessionId] == text && text.isNotEmpty()) return
+        // 时间窗口：200ms 内同会话只推一次
+        val lastTime = lastPushedPreviewTime[sessionId] ?: 0L
+        if (now - lastTime < 200 && text.isNotEmpty()) return
+        lastPushedPreviewText[sessionId] = text
+        lastPushedPreviewTime[sessionId] = now
+        TerminalKeepaliveService.updateTaskProgress(
+            sessionId,
+            title = null,
+            step = null,
+            livePreview = text
+        )
+    }
+
+    /**
+     * 把一节正文提炼成通知栏小段总结：取首个非空行，超长截断加省略号。
+     * 一节正文往往就是 AI 对当前要做的事情的一句话说明（"我来搜索…"、"找到了，现在编辑…"），
+     * 取首行即是对 AI 当前意图的最佳概括。
+     */
+    private fun summarizeForNotification(content: String): String {
+        val firstLine = content.lines().firstOrNull { it.isNotBlank() }?.trim() ?: return ""
+        return if (firstLine.length <= NOTIFICATION_SUMMARY_MAX) firstLine
+        else firstLine.take(NOTIFICATION_SUMMARY_MAX) + "…"
     }
 
     /** 任务收工：清掉通知栏进度条目与去重记录（通知随即回退为普通保活文案）。 */
@@ -909,6 +964,8 @@ class AIAgentViewModel @Inject constructor(
         const val MAX_DELETE_CASCADE_STABILIZATION_ATTEMPTS = 3
         const val AGENT_COMPLETE_CHANNEL = "agent_complete"
         const val AGENT_COMPLETE_NOTIFICATION_ID = 100
+        /** 通知栏小段总结最大字符数：超长截断加省略号，保证通知正文一行能看完。 */
+        const val NOTIFICATION_SUMMARY_MAX = 48
         /** wakeLock 超时保险：构建、装依赖类工具动辄十几分钟，给足 60 分钟；任务正常结束会主动释放。 */
         const val KEEPALIVE_TIMEOUT_MS = 60 * 60 * 1000L
         /** 从后台任务通知文本中提取 <title> 内容，供系统通知正文展示。 */
@@ -1466,7 +1523,8 @@ class AIAgentViewModel @Inject constructor(
         setAgentState(sessionId, AgentUIState.Streaming)
         acquireKeepalive()
         // 通知栏任务进度：注册任务标题（复用会话标题的截断规则），初始步骤为「准备中」。
-        // 每一步的推进由 Reasoning/Assistant/ToolCall 事件分别推进，见 pushTaskStep。
+        // 流式生成中由 AssistantDelta 推实时预览到通知正文；每节正文收尾（AssistantText）
+        // 把小段总结写进 steps 列表；工具调用不写 steps，清掉预览让上一节小结继续展示。
         lastPushedTaskStep.remove(sessionId)
         TerminalKeepaliveService.updateTaskProgress(
             sessionId,
@@ -1580,19 +1638,27 @@ class AIAgentViewModel @Inject constructor(
                         if (event.accumulated.hasVisibleContent()) finishReasoning()
                         setRetryState(sessionId, null)
                         setKeySwitchState(sessionId, null)
-                        pushTaskStep(sessionId, context.getString(R.string.notification_agent_task_generating))
+                        // 通知栏实时预览：把正在生成的正文首行截断推给通知，
+                        // 用户在通知栏就能看到 AI 此刻在写什么，不必回到 App。
+                        if (event.accumulated.hasVisibleContent()) {
+                            pushTaskLivePreview(sessionId, summarizeForNotification(event.accumulated))
+                        }
                         setStreamingText(sessionId, event.accumulated)
                     }
                     is AgentEvent.ReasoningDelta -> {
                         setRetryState(sessionId, null)
                         setKeySwitchState(sessionId, null)
-                        pushTaskStep(sessionId, context.getString(R.string.notification_agent_task_thinking))
+                        // 思考中作为实时预览（不进 steps 列表：思维链不是用户要看的「小结」）
+                        pushTaskLivePreview(sessionId, context.getString(R.string.notification_agent_task_thinking))
+                        // timing 只在 start 首次设置时写一次：delta 期间 start/end 不变，
+                        // 重复写入相同值只会触发 StateFlow emission + Map 复制 + Compose 重组。
+                        // end timestamp 在 finishReasoning 里补写。
                         if (currentReasoningStart == null) {
                             currentReasoningStart = System.currentTimeMillis()
                             currentReasoningEnd = null
+                            _reasoningTimings.value = _reasoningTimings.value +
+                                (sessionId to (currentReasoningStart!! to currentReasoningEnd))
                         }
-                        _reasoningTimings.value = _reasoningTimings.value +
-                            (sessionId to (currentReasoningStart!! to currentReasoningEnd))
                         setStreamingReasoning(sessionId, event.accumulated)
                     }
                     is AgentEvent.ToolCallPreparing -> {
@@ -1667,6 +1733,10 @@ class AIAgentViewModel @Inject constructor(
                         if (reasoningDuration != null && reasoningDuration > 0) {
                             reasoningDurations[msgId] = reasoningDuration
                         }
+                        // 通知栏：一节正文收尾，把首行小段总结写进 steps 列表（用户展开通知看到的
+                        // 全是 AI 各节说了什么，而不是调了什么工具）；同时清掉流式实时预览。
+                        val summary = summarizeForNotification(normalized)
+                        if (summary.isNotEmpty()) pushTaskStep(sessionId, summary)
                         messagePersistenceUseCase.persist(
                             sessionId,
                             MessageRole.ASSISTANT,
@@ -1698,11 +1768,9 @@ class AIAgentViewModel @Inject constructor(
                         val msgId = "tool_${event.id}"
                         setStreamingText(sessionId, null)
                         setPreparingTool(sessionId, null)
-                        // 通知栏步骤推进：每个工具调用计一步（工具名即步骤名）
-                        pushTaskStep(
-                            sessionId,
-                            context.getString(R.string.notification_agent_task_step, event.toolName)
-                        )
+                        // 通知栏：工具调用不写进 steps（用户要看到的是 AI 各节说了什么，
+                        // 不是调了什么工具）。清掉流式实时预览，让上一节小结继续展示在通知正文。
+                        pushTaskLivePreview(sessionId, null)
                         toolArgsByMsgId[msgId] = event.argsPreview
                         messagePersistenceUseCase.persist(
                             sessionId,

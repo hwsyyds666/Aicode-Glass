@@ -50,7 +50,7 @@ class SearchCodeTool @Inject constructor(
 
     private companion object {
         const val TAG = "SearchTool"
-        const val SEARCH_TIMEOUT_MS = 30_000L
+        const val SEARCH_TIMEOUT_MS = 120_000L
 
         /** 容器内工作区挂载点：与 LinuxContainerEngine.buildBaseProotArgv 的 bind 目标一致。 */
         const val CONTAINER_WORKSPACE = "/root/workspace"

@@ -35,8 +35,8 @@ class WebSearchTool @Inject constructor() : AgentTool() {
         // 与对话等其它 HTTP 请求保持一致；lazy 确保 client 在 applyGlobal 之后首次构建。
         val client by lazy {
             OkHttpClient.Builder()
-                .connectTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(30, TimeUnit.SECONDS)
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(120, TimeUnit.SECONDS)
                 .proxyAuthenticator(com.aicode.core.net.AppProxy.okHttpAuthenticator)
                 .build()
         }

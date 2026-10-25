@@ -102,7 +102,7 @@ class WebFetchTool @Inject constructor() : AgentTool() {
                 // 3xx 重定向默认即跟随，显式声明；限制响应体大小避免超大页面吃满内存
                 .followRedirects(true)
                 .maxBodySize(5 * 1024 * 1024) // 5MB
-                .timeout(15000) // 15秒超时
+                .timeout(120000) // 2分钟超时
                 .ignoreContentType(true)
                 .get()
         } catch (e: org.jsoup.HttpStatusException) {
@@ -114,7 +114,7 @@ class WebFetchTool @Inject constructor() : AgentTool() {
             throw FetchException("不支持的响应 MIME 类型：${e.getMimeType()}")
         } catch (e: java.net.SocketTimeoutException) {
             FileLogger.e(TAG, "请求超时: $url", e)
-            throw FetchException("请求超时（15 秒内无响应）")
+            throw FetchException("请求超时（120 秒内无响应）")
         } catch (e: java.net.UnknownHostException) {
             FileLogger.e(TAG, "DNS 解析失败: $url", e)
             throw FetchException("无法解析主机名：${url}")
