@@ -47,7 +47,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -717,16 +716,15 @@ fun AIChatPanel(
     val currentMode by viewModel.currentSessionMode.collectAsStateWithLifecycle()
     val slashCommands by viewModel.slashCommands.collectAsStateWithLifecycle()
 
-    var inputText by remember(currentSessionId) { mutableStateOf("") }
-    val inputDraft by viewModel.inputDraft.collectAsStateWithLifecycle()
-    val latestInputText by rememberUpdatedState(inputText)
-    LaunchedEffect(currentSessionId, inputDraft) {
-        if (currentSessionId != null && inputText != inputDraft) inputText = inputDraft
-    }
-    DisposableEffect(currentSessionId) {
-        onDispose {
-            viewModel.updateInputDraft(currentSessionId, latestInputText)
-        }
+    // 输入框草稿：以「每次击键即存」（onValueChange → updateInputDraft 落盘 SharedPreferences）为唯一事实来源，
+    // 切会话/切页回来直接查草稿表取初值。
+    // 不再走 StateFlow 同步初值：flatMapLatest 的会话切换是异步的，切换瞬间流里还是上一个会话的
+    // 旧草稿，会把旧草稿闪进新会话输入框。
+    // 不再保留旧的 DisposableEffect(onDispose flush) 兜底：onDispose 在【新组合之后】才执行，
+    // 那时 latestInputText 已被上面的 remember(currentSessionId) 重置为 ""，flush 反而会把
+    // 刚离开的会话草稿清空——这正是「切走再回来输入框文字消失」的根因。
+    var inputText by remember(currentSessionId) {
+        mutableStateOf(currentSessionId?.let { viewModel.draftOf(it) }.orEmpty())
     }
     // 输入 "/" 打开命令菜单时重扫技能，反映磁盘上技能的增删改。
     LaunchedEffect(inputText) {
@@ -2036,6 +2034,7 @@ fun AIChatPanel(
                             viewModel.dismissRewindConfirmation()
                             viewModel.executeRewindOption(confirmation.messageId, confirmation.option) { text, attachments ->
                                 inputText = text
+                                viewModel.updateInputDraft(currentSessionId, text)
                                 pendingAttachments = attachments.map { it.toPendingAttachment() }
                             }
                         }) {
@@ -2088,6 +2087,7 @@ fun AIChatPanel(
                         if (message.role == MessageRole.USER) {
                             viewModel.editUserMessageAndResend(message.id, newContent) { text, attachments ->
                                 inputText = text
+                                viewModel.updateInputDraft(currentSessionId, text)
                                 pendingAttachments = attachments.map { it.toPendingAttachment() }
                             }
                         } else {

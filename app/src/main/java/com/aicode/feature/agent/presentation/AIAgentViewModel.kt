@@ -279,6 +279,9 @@ class AIAgentViewModel @Inject constructor(
             (v as? String)?.takeIf { it.isNotEmpty() }?.let { k to it }
         }.toMap()
     )
+    /** 草稿防抖落盘簿记：有待写盘的会话 id + 当前防抖任务（见 DRAFT_PERSIST_DEBOUNCE_MS）。 */
+    private val dirtyDraftIds = mutableSetOf<String>()
+    private var draftPersistJob: Job? = null
     val inputDraft: StateFlow<String> = _currentSessionId
         .flatMapLatest { id ->
             if (id == null) flowOf("") else _inputDrafts.map { it[id].orEmpty() }
@@ -289,18 +292,38 @@ class AIAgentViewModel @Inject constructor(
         updateInputDraft(_currentSessionId.value, text)
     }
 
-    /** Save a draft for an explicit session so a composable can flush it while it is leaving the screen. */
+    /**
+     * 保存指定会话的输入框草稿。内存 Map 立即更新（切会话/回页面时 [draftOf] 同步查表零延迟），
+     * 磁盘落盘走 300ms 防抖合并：打字时每击键一次 editor.apply() 会带来高频的
+     * SharedPreferences 内存快照克隆（调用线程=主线程）+ XML 全文件序列化磁盘写（IO 线程），
+     * 是输入期间可感知的持续负载。防抖窗口内的多次修改合并为一次写。
+     */
     fun updateInputDraft(sessionId: String?, text: String) {
         val id = sessionId?.takeIf(String::isNotBlank) ?: return
-        val editor = draftPrefs.edit()
-        if (text.isEmpty()) {
-            _inputDrafts.value = _inputDrafts.value - id
-            editor.remove(id)
-        } else {
-            _inputDrafts.value = _inputDrafts.value + (id to text)
-            editor.putString(id, text)
+        _inputDrafts.value = if (text.isEmpty()) _inputDrafts.value - id
+        else _inputDrafts.value + (id to text)
+        synchronized(dirtyDraftIds) { dirtyDraftIds += id }
+        draftPersistJob?.cancel()
+        draftPersistJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(DRAFT_PERSIST_DEBOUNCE_MS)
+            val ids: List<String>
+            synchronized(dirtyDraftIds) {
+                ids = dirtyDraftIds.toList()
+                dirtyDraftIds.clear()
+            }
+            if (ids.isEmpty()) return@launch
+            runCatching {
+                val editor = draftPrefs.edit()
+                // 读当前快照而非闭包里的 text：取消-重启的旧任务可能带着别的会话的脏标记，
+                // 永远以最新值为准；已被删除/清空的会话读到 null → remove（幂等）。
+                val snapshot = _inputDrafts.value
+                for (sid in ids) {
+                    val t = snapshot[sid]
+                    if (t.isNullOrEmpty()) editor.remove(sid) else editor.putString(sid, t)
+                }
+                editor.apply()
+            }
         }
-        editor.apply()
     }
 
     fun clearInputDraft() {
@@ -308,6 +331,16 @@ class AIAgentViewModel @Inject constructor(
         _inputDrafts.value = _inputDrafts.value - id
         draftPrefs.edit().remove(id).apply()
     }
+
+    /**
+     * 草稿表同步快照读取（内存 Map 查询，零开销、不挂起）。
+     *
+     * 给输入框在会话切换时取初值用：[inputDraft] 走 flatMapLatest，会话切换的发射是异步的，
+     * 切换瞬间流里仍是上一个会话的旧草稿；直接查表永远拿到当前会话的正确值，
+     * 避免旧会话草稿闪进新会话输入框（极快输入时甚至会把旧草稿写进新会话）。
+     */
+    fun draftOf(sessionId: String?): String =
+        sessionId?.takeIf(String::isNotBlank)?.let { _inputDrafts.value[it] }.orEmpty()
 
     /**
      * 工具调用（分组头与单条工具卡片）的手动展开态：key = 分组 key（`toolgroup:<组内首条消息 id>`）
@@ -698,6 +731,9 @@ class AIAgentViewModel @Inject constructor(
     }
 
     private val _streamingTexts = MutableStateFlow<Map<String, String?>>(emptyMap())
+    /** 流式正文发射节流簿记：上次发射时刻 + 被节流窗口暂存的最新值（见 STREAMING_EMIT_MIN_INTERVAL_MS）。 */
+    private val lastStreamingTextEmitAt = mutableMapOf<String, Long>()
+    private val pendingStreamingTexts = mutableMapOf<String, String?>()
     val streamingText: StateFlow<String?> = _currentSessionId
         .flatMapLatest { id ->
             if (id == null) flowOf(null)
@@ -709,9 +745,25 @@ class AIAgentViewModel @Inject constructor(
         // 增量去重：相同值不触发 emission，避免 delta 期间每秒 ~16 次 Map 复制 + 重组
         val current = _streamingTexts.value[sessionId]
         if (text == current) return
+        if (text != null) {
+            // 时间窗口节流：累积文本单调增长，丢中间值零损失；null 清空直通保证状态切换即时。
+            val now = System.currentTimeMillis()
+            if (now - (lastStreamingTextEmitAt[sessionId] ?: 0L) < STREAMING_EMIT_MIN_INTERVAL_MS) {
+                pendingStreamingTexts[sessionId] = text
+                return
+            }
+            lastStreamingTextEmitAt[sessionId] = now
+        } else {
+            lastStreamingTextEmitAt.remove(sessionId)
+        }
+        pendingStreamingTexts.remove(sessionId)
         _streamingTexts.value = if (text == null) _streamingTexts.value - sessionId
         else _streamingTexts.value + (sessionId to text)
     }
+
+    /** 最新流式正文（含节流窗口暂存的待发射值）：停止/收尾路径读取，保证落库部分内容不缺尾部。 */
+    private fun latestStreamingTextOf(sessionId: String): String? =
+        pendingStreamingTexts[sessionId] ?: _streamingTexts.value[sessionId]
 
     private val _reasoningTimings = MutableStateFlow<Map<String, Pair<Long, Long?>>>(emptyMap())
     val reasoningTiming: StateFlow<Pair<Long, Long?>?> = _currentSessionId
@@ -721,6 +773,9 @@ class AIAgentViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     private val _streamingReasonings = MutableStateFlow<Map<String, String?>>(emptyMap())
+    /** 思考流发射节流簿记（与正文流同理，见 STREAMING_EMIT_MIN_INTERVAL_MS）。 */
+    private val lastStreamingReasoningEmitAt = mutableMapOf<String, Long>()
+    private val pendingStreamingReasonings = mutableMapOf<String, String?>()
     val streamingReasoning: StateFlow<String?> = _currentSessionId
         .flatMapLatest { id ->
             if (id == null) flowOf(null)
@@ -732,9 +787,24 @@ class AIAgentViewModel @Inject constructor(
         // 增量去重 + 修复：清空 reasoning 文本不应清空 reasoning timings（timings 在 finishReasoning / 会话重置时管理）
         val current = _streamingReasonings.value[sessionId]
         if (text == current) return
+        if (text != null) {
+            val now = System.currentTimeMillis()
+            if (now - (lastStreamingReasoningEmitAt[sessionId] ?: 0L) < STREAMING_EMIT_MIN_INTERVAL_MS) {
+                pendingStreamingReasonings[sessionId] = text
+                return
+            }
+            lastStreamingReasoningEmitAt[sessionId] = now
+        } else {
+            lastStreamingReasoningEmitAt.remove(sessionId)
+        }
+        pendingStreamingReasonings.remove(sessionId)
         _streamingReasonings.value = if (text == null) _streamingReasonings.value - sessionId
         else _streamingReasonings.value + (sessionId to text)
     }
+
+    /** 最新思考流文本（含节流窗口暂存值）：停止路径落库部分思考用。 */
+    private fun latestStreamingReasoningOf(sessionId: String): String? =
+        pendingStreamingReasonings[sessionId] ?: _streamingReasonings.value[sessionId]
 
     /** 按 sessionId 维护的重试状态；流式恢复或结束后置 null。 */
     private val _retryStates = MutableStateFlow<Map<String, RetryState?>>(emptyMap())
@@ -1030,6 +1100,21 @@ class AIAgentViewModel @Inject constructor(
         const val AGENT_COMPLETE_NOTIFICATION_ID = 100
         /** 通知栏小段总结最大字符数：超长截断加省略号，保证通知正文一行能看完。 */
         const val NOTIFICATION_SUMMARY_MAX = 48
+        /**
+         * 流式正文/思考的 UI 发射节流窗口。快模型的 delta 可达 20-50 次/秒，每次 emission 都会让
+         * 聊天尾部 __active__ item 全量重组（前缀检查 + 两个 LaunchedEffect 重启 + 打字机推进），
+         * 是 AI 高频输出/工具执行期间全局掉帧的持续负载源。累积文本单调增长，窗口内丢掉中间值
+         * 零损失（下一个 delta 是超集）；打字机渲染有自适应速率，视觉不需要 20-50Hz 的源数据。
+         * null（清空/切换/收尾）不节流直通。被节流的最新值存 [pendingStreamingTexts]，
+         * 停止路径（stopAgentSession 落库部分内容）通过 latestStreamingTextOf 读到含暂存值的最新文本。
+         */
+        const val STREAMING_EMIT_MIN_INTERVAL_MS = 80L
+        /**
+         * 草稿落盘防抖窗口：内存 Map 即时更新，磁盘写合并到停顿后一次（见 updateInputDraft）。
+         * 超过该窗口未落盘即进程被杀会丢最多 300ms 的击键——SharedPreferences.apply 本就
+         * 不承诺落盘即时性，此取舍换取输入期间零高频磁盘写。
+         */
+        const val DRAFT_PERSIST_DEBOUNCE_MS = 300L
         /** wakeLock 超时保险：构建、装依赖类工具动辄十几分钟，给足 60 分钟；任务正常结束会主动释放。 */
         const val KEEPALIVE_TIMEOUT_MS = 60 * 60 * 1000L
         /** 从后台任务通知文本中提取 <title> 内容，供系统通知正文展示。 */
@@ -2017,8 +2102,13 @@ class AIAgentViewModel @Inject constructor(
         _queuedRequests.value = emptyMap()
         _runningCommandSessions.value = emptySet()
         _agentStates.value = _agentStates.value.mapValues { AgentUIState.Idle }
+        // 直接清底层流并同步清发射节流簿记（pending/emitAt）
         _streamingTexts.value = emptyMap()
         _streamingReasonings.value = emptyMap()
+        pendingStreamingTexts.clear()
+        pendingStreamingReasonings.clear()
+        lastStreamingTextEmitAt.clear()
+        lastStreamingReasoningEmitAt.clear()
         _reasoningTimings.value = emptyMap()
         _runningTools.value = emptyMap()
         _retryStates.value = emptyMap()
@@ -2043,9 +2133,10 @@ class AIAgentViewModel @Inject constructor(
         val isActiveSubAgent = sessionId in subAgentEventBus.activeSubSessionIds.value
         if (isActiveSubAgent && !stoppingSubAgentIds.add(sessionId)) return
         // Snapshot before cancellation: the child may finish synchronously on Main.immediate.
+        // 走 latestStreamingTextOf：含发射节流窗口暂存的最新值，保证落库的部分内容不缺最后几字。
         val runningTools = _runningTools.value[sessionId]?.values?.toList() ?: emptyList()
-        val streamingText = _streamingTexts.value[sessionId]
-        val streamingReasoning = _streamingReasonings.value[sessionId]
+        val streamingText = latestStreamingTextOf(sessionId)
+        val streamingReasoning = latestStreamingReasoningOf(sessionId)
         val pendingPermission = toolPermissionManager.pendingForSession(sessionId)
         val stoppedText = context.getString(R.string.agent_stopped_by_user)
         val pendingNotifs = agentNotificationCenter.pendingCount(sessionId)
@@ -2802,7 +2893,8 @@ class AIAgentViewModel @Inject constructor(
             sessionJobs.remove(sid)
             setAgentState(sid, AgentUIState.Idle)
             _runningTools.value = _runningTools.value - sid
-            _streamingTexts.value = _streamingTexts.value - sid
+            // 走 setter 清流：一并清掉发射节流的 pending/emitAt 簿记
+            setStreamingText(sid, null)
             setStreamingReasoning(sid, null)
             setCompacting(sid, false)
             setRetryState(sid, null)
@@ -2827,8 +2919,9 @@ class AIAgentViewModel @Inject constructor(
         _messageLimit.value = _messageLimit.value - sessionId
         loadedMessageLimits.remove(sessionId)
         turnMessageKeys.remove(sessionId)
-        _streamingTexts.value = _streamingTexts.value - sessionId
-        _streamingReasonings.value = _streamingReasonings.value - sessionId
+        // 走 setter 清流：一并清掉发射节流的 pending/emitAt 簿记
+        setStreamingText(sessionId, null)
+        setStreamingReasoning(sessionId, null)
         _reasoningTimings.value = _reasoningTimings.value - sessionId
         _runningTools.value = _runningTools.value - sessionId
         _preparingTools.value = _preparingTools.value - sessionId
