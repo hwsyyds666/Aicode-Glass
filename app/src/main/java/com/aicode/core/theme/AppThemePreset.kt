@@ -61,6 +61,37 @@ data class AppThemePreset(
             dark = AppThemeColors(DarkColorScheme, DarkSemanticColors)
         )
 
+        /**
+         * OLED 纯黑：页面底色取 **#000000**——OLED 屏上该像素完全不发光，既是真黑也最省电。
+         *
+         * 卡片/浮层/胶囊仍保留极低灰阶（#0C0C0C / #161616）与描边（#2A2A2A）来拉层次：
+         * 一片死黑会让卡片、输入框、分割线全部糊在一起，分不清边界。这两个灰阶在
+         * OLED 上肉眼几乎仍是黑的，但足以让层级可辨。
+         *
+         * 浅色侧沿用默认配色：本主题是深色取向，白天强行套一套怪异的白底没有意义。
+         */
+        val OLED = AppThemePreset(
+            id = "oled",
+            nameRes = R.string.theme_preset_oled,
+            light = AppThemeColors(LightColorScheme, LightSemanticColors),
+            // 关键取值：background 与 onBackground 之外的一切都靠极低灰阶拉开层次。
+            dark = deriveThemeColors(
+                AppThemeSeed(
+                    primary = Color(0xFF60A5FA),
+                    secondary = Color(0xFF7DD3FC),
+                    tertiary = Color(0xFF22C55E),
+                    background = Color(0xFF000000), // 页面底色：真·纯黑
+                    surface = Color(0xFF0C0C0C), // 卡片/底栏：极暗灰，保留一丝 elevation
+                    surfaceVariant = Color(0xFF161616), // 输入框/胶囊/悬浮层
+                    onSurface = Color(0xFFF2F2F2),
+                    onSurfaceVariant = Color(0xFFA3A3A3),
+                    outline = Color(0xFF6B6B6B),
+                    outlineVariant = Color(0xFF2A2A2A) // 分割线：纯黑上唯一可靠的边界
+                ),
+                dark = true
+            )
+        )
+
         /** 咖啡：暖赤陶 + 米白纸感，取自 Anthropic 品牌色。 */
         val COFFEE = fromSeeds(
             id = "coffee",
@@ -151,7 +182,7 @@ data class AppThemePreset(
             )
         )
 
-        val ALL_PRESETS = listOf(DEFAULT, COFFEE, GRAPHITE, FOREST)
+        val ALL_PRESETS = listOf(DEFAULT, OLED, COFFEE, GRAPHITE, FOREST)
 
         fun findById(id: String?): AppThemePreset =
             ALL_PRESETS.firstOrNull { it.id == id } ?: DEFAULT

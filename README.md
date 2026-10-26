@@ -188,7 +188,7 @@ AI 改代码前，系统自动记录文件快照。不满意？**一键回滚**�
 
 ### 11. Liquid Glass 液态玻璃 UI
 
-基于 [PrismalAGSL](https://github.com/styropyr0/PrismalAGSL) 的 AGSL 着色器实现折射、色散与渐变玻璃效果。悬浮玻璃标题栏、液态玻璃卡片、动态模糊背景。支持明暗主题、预设配色、莫奈取色（Material You）、自定义背景图。中英双语界面，平板与大屏自适应布局。
+基于 [PrismalAGSL](https://github.com/styropyr0/PrismalAGSL) 的 AGSL 着色器实现折射、色散与渐变玻璃效果。悬浮玻璃标题栏、液态玻璃卡片、动态模糊背景。支持明暗主题、预设配色（默认蓝 / OLED 纯黑 / 咖啡 / 石墨 / 森林）、莫奈取色（Material You）、自定义背景图。中英双语界面，平板与大屏自适应布局。
 
 ## 截图
 

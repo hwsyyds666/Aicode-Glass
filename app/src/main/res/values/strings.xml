@@ -368,6 +368,7 @@
     <string name="theme_mode_section">明暗模式</string>
     <string name="theme_preset_section">配色方案</string>
     <string name="theme_preset_default">默认蓝</string>
+    <string name="theme_preset_oled">OLED 纯黑</string>
     <string name="theme_preset_coffee">咖啡</string>
     <string name="theme_preset_graphite">石墨</string>
     <string name="theme_preset_forest">森林</string>

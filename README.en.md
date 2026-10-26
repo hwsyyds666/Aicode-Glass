@@ -188,7 +188,7 @@ Supports connecting **Model Context Protocol** servers — local (stdio) or remo
 
 ### 11. Liquid Glass UI
 
-AGSL shader-based refraction, chromatic dispersion, and gradient glass effects powered by [PrismalAGSL](https://github.com/styropyr0/PrismalAGSL). Floating glass title bar, liquid glass cards, dynamic blur backgrounds. Supports light/dark themes, preset color schemes, Material You colors, custom background images. Bilingual (Chinese/English) UI; tablet and large-screen adaptive layout.
+AGSL shader-based refraction, chromatic dispersion, and gradient glass effects powered by [PrismalAGSL](https://github.com/styropyr0/PrismalAGSL). Floating glass title bar, liquid glass cards, dynamic blur backgrounds. Supports light/dark themes, preset color schemes (Default Blue / OLED Black / Coffee / Graphite / Forest), Material You colors, custom background images. Bilingual (Chinese/English) UI; tablet and large-screen adaptive layout.
 
 ## Screenshots
 
