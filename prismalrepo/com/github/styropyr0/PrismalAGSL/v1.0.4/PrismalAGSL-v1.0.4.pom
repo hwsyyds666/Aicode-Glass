@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  PrismalAGSL v1.0.4 的本地镜像 POM。
+
+  来源：https://jitpack.io/com/github/styropyr0/PrismalAGSL/v1.0.4/PrismalAGSL-v1.0.4.aar
+  上游仓库：https://github.com/styropyr0/PrismalAGSL（MIT License）
+
+  为什么本地化：JitPack 是「按需现编」仓库，Gradle 直连时会偶发解析失败
+  （实测 ./gradlew :app:dependencies 报 com.github.styropyr0:PrismalAGSL:v1.0.4 FAILED，
+  而同一 URL 用 curl 可正常取回 611KB AAR）。构建一次耗时 1-3 小时，
+  不能赌在远端构建上，故把 AAR 镜像进本地 Maven 仓库，坐标保持不变以便日后切回远端。
+
+  为什么不直接复用上游 POM：上游 POM 的 <dependencies> 里
+  androidx.compose.foundation / ui / ui-graphics / runtime 四项**没有版本号**，
+  依赖 <dependencyManagement> 导入的 compose-bom:2026.06.01 提供版本。
+  该 BOM 版本与本项目（2026.01.00）不一致，且本项目已通过自己的 BOM 引入全套 Compose，
+  故本 POM 不声明任何依赖，由 app 模块现有的 Compose 依赖满足编译与运行。
+
+  运行期必需（本 POM 未声明，已在 app/build.gradle.kts 显式添加）：
+    androidx.startup:startup-runtime:1.2.0
+  —— AAR 的 AndroidManifest 声明了 androidx.startup.InitializationProvider，
+  AGSL shader 资源由 PrismalAgslInitializer 在启动时加载。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.github.styropyr0</groupId>
+  <artifactId>PrismalAGSL</artifactId>
+  <version>v1.0.4</version>
+  <packaging>aar</packaging>
+  <name>Prismal</name>
+  <description>Compose liquid glass library with AGSL refraction and legacy fallbacks (local mirror).</description>
+  <url>https://github.com/styropyr0/PrismalAGSL</url>
+  <licenses>
+    <license>
+      <name>The Apache License, Version 2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+    </license>
+  </licenses>
+</project>

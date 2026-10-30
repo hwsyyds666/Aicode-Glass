@@ -1,0 +1,11 @@
+ALTER TABLE `openai_accounts` ADD COLUMN `chatgptAccountId` TEXT;
+ALTER TABLE `openai_accounts` ADD COLUMN `planType` TEXT;
+ALTER TABLE `openai_accounts` ADD COLUMN `quotaPrimaryUsedPercent` INTEGER;
+ALTER TABLE `openai_accounts` ADD COLUMN `quotaPrimaryWindowSeconds` INTEGER;
+ALTER TABLE `openai_accounts` ADD COLUMN `quotaPrimaryResetAt` INTEGER;
+ALTER TABLE `openai_accounts` ADD COLUMN `quotaSecondaryUsedPercent` INTEGER;
+ALTER TABLE `openai_accounts` ADD COLUMN `quotaSecondaryWindowSeconds` INTEGER;
+ALTER TABLE `openai_accounts` ADD COLUMN `quotaSecondaryResetAt` INTEGER;
+ALTER TABLE `openai_accounts` ADD COLUMN `quotaUpdatedAt` INTEGER;
+ALTER TABLE `openai_accounts` ADD COLUMN `quotaError` TEXT;
+ALTER TABLE `openai_accounts` ADD COLUMN `usageCooldownUntil` INTEGER;
